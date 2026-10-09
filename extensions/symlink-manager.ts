@@ -43,6 +43,12 @@ export function getAvailableExtensions(monorepoRoot: string): ExtensionDescripto
 			description: "Colored banner + auto-naming for Pi sessions",
 			path: join(monorepoRoot, "extensions", "session-banner"),
 		},
+		{
+			name: "session-attention",
+			label: "session-attention",
+			description: "Desktop notifications when Pi needs your attention",
+			path: join(monorepoRoot, "extensions", "session-attention"),
+		},
 	];
 }
 

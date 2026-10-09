@@ -43,11 +43,13 @@ test("symlink-manager: getAvailableExtensions returns correct extensions", async
 	const { getAvailableExtensions } = await import("../extensions/symlink-manager.ts");
 	const exts = getAvailableExtensions("/fake/path");
 
-	assert.equal(exts.length, 2);
+	assert.equal(exts.length, 3);
 	assert.equal(exts[0].name, "tmux-feedback");
 	assert.equal(exts[1].name, "session-banner");
+	assert.equal(exts[2].name, "session-attention");
 	assert.equal(exts[0].description, "Inline feedback for tmux scrollback selection");
 	assert.equal(exts[1].description, "Colored banner + auto-naming for Pi sessions");
+	assert.equal(exts[2].description, "Desktop notifications when Pi needs your attention");
 });
 
 test("symlink-manager: isExtensionEnabled returns false when symlink doesn't exist", async () => {
