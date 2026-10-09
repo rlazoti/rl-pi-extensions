@@ -33,19 +33,18 @@ Run `/rl-extensions` in Pi to open the TUI manager where you can:
 - Apply changes with Enter
 - Cancel with Esc
 
-Changes take effect after `/reload`.
+**Changes take effect after `/reload`.** Extensions are enabled/disabled via symlinks in `~/.pi/agent/extensions/`. Only enabled extensions appear in Pi's `[Extensions]` list.
 
 ### Manual Config
 
-Extensions are configured in `~/.pi/agent/rl-extensions.json`:
+Extensions are managed via symlinks in `~/.pi/agent/extensions/`:
 
-```json
-{
-  "enabled": {
-    "tmux-feedback": true,
-    "session-banner": true
-  }
-}
+```bash
+# Enable an extension
+ln -s /path/to/rl-pi-extensions/extensions/tmux-feedback ~/.pi/agent/extensions/tmux-feedback
+
+# Disable an extension
+rm ~/.pi/agent/extensions/tmux-feedback
 ```
 
 ## Structure
@@ -54,15 +53,15 @@ Extensions are configured in `~/.pi/agent/rl-extensions.json`:
 rl-pi-extensions/
 ├── package.json                    # Single package with all extensions
 ├── extensions/
-│   ├── config-manager.ts           # Shared config loading
+│   ├── symlink-manager.ts          # Symlink management logic
 │   ├── tmux-feedback/
-│   │   ├── index.ts                # Wrapper (checks config)
+│   │   ├── index.ts                # Extension entry point
 │   │   └── implementation.ts       # Real extension code
 │   ├── session-banner/
-│   │   ├── index.ts                # Wrapper (checks config)
+│   │   ├── index.ts                # Extension entry point
 │   │   └── implementation.ts       # Real extension code
 │   └── rl-extensions/
 │       └── index.ts                # TUI extension manager
 ```
 
-Each extension has a thin wrapper (`index.ts`) that checks the config and only loads the real implementation if enabled.
+Each extension loads directly — no wrapper needed. The manager creates symlinks in `~/.pi/agent/extensions/` to enable/disable extensions.

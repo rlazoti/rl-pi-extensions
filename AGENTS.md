@@ -41,36 +41,40 @@ After changes, reload Pi with `/reload` or restart Pi entirely.
 
 ### Extension Structure
 
-Each extension follows the wrapper pattern:
+Each extension loads directly — no wrapper pattern:
 
 ```
 extensions/
-├── config-manager.ts           # Shared config loading (load/save/enable/disable)
+├── symlink-manager.ts              # Shared symlink management
 ├── <extension-name>/
-│   ├── index.ts                # Wrapper — checks config, delegates to implementation
-│   └── implementation.ts       # Real extension code (or multiple files)
+│   ├── index.ts                    # Entry point (exports implementation)
+│   └── implementation.ts           # Real extension code (or multiple files)
 └── rl-extensions/
-    └── index.ts                # TUI manager extension
+    └── index.ts                    # TUI manager extension
 ```
 
-### Wrapper Pattern
+### Entry Point Pattern
 
-The wrapper (`index.ts`) checks `~/.pi/agent/rl-extensions.json` at load time:
-- **Enabled:** imports and exports the real implementation's default factory
-- **Disabled:** exports a no-op function (`function() {}`)
+Simple re-export of the implementation:
 
 ```typescript
-import { loadConfig, isExtensionEnabled } from "../config-manager.ts";
-
-const config = loadConfig();
-let factory: any;
-if (isExtensionEnabled(config, "tmux-feedback")) {
-  factory = require("./implementation.js").default;
-} else {
-  factory = function (_pi: any) { /* disabled */ };
-}
+import factory from "./implementation.js";
 export default factory;
 ```
+
+### Symlink-Based Management
+
+Extensions are enabled/disabled via symlinks in `~/.pi/agent/extensions/`:
+
+```bash
+# Enable
+ln -s /path/to/rl-pi-extensions/extensions/tmux-feedback ~/.pi/agent/extensions/tmux-feedback
+
+# Disable
+rm ~/.pi/agent/extensions/tmux-feedback
+```
+
+The manager (`rl-extensions`) creates/removes these symlinks. Only symlinked extensions appear in Pi's `[Extensions]` list.
 
 ### TUI Guidelines
 
@@ -82,10 +86,9 @@ export default factory;
 
 ### Config Management
 
-- Single source of truth: `~/.pi/agent/rl-extensions.json`
-- Default state: unconfigured extensions are **disabled**
-- Config is loaded at extension load time, not cached across reloads
-- **Default state: unconfigured extensions are disabled.** Users explicitly enable what they want.
+- **No config file needed** — symlinks are the source of truth
+- Extensions are **disabled by default** (no symlink)
+- Users explicitly enable via `/rl-extensions` or manual symlink creation
 
 ---
 
@@ -93,8 +96,7 @@ export default factory;
 
 - **Run `npm test`** before every commit. All tests must pass.
 - **Test coverage targets:**
-  - `config-manager.test.ts`: load/save, valid/invalid JSON, enable/disable logic
-  - `wrapper.test.ts`: enabled/disabled detection, isolation between extensions
+  - `symlink-manager.test.ts`: symlink creation/removal, toggle logic, directory structure
   - `manager.test.ts`: command registration, handler existence (source inspection since Pi deps unavailable)
 - **Test isolation:** Each test creates its own temp directory. Clean up in the same test.
 - **No regressions:** When fixing a bug, add a test that reproduces it first.
