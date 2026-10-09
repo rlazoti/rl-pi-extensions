@@ -17,6 +17,6 @@
 		]
 	},
 	"scripts": {
-		"test": "echo \"No tests yet\""
+		"test": "node --experimental-strip-types --test tests/*.test.ts"
 	}
 }

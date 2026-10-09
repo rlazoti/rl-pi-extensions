@@ -2,7 +2,7 @@
  * tmux-feedback — wrapper that checks config before loading
  */
 
-import { loadConfig, isExtensionEnabled } from "../config-manager.js";
+import { loadConfig, isExtensionEnabled } from "../config-manager.ts";
 
 const config = loadConfig();
 

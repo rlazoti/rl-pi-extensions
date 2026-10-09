@@ -7,7 +7,7 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { loadConfig, saveConfig, isExtensionEnabled, type ExtensionInfo } from "../config-manager.js";
+import { loadConfig, saveConfig, isExtensionEnabled, type ExtensionInfo } from "../config-manager.ts";
 
 // Registry of all available extensions
 const EXTENSIONS: ExtensionInfo[] = [
