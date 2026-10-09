@@ -20,6 +20,12 @@ const EXTENSIONS: ExtensionInfo[] = [
 		description: "Inline feedback for tmux scrollback selection",
 		enabled: false,
 	},
+	{
+		name: "session-banner",
+		label: "session-banner",
+		description: "Colored banner + auto-naming for Pi sessions",
+		enabled: false,
+	},
 ];
 
 export default function managerExtension(pi: ExtensionAPI) {

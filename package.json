@@ -1,7 +1,7 @@
 {
 	"name": "rl-pi-extensions",
 	"version": "0.1.0",
-	"description": "Personal Pi extensions — tmux feedback",
+	"description": "Personal Pi extensions — tmux feedback, session banner",
 	"type": "module",
 	"license": "MIT",
 	"author": "Rodrigo Lazoti",
@@ -13,6 +13,7 @@
 	"pi": {
 		"extensions": [
 			"./extensions/tmux-feedback/index.ts",
+			"./extensions/session-banner/index.ts",
 			"./extensions/rl-extensions/index.ts"
 		]
 	},
