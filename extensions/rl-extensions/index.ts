@@ -55,17 +55,15 @@ async function showExtensionManager(ctx: ExtensionCommandContext): Promise<void>
 					? theme.fg("accent", ext.label)
 					: theme.fg("muted", ext.label);
 
-				// Highlight selected item
+				// Show name and description on same line: ● name — description
 				let line: string;
 				if (isSelected) {
-					line = theme.style(`▶ ${marker} ${label}`, { fg: "accent" });
+					line = theme.style(`▶ ${marker} ${label} — ${ext.description}`, { fg: "accent" });
 				} else {
-					line = `  ${marker} ${label}`;
+					line = `  ${marker} ${label} — ${ext.description}`;
 				}
 
 				container.addChild(new Text(line));
-				container.addChild(new Text(theme.fg("dim", `    ${ext.description}`)));
-				container.addChild(new Text(""));
 			});
 
 			// Done option
