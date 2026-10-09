@@ -43,8 +43,8 @@ async function showExtensionManager(ctx: ExtensionCommandContext): Promise<void>
 		const render = () => {
 			container.children.length = 0;
 			container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
-			container.addChild(new Text(theme.fg("accent", theme.bold("  rl-pi-extensions  ")), 1, 0));
-			container.addChild(new Text(theme.fg("dim", "Space to toggle • Enter on Done to apply"), 1, 0));
+			container.addChild(new Text(theme.fg("accent", theme.bold("  rl-pi-extensions  ")), 1, 1));
+			container.addChild(new Text(theme.fg("dim", "Space to toggle • Enter on Done to apply"), 1, 1));
 
 			EXTENSIONS.forEach((ext, index) => {
 				const enabled = isExtensionEnabled(ext.name);
@@ -70,7 +70,7 @@ async function showExtensionManager(ctx: ExtensionCommandContext): Promise<void>
 			const doneLine = doneSelected
 				? theme.style("▶ Done", { fg: "accent", bold: true })
 				: "  Done";
-			container.addChild(new Text(doneLine, 1, 0));
+			container.addChild(new Text(doneLine, 1, 1));
 
 			container.addChild(
 				new Text(theme.fg("dim", "↑↓ navigate • space toggle • enter apply • esc cancel"), 1, 0),
