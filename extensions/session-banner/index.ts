@@ -1,16 +1,6 @@
 /**
- * session-banner — wrapper that checks config before loading
+ * session-banner — colored banner + auto-naming for Pi sessions
  */
 
-import { loadConfig, isExtensionEnabled } from "../config-manager.ts";
-
-const config = loadConfig();
-
-let factory: any;
-if (isExtensionEnabled(config, "session-banner")) {
-	factory = require("./implementation.js").default;
-} else {
-	factory = function (_pi: any) { /* disabled */ };
-}
-
+import factory from "./implementation.js";
 export default factory;
