@@ -5,6 +5,8 @@ import { join, dirname, relative } from "node:path";
 
 // Test that all extension entry points have valid import paths
 // This catches file naming errors before they hit production
+// Note: Only rl-extensions is listed in package.json; other extensions
+// are discovered via symlinks in ~/.pi/agent/extensions/
 test("extensions: all entry points have valid import paths", async () => {
 	const extensionsDir = join(process.cwd(), "extensions");
 	const entries = readdirSync(extensionsDir);

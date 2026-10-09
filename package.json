@@ -12,8 +12,6 @@
 	},
 	"pi": {
 		"extensions": [
-			"./extensions/tmux-feedback/index.ts",
-			"./extensions/session-banner/index.ts",
 			"./extensions/rl-extensions/index.ts"
 		]
 	},
