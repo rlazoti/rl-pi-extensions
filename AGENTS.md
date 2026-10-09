@@ -54,6 +54,9 @@ extensions/
 ├── session-attention/
 │   ├── index.ts                    # Entry point
 │   └── implementation.ts           # Real extension code
+├── snippets/
+│   ├── index.ts                    # Entry point
+│   └── ...                         # Multiple implementation files
 └── rl-extensions/
     └── index.ts                    # TUI extension manager
 ```
