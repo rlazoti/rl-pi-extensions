@@ -2,5 +2,8 @@
  * snippets — insert snippets into the current draft
  */
 
-import factory from "./extension.js";
-export default factory;
+import { registerSnippetsExtension } from "./extension.js";
+
+export default function snippetsExtension(pi: any): void {
+	registerSnippetsExtension(pi);
+}
