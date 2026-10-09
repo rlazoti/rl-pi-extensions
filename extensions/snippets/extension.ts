@@ -198,6 +198,21 @@ export function registerSnippetsExtension(
 		description: "Insert snippets into the current draft",
 		handler: async (_args, ctx) => controller.open(ctx),
 	});
+	pi.registerShortcut(SNIPPETS_SHORTCUT, {
+		description: "Insert snippets into the current draft",
+		handler: async (ctx) => controller.open(ctx),
+	});
+	pi.registerCommand("snippets-install-tmux-binding", {
+		description: "Install tmux key binding for the snippets shortcut",
+		handler: async (_args, ctx) => {
+			const result = await pi.exec("tmux", ["bind-key", "-T", "copy-mode", SNIPPETS_SHORTCUT, "send-keys", "-X", "copy-selection-and-cancel"]);
+			if (result.code === 0) {
+				ctx.ui.notify(`Installed tmux binding for ${SNIPPETS_SHORTCUT} in copy-mode`, "info");
+			} else {
+				ctx.ui.notify(`Failed to install tmux binding: ${result.stderr.trim() || result.stdout.trim()}`.trim(), "error");
+			}
+		},
+	});
 	pi.on("session_start", (_event, ctx) => controller.startSession(ctx));
 	pi.on("session_shutdown", (_event, ctx) => controller.shutdownSession(ctx));
 	return controller;
