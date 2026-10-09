@@ -13,9 +13,9 @@ import {
 	type TUI,
 } from "@earendil-works/pi-tui";
 
-import type { SnippetCatalog } from "./catalog.ts";
-import { displaySafe } from "./display-safe.ts";
-import { PickerState } from "./picker-state.ts";
+import type { SnippetCatalog } from "./catalog.js";
+import { displaySafe } from "./display-safe.js";
+import { PickerState } from "./picker-state.js";
 
 export type SnippetPickerResult = Readonly<{ kind: "cancel" }> | Readonly<{ kind: "insert"; text: string }>;
 

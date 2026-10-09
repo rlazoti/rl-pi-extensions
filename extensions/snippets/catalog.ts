@@ -4,8 +4,8 @@ import { basename, join } from "node:path";
 
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
-import { displaySafe } from "./display-safe.ts";
-import { assertTerminalSafe, parsePlaceholderTemplate, type ParsedPlaceholderTemplate } from "./placeholders.ts";
+import { displaySafe } from "./display-safe.js";
+import { assertTerminalSafe, parsePlaceholderTemplate, type ParsedPlaceholderTemplate } from "./placeholders.js";
 
 export const DEFAULT_SNIPPET_DIRECTORY = join(homedir(), ".pi", "agent", "snippets");
 

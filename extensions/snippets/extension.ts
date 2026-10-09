@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-import { loadSnippetCatalog, type CatalogDiagnostic, type SnippetCatalog } from "./catalog.ts";
-import { displaySafe } from "./display-safe.ts";
+import { loadSnippetCatalog, type CatalogDiagnostic, type SnippetCatalog } from "./catalog.js";
+import { displaySafe } from "./display-safe.js";
 import {
 	EditorInsertionAdapter,
 	type EditorCaptureResult,
@@ -9,8 +9,8 @@ import {
 	type EditorInitializationResult,
 	type EditorInsertResult,
 	type EditorInsertionSnapshot,
-} from "./editor-adapter.ts";
-import { openSnippetPicker, type SnippetPickerOptions, type SnippetPickerResult } from "./picker.ts";
+} from "./editor-adapter.js";
+import { openSnippetPicker, type SnippetPickerOptions, type SnippetPickerResult } from "./picker.js";
 
 export const SNIPPETS_SHORTCUT = "alt+shift+s" as const;
 export const SNIPPETS_WIDGET_KEY = "pi-snippets" as const;

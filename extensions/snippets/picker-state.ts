@@ -1,5 +1,5 @@
-import type { CatalogSnippet, SnippetCatalog } from "./catalog.ts";
-import type { PlaceholderField } from "./placeholders.ts";
+import type { CatalogSnippet, SnippetCatalog } from "./catalog.js";
+import type { PlaceholderField } from "./placeholders.js";
 
 export type PickerStage = "browse" | "fields";
 
