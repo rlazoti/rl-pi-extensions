@@ -51,6 +51,9 @@ extensions/
 ├── session-banner/
 │   ├── index.ts                    # Entry point
 │   └── implementation.ts           # Real extension code
+├── session-attention/
+│   ├── index.ts                    # Entry point
+│   └── implementation.ts           # Real extension code
 └── rl-extensions/
     └── index.ts                    # TUI extension manager
 ```

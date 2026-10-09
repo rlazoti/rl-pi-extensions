@@ -8,6 +8,7 @@ Personal Pi coding agent extensions, managed as a single package with a TUI for 
 |-----------|-------------|
 | **tmux-feedback** | Inline feedback for tmux scrollback selection |
 | **session-banner** | Colored banner + auto-naming for Pi sessions |
+| **session-attention** | Desktop notifications when Pi needs your attention |
 
 More extensions coming soon (emacs-feedback, snippets, etc.).
 
@@ -58,6 +59,9 @@ rl-pi-extensions/
 │   │   ├── index.ts                # Extension entry point
 │   │   └── implementation.ts       # Real extension code
 │   ├── session-banner/
+│   │   ├── index.ts                # Extension entry point
+│   │   └── implementation.ts       # Real extension code
+│   ├── session-attention/
 │   │   ├── index.ts                # Extension entry point
 │   │   └── implementation.ts       # Real extension code
 │   └── rl-extensions/
