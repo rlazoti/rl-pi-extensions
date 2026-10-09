@@ -13,7 +13,7 @@
 	"pi": {
 		"extensions": [
 			"./extensions/tmux-feedback/index.ts",
-			"./extensions/manager/index.ts"
+			"./extensions/rl-extensions/index.ts"
 		]
 	},
 	"scripts": {

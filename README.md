@@ -60,7 +60,7 @@ rl-pi-extensions/
 │   ├── tmux-feedback/
 │   │   ├── index.ts                # Wrapper (checks config)
 │   │   └── implementation.ts       # Real extension code
-│   └── manager/
+│   └── rl-extensions/
 │       └── index.ts                # TUI extension manager
 ```
 
