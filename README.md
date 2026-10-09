@@ -33,7 +33,7 @@ Run `/rl-extensions` in Pi to open the TUI manager where you can:
 - Apply changes with Enter
 - Cancel with Esc
 
-**Changes take effect after `/reload`.** Extensions are enabled/disabled via symlinks in `~/.pi/agent/extensions/`. Only enabled extensions appear in Pi's `[Extensions]` list.
+**Changes take effect after `/reload`.** Extensions are enabled/disabled via symlinks in `~/.pi/agent/extensions/`. Only symlinked extensions appear in Pi's `[Extensions]` list.
 
 ### Manual Config
 
@@ -47,11 +47,11 @@ ln -s /path/to/rl-pi-extensions/extensions/tmux-feedback ~/.pi/agent/extensions/
 rm ~/.pi/agent/extensions/tmux-feedback
 ```
 
-## Structure
+## Architecture
 
 ```
 rl-pi-extensions/
-├── package.json                    # Single package with all extensions
+├── package.json                    # Only lists rl-extensions (manager)
 ├── extensions/
 │   ├── symlink-manager.ts          # Symlink management logic
 │   ├── tmux-feedback/
@@ -64,4 +64,4 @@ rl-pi-extensions/
 │       └── index.ts                # TUI extension manager
 ```
 
-Each extension loads directly — no wrapper needed. The manager creates symlinks in `~/.pi/agent/extensions/` to enable/disable extensions.
+**Only `rl-extensions` is listed in `package.json`.** The manager creates symlinks in `~/.pi/agent/extensions/` which Pi discovers automatically. Disabled extensions are never loaded by Pi.

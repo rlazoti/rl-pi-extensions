@@ -29,11 +29,10 @@ After changes, reload Pi with `/reload` or restart Pi entirely.
 ## 3. Coding Conventions
 
 - **ES modules:** Use `import`/`export` syntax. Files use `.ts` extension.
-- **Import paths:** Use `.ts` extension in imports (jiti resolves `.js` to `.ts` at runtime, but tests use `node --experimental-strip-types` which requires `.ts`).
-- **Type safety:** Use TypeScript interfaces for public APIs. `any` is acceptable only in wrapper files that delegate to implementations.
+- **Import paths:** Use `.js` extension in imports (jiti resolves `.js` to `.ts` at runtime).
+- **Type safety:** Use TypeScript interfaces for public APIs.
 - **Naming:** Extensions use kebab-case (`tmux-feedback`, `rl-extensions`). Directories match.
-- **Config files:** Store in `~/.pi/agent/` with descriptive names (`rl-extensions.json`).
-- **No side effects in wrappers:** Wrapper `index.ts` files should only check config and delegate — no business logic.
+- **No side effects:** Extension entry points should be simple re-exports.
 
 ---
 
@@ -41,16 +40,19 @@ After changes, reload Pi with `/reload` or restart Pi entirely.
 
 ### Extension Structure
 
-Each extension loads directly — no wrapper pattern:
+Each extension has a simple entry point that re-exports the implementation:
 
 ```
 extensions/
 ├── symlink-manager.ts              # Shared symlink management
-├── <extension-name>/
-│   ├── index.ts                    # Entry point (exports implementation)
-│   └── implementation.ts           # Real extension code (or multiple files)
+├── tmux-feedback/
+│   ├── index.ts                    # Entry point (re-exports implementation)
+│   └── implementation.ts           # Real extension code
+├── session-banner/
+│   ├── index.ts                    # Entry point
+│   └── implementation.ts           # Real extension code
 └── rl-extensions/
-    └── index.ts                    # TUI manager extension
+    └── index.ts                    # TUI extension manager
 ```
 
 ### Entry Point Pattern
@@ -74,7 +76,7 @@ ln -s /path/to/rl-pi-extensions/extensions/tmux-feedback ~/.pi/agent/extensions/
 rm ~/.pi/agent/extensions/tmux-feedback
 ```
 
-The manager (`rl-extensions`) creates/removes these symlinks. Only symlinked extensions appear in Pi's `[Extensions]` list.
+**Only `rl-extensions` is listed in `package.json`.** The manager creates symlinks which Pi discovers automatically. Disabled extensions are never loaded by Pi.
 
 ### TUI Guidelines
 
@@ -84,12 +86,6 @@ The manager (`rl-extensions`) creates/removes these symlinks. Only symlinked ext
 - Always call `tui.requestRender()` after state changes.
 - Guard TUI-only behavior with `ctx.mode === "tui"` when needed.
 
-### Config Management
-
-- **No config file needed** — symlinks are the source of truth
-- Extensions are **disabled by default** (no symlink)
-- Users explicitly enable via `/rl-extensions` or manual symlink creation
-
 ---
 
 ## 5. Testing Expectations
@@ -98,6 +94,7 @@ The manager (`rl-extensions`) creates/removes these symlinks. Only symlinked ext
 - **Test coverage targets:**
   - `symlink-manager.test.ts`: symlink creation/removal, toggle logic, directory structure
   - `manager.test.ts`: command registration, handler existence (source inspection since Pi deps unavailable)
+  - `extension-loading.test.ts`: validates all import paths resolve to existing files
 - **Test isolation:** Each test creates its own temp directory. Clean up in the same test.
 - **No regressions:** When fixing a bug, add a test that reproduces it first.
 
@@ -110,7 +107,6 @@ The manager (`rl-extensions`) creates/removes these symlinks. Only symlinked ext
 - **Don't add runtime dependencies** without justification. Pi extensions should be lightweight.
 - **Every new or changed file must include tests.** No code lands without test coverage.
 - **Don't break existing extensions** when adding new ones. Test the full package after changes.
-- **Config files are user data** — never overwrite `~/.pi/agent/rl-extensions.json` without preserving existing entries.
 
 ---
 
