@@ -203,14 +203,16 @@ export function registerSnippetsExtension(
 		handler: async (ctx) => controller.open(ctx),
 	});
 	pi.registerCommand("snippets-install-tmux-binding", {
-		description: "Install tmux key binding for the snippets shortcut",
+		description: "Show tmux configuration needed for the snippets shortcut",
 		handler: async (_args, ctx) => {
-			const result = await pi.exec("tmux", ["bind-key", "-T", "copy-mode", SNIPPETS_SHORTCUT, "send-keys", "-X", "copy-selection-and-cancel"]);
-			if (result.code === 0) {
-				ctx.ui.notify(`Installed tmux binding for ${SNIPPETS_SHORTCUT} in copy-mode`, "info");
-			} else {
-				ctx.ui.notify(`Failed to install tmux binding: ${result.stderr.trim() || result.stdout.trim()}`.trim(), "error");
-			}
+			const configLines = [
+				"# Enable xterm keys and reduce escape time for Pi shortcuts",
+				"set -g xterm-keys on",
+				"set -g escape-time 0",
+			];
+			const config = configLines.join("\n");
+			await ctx.ui.editor("Tmux configuration for snippets shortcut", config);
+			ctx.ui.notify("Added to ~/.tmux.conf, then run: tmux source-file ~/.tmux.conf", "info");
 		},
 	});
 	pi.on("session_start", (_event, ctx) => controller.startSession(ctx));
