@@ -14,7 +14,7 @@ import {
 	saveConfig,
 	isExtensionEnabled,
 	type ExtensionInfo,
-} from "./config-manager.js";
+} from "../config-manager.js";
 
 // Registry of all available extensions
 const EXTENSIONS: ExtensionInfo[] = [
