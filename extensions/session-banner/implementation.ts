@@ -60,7 +60,7 @@ import { complete } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { truncateToWidth } from "@mariozechner/pi-tui";
 
-import { paneRegistry, type BannerOutput } from "./panes.ts";
+import { paneRegistry, type BannerOutput } from "./panes.js";
 import {
 	AUTO_NAME_SYSTEM_PROMPT,
 	AUTO_NAME_SYSTEM_PROMPT_FORCE,
@@ -77,7 +77,7 @@ import {
 	parseTitleOrder,
 	randomEmoji,
 	randomTitleColor,
-} from "./helpers.ts";
+} from "./helpers.js";
 
 const PROVIDER = process.env.PI_SESSION_BANNER_PROVIDER || "anthropic";
 const MODEL_ID = process.env.PI_SESSION_BANNER_MODEL || "claude-haiku-4-5";

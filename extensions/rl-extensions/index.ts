@@ -16,7 +16,7 @@ import {
 	isExtensionEnabled,
 	toggleExtension,
 	type ExtensionDescriptor,
-} from "./symlink-manager.ts";
+} from "./symlink-manager.js";
 
 // Get monorepo root from this file's location
 const MONOREPO_ROOT = process.cwd();
