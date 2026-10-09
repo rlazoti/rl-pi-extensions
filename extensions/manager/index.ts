@@ -7,14 +7,7 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { Container, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
-import { DynamicBorder } from "@earendil-works/pi-coding-agent";
-import {
-	loadConfig,
-	saveConfig,
-	isExtensionEnabled,
-	type ExtensionInfo,
-} from "../config-manager.js";
+import { loadConfig, saveConfig, isExtensionEnabled, type ExtensionInfo } from "../config-manager.js";
 
 // Registry of all available extensions
 const EXTENSIONS: ExtensionInfo[] = [
@@ -39,97 +32,47 @@ export default function managerExtension(pi: ExtensionAPI) {
 async function showExtensionManager(ctx: ExtensionCommandContext): Promise<void> {
 	const config = loadConfig();
 
-	// Track desired state (overrides config while TUI is open)
-	const desiredState = new Map<string, boolean>();
-	for (const ext of EXTENSIONS) {
-		desiredState.set(ext.name, isExtensionEnabled(config, ext.name));
-	}
-
-	// Build items for SelectList
-	const buildItems = (): SelectItem[] => {
-		const items: SelectItem[] = EXTENSIONS.map((ext) => {
-			const enabled = desiredState.get(ext.name) ?? true;
-			return {
-				value: ext.name,
-				label: enabled ? `✓ ${ext.label}` : `○ ${ext.label}`,
-				description: ext.description,
-			};
-		});
-		// Add "Done" option at the end
-		items.push({
-			value: "__done__",
-			label: "Done",
-			description: "Apply changes and close",
-		});
-		return items;
+	// Build items for selection list
+	const buildItems = (): string[] => {
+		return EXTENSIONS.map((ext) => {
+			const enabled = isExtensionEnabled(config, ext.name);
+			return enabled ? `✓ ${ext.label}` : `○ ${ext.label}`;
+		}).concat(["(done)"]);
 	};
 
-	await ctx.ui.custom<void>((tui, theme, _kb, done) => {
-		const container = new Container();
-		container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
-		container.addChild(new Text(theme.fg("accent", theme.bold("  rl-pi-extensions  "))));
-		container.addChild(new Text(theme.fg("dim", "Enter to toggle • Enter on Done to apply")));
-		container.addChild(new Text(""));
+	let changedCount = 0;
 
+	// Loop: show list, let user toggle, repeat until "(done)"
+	while (true) {
 		const items = buildItems();
-		const selectList = new SelectList(items, Math.min(items.length, 10), {
-			selectedPrefix: (text) => theme.fg("accent", text),
-			selectedText: (text) => theme.fg("accent", text),
-			description: (text) => theme.fg("muted", text),
-			scrollInfo: (text) => theme.fg("dim", text),
-			noMatch: (text) => theme.fg("warning", text),
-		});
+		const selected = await ctx.ui.select("rl-pi-extensions", items);
+		if (selected === undefined) {
+			// User cancelled (esc)
+			break;
+		}
 
-		selectList.onSelect = (item) => {
-			if (item.value === "__done__") {
-				// Apply changes
-				const newConfig = { ...config, enabled: { ...config.enabled } };
-				for (const [extName, enabled] of desiredState) {
-					newConfig.enabled[extName] = enabled;
-				}
-				saveConfig(newConfig);
-				done();
-				return;
-			}
-			// Toggle the selected extension
-			const extName = item.value;
-			const current = desiredState.get(extName) ?? true;
-			desiredState.set(extName, !current);
-			// Update the list
-			selectList.setItems(buildItems());
-			tui.requestRender();
+		if (selected === "(done)") {
+			break;
+		}
+
+		// Find which extension was selected
+		const extIndex = items.indexOf(selected);
+		if (extIndex === -1 || extIndex >= EXTENSIONS.length) continue;
+
+		const ext = EXTENSIONS[extIndex];
+		const wasEnabled = isExtensionEnabled(config, ext.name);
+		const newEnabled = !wasEnabled;
+
+		// Update config
+		const newConfig = {
+			...config,
+			enabled: { ...config.enabled, [ext.name]: newEnabled },
 		};
+		saveConfig(newConfig);
+		changedCount++;
+	}
 
-		selectList.onCancel = () => {
-			done();
-		};
-
-		container.addChild(selectList);
-		container.addChild(new Text(""));
-		container.addChild(
-			new Text(theme.fg("dim", "↑↓ navigate • enter toggle/select • esc cancel")),
-		);
-		container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
-
-		return {
-			render(width: number) {
-				return container.render(width);
-			},
-			invalidate() {
-				container.invalidate();
-			},
-			handleInput(data: string) {
-				selectList.handleInput(data);
-				tui.requestRender();
-			},
-		};
-	});
-
-	// After TUI closes, notify user
-	const changedCount = EXTENSIONS.filter(
-		(ext) => isExtensionEnabled(config, ext.name) !== (desiredState.get(ext.name) ?? true),
-	).length;
-
+	// Notify user
 	if (changedCount > 0) {
 		ctx.ui.notify(`${changedCount} extension(s) toggled. Changes apply after /reload`, "info");
 	} else {
