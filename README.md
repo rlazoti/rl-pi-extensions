@@ -7,11 +7,8 @@ Personal Pi coding agent extensions, managed as a single package with a TUI for 
 | Extension | Description |
 |-----------|-------------|
 | **tmux-feedback** | Inline feedback for tmux scrollback selection |
-| **emacs-feedback** | Emacs source-region feedback for terminal Pi sessions |
-| **snippets** | Editable multi-select snippet insertion |
-| **session-attention** | Desktop notifications when Pi needs your attention |
-| **retitle** | Auto-name sessions using a fast LLM |
-| **manager** | TUI for enabling/disabling extensions |
+
+More extensions coming soon (emacs-feedback, snippets, etc.).
 
 ## Usage
 
@@ -29,7 +26,7 @@ pi install git:github.com/rlazoti/rl-pi-extensions
 
 ### Manage Extensions
 
-Run `/extensions` in Pi to open the TUI manager where you can:
+Run `/rl-extensions` in Pi to open the TUI manager where you can:
 - Navigate with ↑↓
 - Toggle extensions with Space
 - Apply changes with Enter
@@ -63,19 +60,6 @@ rl-pi-extensions/
 │   ├── tmux-feedback/
 │   │   ├── index.ts                # Wrapper (checks config)
 │   │   └── implementation.ts       # Real extension code
-│   ├── emacs-feedback/
-│   │   ├── index.ts                # Wrapper
-│   │   └── implementation.ts       # Real code
-│   ├── snippets/
-│   │   ├── index.ts                # Wrapper
-│   │   ├── entry.ts                # Original entry point
-│   │   └── *.ts                    # Supporting files
-│   ├── session-attention/
-│   │   ├── index.ts                # Wrapper
-│   │   └── implementation.ts       # Real code
-│   ├── retitle/
-│   │   ├── index.ts                # Wrapper
-│   │   └── implementation.ts       # Real code
 │   └── manager/
 │       └── index.ts                # TUI extension manager
 ```

@@ -1,7 +1,7 @@
 {
 	"name": "rl-pi-extensions",
 	"version": "0.1.0",
-	"description": "Personal Pi extensions — tmux feedback, emacs feedback, snippets, session attention, retitle",
+	"description": "Personal Pi extensions — tmux feedback",
 	"type": "module",
 	"license": "MIT",
 	"author": "Rodrigo Lazoti",
@@ -13,10 +13,6 @@
 	"pi": {
 		"extensions": [
 			"./extensions/tmux-feedback/index.ts",
-			"./extensions/emacs-feedback/index.ts",
-			"./extensions/snippets/index.ts",
-			"./extensions/session-attention/index.ts",
-			"./extensions/retitle/index.ts",
 			"./extensions/manager/index.ts"
 		]
 	},

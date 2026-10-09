@@ -24,35 +24,11 @@ const EXTENSIONS: ExtensionInfo[] = [
 		description: "Inline feedback for tmux scrollback selection",
 		enabled: true,
 	},
-	{
-		name: "emacs-feedback",
-		label: "emacs-feedback",
-		description: "Emacs source-region feedback for terminal Pi sessions",
-		enabled: true,
-	},
-	{
-		name: "snippets",
-		label: "snippets",
-		description: "Editable multi-select snippet insertion",
-		enabled: true,
-	},
-	{
-		name: "session-attention",
-		label: "session-attention",
-		description: "Desktop notifications when Pi needs your attention",
-		enabled: true,
-	},
-	{
-		name: "retitle",
-		label: "retitle",
-		description: "Auto-name sessions using a fast LLM",
-		enabled: true,
-	},
 ];
 
 export default function managerExtension(pi: ExtensionAPI) {
-	// Register /extensions command
-	pi.registerCommand("extensions", {
+	// Register /rl-extensions command
+	pi.registerCommand("rl-extensions", {
 		description: "Manage rl-pi-extensions (enable/disable)",
 		handler: async (_args, ctx) => {
 			await showExtensionManager(ctx);
