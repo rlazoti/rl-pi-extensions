@@ -6,8 +6,8 @@
  * - Each extension checks config before registering itself
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Container, Key, type SelectItem, Text } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { Container, Key, Text } from "@earendil-works/pi-tui";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import {
 	loadConfig,
@@ -39,13 +39,13 @@ const EXTENSIONS: ExtensionInfo[] = [
 	{
 		name: "session-attention",
 		label: "session-attention",
-		description: "Session attention management",
+		description: "Desktop notifications when Pi needs your attention",
 		enabled: true,
 	},
 	{
 		name: "retitle",
 		label: "retitle",
-		description: "Auto-retitle sessions",
+		description: "Auto-name sessions using a fast LLM",
 		enabled: true,
 	},
 ];
@@ -60,20 +60,18 @@ export default function managerExtension(pi: ExtensionAPI) {
 	});
 }
 
-async function showExtensionManager(ctx: any): Promise<void> {
+async function showExtensionManager(ctx: ExtensionCommandContext): Promise<void> {
 	const config = loadConfig();
 
-	// Build items from registry + config state
-	const items: SelectItem[] = EXTENSIONS.map((ext) => {
-		const enabled = isExtensionEnabled(config, ext.name);
-		return {
-			value: ext.name,
-			label: enabled ? `✓ ${ext.label}` : `  ${ext.label}`,
-			description: ext.description,
-		};
-	});
+	// Track desired state (overrides config while TUI is open)
+	const desiredState = new Map<string, boolean>();
+	for (const ext of EXTENSIONS) {
+		desiredState.set(ext.name, isExtensionEnabled(config, ext.name));
+	}
 
-	const result = await ctx.ui.custom<boolean[]>((tui, theme, _kb, done) => {
+	let selectedIndex = 0;
+
+	await ctx.ui.custom<void>((tui, theme, _kb, done) => {
 		const container = new Container();
 		container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
 
@@ -88,19 +86,23 @@ async function showExtensionManager(ctx: any): Promise<void> {
 
 		// Extension list
 		EXTENSIONS.forEach((ext, index) => {
-			const enabled = isExtensionEnabled(config, ext.name);
-			const marker = enabled ? theme.fg("success", "✓") : theme.fg("dim", " ");
+			const enabled = desiredState.get(ext.name) ?? true;
+			const isSelected = index === selectedIndex;
+			const marker = enabled ? theme.fg("success", "●") : theme.fg("dim", "○");
 			const label = enabled
 				? theme.fg("accent", ext.label)
 				: theme.fg("muted", ext.label);
-			const desc = theme.fg("dim", ext.description);
 
-			container.addChild(
-				new Text(`${marker} ${label}`),
-			);
-			container.addChild(
-				new Text(`    ${desc}`),
-			);
+			// Highlight selected item
+			let line: string;
+			if (isSelected) {
+				line = theme.style(`▶ ${marker} ${label}`, { fg: "accent" });
+			} else {
+				line = `  ${marker} ${label}`;
+			}
+
+			container.addChild(new Text(line));
+			container.addChild(new Text(theme.fg("dim", `    ${ext.description}`)));
 			container.addChild(new Text(""));
 		});
 
@@ -115,10 +117,6 @@ async function showExtensionManager(ctx: any): Promise<void> {
 			),
 		);
 		container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
-
-		// Track selection state
-		let selectedIndex = 0;
-		const toggled = new Set<string>();
 
 		return {
 			render(width: number) {
@@ -136,28 +134,18 @@ async function showExtensionManager(ctx: any): Promise<void> {
 				} else if (data === Key.space) {
 					// Toggle current
 					const ext = EXTENSIONS[selectedIndex];
-					if (toggled.has(ext.name)) {
-						toggled.delete(ext.name);
-					} else {
-						toggled.add(ext.name);
-					}
+					desiredState.set(ext.name, !desiredState.get(ext.name)!);
 				} else if (data === Key.enter) {
-					// Apply: toggle all and save
-					const newConfig = { ...config };
-					for (const extName of toggled) {
-						const current = isExtensionEnabled(newConfig, extName);
-						for (const ext of EXTENSIONS) {
-							if (ext.name === extName) {
-								newConfig.enabled[extName] = !current;
-								break;
-							}
-						}
+					// Apply: save desired state
+					const newConfig = { ...config, enabled: { ...config.enabled } };
+					for (const [extName, enabled] of desiredState) {
+						newConfig.enabled[extName] = enabled;
 					}
 					saveConfig(newConfig);
-					done([...toggled]);
+					done();
 					return;
 				} else if (data === Key.escape) {
-					done([]);
+					done();
 					return;
 				}
 				tui.requestRender();
@@ -166,11 +154,12 @@ async function showExtensionManager(ctx: any): Promise<void> {
 	});
 
 	// After TUI closes, notify user
-	if (result && result.length > 0) {
-		ctx.ui.notify(
-			`${result.length} extension(s) toggled. Changes apply after /reload`,
-			"info",
-		);
+	const changedCount = EXTENSIONS.filter(
+		(ext) => isExtensionEnabled(config, ext.name) !== (desiredState.get(ext.name) ?? true),
+	).length;
+
+	if (changedCount > 0) {
+		ctx.ui.notify(`${changedCount} extension(s) toggled. Changes apply after /reload`, "info");
 	} else {
 		ctx.ui.notify("No changes made", "info");
 	}
