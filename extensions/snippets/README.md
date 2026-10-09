@@ -14,7 +14,7 @@ Run `/snippets` to open the snippet picker.
 
 ### Keyboard Shortcut
 
-`Alt+Shift+S` opens the snippet picker directly.
+`Alt+Shift+S` opens the snippet picker directly. If the shortcut doesn't work (tmux may intercept it), install the tmux binding:
 
 ## Snippet Format
 
@@ -40,6 +40,10 @@ Snippets can include placeholders that get replaced with context:
 ## Configuration
 
 Snippets are loaded from `~/.pi/agent/snippets/`. Create this directory and add `.md` files with frontmatter.
+
+### Install Tmux Binding
+
+Run `/snippets-install-tmux-binding` to install the `Alt+Shift+S` shortcut in tmux copy-mode.
 
 ## Enable/Disable
 
