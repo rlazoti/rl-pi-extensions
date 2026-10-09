@@ -104,7 +104,6 @@ export default factory;
 ## 6. Safety and Operational Constraints
 
 - **Never push to GitHub** without explicit confirmation from the user.
-- **Branch naming:** `rl-<MM>-<DD>-<short_description>` (e.g., `rl-10-09-add-snippets-extension`)
 - **Don't modify Pi's internals** — only work within the extension API.
 - **Don't add runtime dependencies** without justification. Pi extensions should be lightweight.
 - **Every new or changed file must include tests.** No code lands without test coverage.
