@@ -202,19 +202,6 @@ export function registerSnippetsExtension(
 		description: "Insert snippets into the current draft",
 		handler: async (ctx) => controller.open(ctx),
 	});
-	pi.registerCommand("snippets-install-tmux-binding", {
-		description: "Show tmux configuration needed for the snippets shortcut",
-		handler: async (_args, ctx) => {
-			const configLines = [
-				"# Enable xterm keys and reduce escape time for Pi shortcuts",
-				"set -g xterm-keys on",
-				"set -g escape-time 0",
-			];
-			const config = configLines.join("\n");
-			await ctx.ui.editor("Tmux configuration for snippets shortcut", config);
-			ctx.ui.notify("Added to ~/.tmux.conf, then run: tmux source-file ~/.tmux.conf", "info");
-		},
-	});
 	pi.on("session_start", (_event, ctx) => controller.startSession(ctx));
 	pi.on("session_shutdown", (_event, ctx) => controller.shutdownSession(ctx));
 	return controller;
