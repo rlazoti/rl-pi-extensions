@@ -1,0 +1,122 @@
+# AGENTS.md
+
+## 1. Project Context
+
+**rl-pi-extensions** is a monorepo for personal [Pi coding agent](https://github.com/earendil-works/pi-coding-agent) extensions. Extensions are distributed as a single package with a TUI for enabling/disabling individual extensions at runtime.
+
+- **Language:** TypeScript (ES modules)
+- **Runtime:** Pi uses [jiti](https://github.com/unjs/jiti) for TypeScript compilation (CommonJS output)
+- **Package manager:** npm
+- **Test runner:** Node.js built-in test runner (`node --test`)
+- **Dependencies:** `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, `@earendil-works/pi-ai` (peer dependencies provided by Pi)
+
+**Key constraint:** Extensions load inside the Pi process. They must not block startup, must handle errors gracefully, and must respect Pi's TUI lifecycle.
+
+---
+
+## 2. Development Commands
+
+| Command | Description |
+|---|---|
+| `npm test` | Run all tests |
+| `pi install ~/Projects/Terminal/rl-pi-extensions` | Install locally for testing |
+| `pi install git:github.com/rlazoti/rl-pi-extensions` | Install from git |
+
+After changes, reload Pi with `/reload` or restart Pi entirely.
+
+---
+
+## 3. Coding Conventions
+
+- **ES modules:** Use `import`/`export` syntax. Files use `.ts` extension.
+- **Import paths:** Use `.ts` extension in imports (jiti resolves `.js` to `.ts` at runtime, but tests use `node --experimental-strip-types` which requires `.ts`).
+- **Type safety:** Use TypeScript interfaces for public APIs. `any` is acceptable only in wrapper files that delegate to implementations.
+- **Naming:** Extensions use kebab-case (`tmux-feedback`, `rl-extensions`). Directories match.
+- **Config files:** Store in `~/.pi/agent/` with descriptive names (`rl-extensions.json`).
+- **No side effects in wrappers:** Wrapper `index.ts` files should only check config and delegate — no business logic.
+
+---
+
+## 4. Architecture and Design Rules
+
+### Extension Structure
+
+Each extension follows the wrapper pattern:
+
+```
+extensions/
+├── config-manager.ts           # Shared config loading (load/save/enable/disable)
+├── <extension-name>/
+│   ├── index.ts                # Wrapper — checks config, delegates to implementation
+│   └── implementation.ts       # Real extension code (or multiple files)
+└── rl-extensions/
+    └── index.ts                # TUI manager extension
+```
+
+### Wrapper Pattern
+
+The wrapper (`index.ts`) checks `~/.pi/agent/rl-extensions.json` at load time:
+- **Enabled:** imports and exports the real implementation's default factory
+- **Disabled:** exports a no-op function (`function() {}`)
+
+```typescript
+import { loadConfig, isExtensionEnabled } from "../config-manager.ts";
+
+const config = loadConfig();
+let factory: any;
+if (isExtensionEnabled(config, "tmux-feedback")) {
+  factory = require("./implementation.js").default;
+} else {
+  factory = function (_pi: any) { /* disabled */ };
+}
+export default factory;
+```
+
+### TUI Guidelines
+
+- Use Pi's built-in components (`SelectList`, `Container`, `Text`, `DynamicBorder`) over custom rendering.
+- For custom components, use `matchesKey()` for keyboard input matching.
+- Use `ctx.ui.custom()` for modal overlays, `ctx.ui.select()` for simple selections.
+- Always call `tui.requestRender()` after state changes.
+- Guard TUI-only behavior with `ctx.mode === "tui"` when needed.
+
+### Config Management
+
+- Single source of truth: `~/.pi/agent/rl-extensions.json`
+- Default state: unconfigured extensions are **enabled**
+- Config is loaded at extension load time, not cached across reloads
+
+---
+
+## 5. Testing Expectations
+
+- **Run `npm test`** before every commit. All tests must pass.
+- **Test coverage targets:**
+  - `config-manager.test.ts`: load/save, valid/invalid JSON, enable/disable logic
+  - `wrapper.test.ts`: enabled/disabled detection, isolation between extensions
+  - `manager.test.ts`: command registration, handler existence (source inspection since Pi deps unavailable)
+- **Test isolation:** Each test creates its own temp directory. Clean up in the same test.
+- **No regressions:** When fixing a bug, add a test that reproduces it first.
+
+---
+
+## 6. Safety and Operational Constraints
+
+- **Never push to GitHub** without explicit confirmation from the user.
+- **Branch naming:** `rl-<MM>-<DD>-<short_description>` (e.g., `rl-10-09-add-snippets-extension`)
+- **Don't modify Pi's internals** — only work within the extension API.
+- **Don't add runtime dependencies** without justification. Pi extensions should be lightweight.
+- **Don't break existing extensions** when adding new ones. Test the full package after changes.
+- **Config files are user data** — never overwrite `~/.pi/agent/rl-extensions.json` without preserving existing entries.
+
+---
+
+## 7. Definition of Done
+
+Before reporting work complete, verify:
+
+1. **`npm test` passes** — all tests green
+2. **Manual testing** — install in Pi (`pi install ...`), reload (`/reload`), and verify the extension works
+3. **README updated** — each extension has its own `README.md` in its directory
+4. **No breaking changes** — existing extensions still load and function
+5. **Concise commit message** — follows conventional commit format (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`)
