@@ -23,7 +23,7 @@ test("manager registers /rl-extensions command with correct description", async 
 	// is correct by checking the source code.
 	const { readFileSync } = await import("node:fs");
 	const managerSource = readFileSync(
-		new URL("../extensions/manager/index.ts", import.meta.url),
+		new URL("../extensions/rl-extensions/index.ts", import.meta.url),
 		"utf-8",
 	);
 
@@ -41,7 +41,7 @@ test("manager registers /rl-extensions command with correct description", async 
 test("manager command handler is registered", async () => {
 	const { readFileSync } = await import("node:fs");
 	const managerSource = readFileSync(
-		new URL("../extensions/manager/index.ts", import.meta.url),
+		new URL("../extensions/rl-extensions/index.ts", import.meta.url),
 		"utf-8",
 	);
 
@@ -56,7 +56,7 @@ test("manager command handler is registered", async () => {
 test("manager includes all registered extensions in registry", async () => {
 	const { readFileSync } = await import("node:fs");
 	const managerSource = readFileSync(
-		new URL("../extensions/manager/index.ts", import.meta.url),
+		new URL("../extensions/rl-extensions/index.ts", import.meta.url),
 		"utf-8",
 	);
 

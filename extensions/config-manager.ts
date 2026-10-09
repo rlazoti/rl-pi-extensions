@@ -34,8 +34,8 @@ export function saveConfig(config: ExtensionsConfig): void {
 }
 
 export function isExtensionEnabled(config: ExtensionsConfig, name: string): boolean {
-	// undefined means not configured yet — treat as enabled by default
-	return config.enabled[name] !== false;
+	// undefined means not configured yet — disabled by default (opt-in)
+	return config.enabled[name] === true;
 }
 
 export function setExtensionEnabled(config: ExtensionsConfig, name: string, enabled: boolean): ExtensionsConfig {

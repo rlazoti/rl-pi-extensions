@@ -37,7 +37,8 @@ function saveConfig(filePath: string, config: ExtensionsConfig): void {
 }
 
 function isExtensionEnabled(config: ExtensionsConfig, name: string): boolean {
-	return config.enabled[name] !== false;
+	// undefined means not configured — disabled by default (opt-in)
+	return config.enabled[name] === true;
 }
 
 // --- Tests ---
@@ -78,9 +79,9 @@ test("saveConfig writes and reloads correctly", () => {
 	rmSync(dir, { recursive: true, force: true });
 });
 
-test("isExtensionEnabled returns true when not configured", () => {
+test("isExtensionEnabled returns false when not configured (opt-in by default)", () => {
 	const config = { enabled: {} };
-	assert.equal(isExtensionEnabled(config, "tmux-feedback"), true);
+	assert.equal(isExtensionEnabled(config, "tmux-feedback"), false);
 });
 
 test("isExtensionEnabled returns true when explicitly enabled", () => {
@@ -97,15 +98,22 @@ test("isExtensionEnabled only checks the specified extension", () => {
 	const config = { enabled: { "tmux-feedback": false, "snippets": true } };
 	assert.equal(isExtensionEnabled(config, "tmux-feedback"), false);
 	assert.equal(isExtensionEnabled(config, "snippets"), true);
-	assert.equal(isExtensionEnabled(config, "retitle"), true); // not configured = enabled
+	assert.equal(isExtensionEnabled(config, "retitle"), false); // not configured = disabled
 });
 
-test("toggle: disable then re-enable extension", () => {
+test("toggle: enable then disable extension", () => {
 	const dir = createTempDir();
 	const filePath = getConfigPath(dir);
 
-	// Start: enabled (default)
+	// Start: disabled (default, opt-in)
 	let config = loadConfig(filePath);
+	assert.equal(isExtensionEnabled(config, "tmux-feedback"), false);
+
+	// Enable
+	config = { ...config, enabled: { ...config.enabled, "tmux-feedback": true } };
+	saveConfig(filePath, config);
+
+	config = loadConfig(filePath);
 	assert.equal(isExtensionEnabled(config, "tmux-feedback"), true);
 
 	// Disable
@@ -114,13 +122,6 @@ test("toggle: disable then re-enable extension", () => {
 
 	config = loadConfig(filePath);
 	assert.equal(isExtensionEnabled(config, "tmux-feedback"), false);
-
-	// Re-enable
-	config = { ...config, enabled: { ...config.enabled, "tmux-feedback": true } };
-	saveConfig(filePath, config);
-
-	config = loadConfig(filePath);
-	assert.equal(isExtensionEnabled(config, "tmux-feedback"), true);
 
 	rmSync(dir, { recursive: true, force: true });
 });

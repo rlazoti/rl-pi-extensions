@@ -83,8 +83,9 @@ export default factory;
 ### Config Management
 
 - Single source of truth: `~/.pi/agent/rl-extensions.json`
-- Default state: unconfigured extensions are **enabled**
+- Default state: unconfigured extensions are **disabled**
 - Config is loaded at extension load time, not cached across reloads
+- **Default state: unconfigured extensions are disabled.** Users explicitly enable what they want.
 
 ---
 
@@ -106,6 +107,7 @@ export default factory;
 - **Branch naming:** `rl-<MM>-<DD>-<short_description>` (e.g., `rl-10-09-add-snippets-extension`)
 - **Don't modify Pi's internals** — only work within the extension API.
 - **Don't add runtime dependencies** without justification. Pi extensions should be lightweight.
+- **Every new or changed file must include tests.** No code lands without test coverage.
 - **Don't break existing extensions** when adding new ones. Test the full package after changes.
 - **Config files are user data** — never overwrite `~/.pi/agent/rl-extensions.json` without preserving existing entries.
 

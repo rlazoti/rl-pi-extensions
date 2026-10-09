@@ -33,7 +33,8 @@ function loadConfig(filePath: string): ExtensionsConfig {
 }
 
 function isExtensionEnabled(config: ExtensionsConfig, name: string): boolean {
-	return config.enabled[name] !== false;
+	// undefined means not configured — disabled by default (opt-in)
+	return config.enabled[name] === true;
 }
 
 // --- Tests ---
@@ -60,13 +61,13 @@ test("wrapper: disabled extension returns no-op", () => {
 	rmSync(dir, { recursive: true, force: true });
 });
 
-test("wrapper: missing config means enabled by default", () => {
+test("wrapper: missing config means disabled by default (opt-in)", () => {
 	const dir = createTempDir();
 	const filePath = getConfigPath(dir);
 	// Don't create config file
 
 	const config = loadConfig(filePath);
-	assert.equal(isExtensionEnabled(config, "tmux-feedback"), true);
+	assert.equal(isExtensionEnabled(config, "tmux-feedback"), false);
 
 	rmSync(dir, { recursive: true, force: true });
 });
@@ -74,12 +75,12 @@ test("wrapper: missing config means enabled by default", () => {
 test("wrapper: other extensions not affected by tmux-feedback state", () => {
 	const dir = createTempDir();
 	const filePath = getConfigPath(dir);
-	writeFileSync(filePath, JSON.stringify({ enabled: { "tmux-feedback": false } }, null, 2));
+	writeFileSync(filePath, JSON.stringify({ enabled: { "tmux-feedback": true } }, null, 2));
 
 	const config = loadConfig(filePath);
-	assert.equal(isExtensionEnabled(config, "tmux-feedback"), false);
-	// Other extensions should still be enabled (not configured)
-	assert.equal(isExtensionEnabled(config, "snippets"), true);
+	assert.equal(isExtensionEnabled(config, "tmux-feedback"), true);
+	// Other extensions should still be disabled (not configured, opt-in)
+	assert.equal(isExtensionEnabled(config, "snippets"), false);
 
 	rmSync(dir, { recursive: true, force: true });
 });

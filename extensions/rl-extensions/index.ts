@@ -12,12 +12,13 @@ import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import { loadConfig, saveConfig, isExtensionEnabled, type ExtensionInfo } from "../config-manager.ts";
 
 // Registry of all available extensions
+// Note: enabled field is metadata only; actual default is disabled (opt-in)
 const EXTENSIONS: ExtensionInfo[] = [
 	{
 		name: "tmux-feedback",
 		label: "tmux-feedback",
 		description: "Inline feedback for tmux scrollback selection",
-		enabled: true,
+		enabled: false,
 	},
 ];
 
