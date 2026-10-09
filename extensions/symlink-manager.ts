@@ -49,6 +49,12 @@ export function getAvailableExtensions(monorepoRoot: string): ExtensionDescripto
 			description: "Desktop notifications when Pi needs your attention",
 			path: join(monorepoRoot, "extensions", "session-attention"),
 		},
+		{
+			name: "snippets",
+			label: "snippets",
+			description: "Insert snippets into the current draft",
+			path: join(monorepoRoot, "extensions", "snippets"),
+		},
 	];
 }
 
