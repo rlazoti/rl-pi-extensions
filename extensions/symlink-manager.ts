@@ -13,9 +13,9 @@
  */
 
 import { existsSync, readlinkSync, symlinkSync, unlinkSync, readdirSync, mkdirSync } from "node:fs";
-import { join, resolve, homedir } from "node:path";
+import { join, resolve } from "node:path";
 
-const AGENT_DIR = join(homedir(), ".pi", "agent");
+const AGENT_DIR = join(process.env.HOME || "", ".pi", "agent");
 const EXTENSIONS_DIR = join(AGENT_DIR, "extensions");
 
 export interface ExtensionDescriptor {
