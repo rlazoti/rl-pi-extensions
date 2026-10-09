@@ -13,9 +13,10 @@
  */
 
 import { existsSync, readlinkSync, symlinkSync, unlinkSync, readdirSync, mkdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, resolve, homedir } from "node:path";
 
-const EXTENSIONS_DIR = join(process.cwd(), "tests", ".fake-agent-extensions");
+const AGENT_DIR = join(homedir(), ".pi", "agent");
+const EXTENSIONS_DIR = join(AGENT_DIR, "extensions");
 
 export interface ExtensionDescriptor {
 	name: string;
