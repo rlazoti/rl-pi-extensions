@@ -2,12 +2,12 @@
  * Extension Manager — TUI for enabling/disabling rl-pi-extensions
  *
  * Provides:
- * - `/extensions` command → shows TUI selector
+ * - `/rl-extensions` command → shows TUI selector
  * - Each extension checks config before registering itself
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { Container, Key, Text } from "@earendil-works/pi-tui";
+import { Container, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import {
 	loadConfig,
@@ -45,52 +45,69 @@ async function showExtensionManager(ctx: ExtensionCommandContext): Promise<void>
 		desiredState.set(ext.name, isExtensionEnabled(config, ext.name));
 	}
 
-	let selectedIndex = 0;
+	// Build items for SelectList
+	const buildItems = (): SelectItem[] => {
+		const items: SelectItem[] = EXTENSIONS.map((ext) => {
+			const enabled = desiredState.get(ext.name) ?? true;
+			return {
+				value: ext.name,
+				label: enabled ? `✓ ${ext.label}` : `○ ${ext.label}`,
+				description: ext.description,
+			};
+		});
+		// Add "Done" option at the end
+		items.push({
+			value: "__done__",
+			label: "Done",
+			description: "Apply changes and close",
+		});
+		return items;
+	};
 
 	await ctx.ui.custom<void>((tui, theme, _kb, done) => {
 		const container = new Container();
 		container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
-
-		// Header
-		container.addChild(
-			new Text(theme.fg("accent", theme.bold("  rl-pi-extensions  "))),
-		);
-		container.addChild(
-			new Text(theme.fg("dim", "Toggle extensions on/off")),
-		);
+		container.addChild(new Text(theme.fg("accent", theme.bold("  rl-pi-extensions  "))));
+		container.addChild(new Text(theme.fg("dim", "Enter to toggle • Enter on Done to apply")));
 		container.addChild(new Text(""));
 
-		// Extension list
-		EXTENSIONS.forEach((ext, index) => {
-			const enabled = desiredState.get(ext.name) ?? true;
-			const isSelected = index === selectedIndex;
-			const marker = enabled ? theme.fg("success", "●") : theme.fg("dim", "○");
-			const label = enabled
-				? theme.fg("accent", ext.label)
-				: theme.fg("muted", ext.label);
-
-			// Highlight selected item
-			let line: string;
-			if (isSelected) {
-				line = theme.style(`▶ ${marker} ${label}`, { fg: "accent" });
-			} else {
-				line = `  ${marker} ${label}`;
-			}
-
-			container.addChild(new Text(line));
-			container.addChild(new Text(theme.fg("dim", `    ${ext.description}`)));
-			container.addChild(new Text(""));
+		const items = buildItems();
+		const selectList = new SelectList(items, Math.min(items.length, 10), {
+			selectedPrefix: (text) => theme.fg("accent", text),
+			selectedText: (text) => theme.fg("accent", text),
+			description: (text) => theme.fg("muted", text),
+			scrollInfo: (text) => theme.fg("dim", text),
+			noMatch: (text) => theme.fg("warning", text),
 		});
 
-		// Footer
+		selectList.onSelect = (item) => {
+			if (item.value === "__done__") {
+				// Apply changes
+				const newConfig = { ...config, enabled: { ...config.enabled } };
+				for (const [extName, enabled] of desiredState) {
+					newConfig.enabled[extName] = enabled;
+				}
+				saveConfig(newConfig);
+				done();
+				return;
+			}
+			// Toggle the selected extension
+			const extName = item.value;
+			const current = desiredState.get(extName) ?? true;
+			desiredState.set(extName, !current);
+			// Update the list
+			selectList.setItems(buildItems());
+			tui.requestRender();
+		};
+
+		selectList.onCancel = () => {
+			done();
+		};
+
+		container.addChild(selectList);
 		container.addChild(new Text(""));
 		container.addChild(
-			new Text(
-				theme.fg(
-					"dim",
-					"↑↓ navigate • space toggle • enter apply • esc cancel",
-				),
-			),
+			new Text(theme.fg("dim", "↑↓ navigate • enter toggle/select • esc cancel")),
 		);
 		container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
 
@@ -102,28 +119,7 @@ async function showExtensionManager(ctx: ExtensionCommandContext): Promise<void>
 				container.invalidate();
 			},
 			handleInput(data: string) {
-				// Navigate
-				if (data === Key.up || data === Key.left) {
-					selectedIndex = Math.max(0, selectedIndex - 1);
-				} else if (data === Key.down || data === Key.right) {
-					selectedIndex = Math.min(EXTENSIONS.length - 1, selectedIndex + 1);
-				} else if (data === Key.space) {
-					// Toggle current
-					const ext = EXTENSIONS[selectedIndex];
-					desiredState.set(ext.name, !desiredState.get(ext.name)!);
-				} else if (data === Key.enter) {
-					// Apply: save desired state
-					const newConfig = { ...config, enabled: { ...config.enabled } };
-					for (const [extName, enabled] of desiredState) {
-						newConfig.enabled[extName] = enabled;
-					}
-					saveConfig(newConfig);
-					done();
-					return;
-				} else if (data === Key.escape) {
-					done();
-					return;
-				}
+				selectList.handleInput(data);
 				tui.requestRender();
 			},
 		};
