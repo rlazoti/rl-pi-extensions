@@ -102,6 +102,10 @@ export class ExtensionPicker implements Component, Focusable {
 		this.isFocused = value;
 	}
 
+	get focusTarget(): string {
+		return this.searchFocused ? "search" : "list";
+	}
+
 	handleInput(data: string): void {
 		if (this.completed) return;
 
