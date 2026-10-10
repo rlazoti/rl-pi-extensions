@@ -197,26 +197,30 @@ test("symlink-manager: enableExtension overwrites existing symlink", async () =>
 	}
 });
 
-test("symlink-manager: enableExtension noops when symlink already points to correct target", async () => {
+test("symlink-manager: enableExtension noops when entry already exists", async () => {
 	const symlinkManagerSource = readFileSync(
 		new URL("../extensions/symlink-manager.ts", import.meta.url),
 		"utf-8",
 	);
 
-	// Verify the no-op check exists: readlinkSync -> compare targets -> return
+	// Verify the no-op check: existsSync(linkPath) -> return
 	assert.ok(
-		symlinkManagerSource.includes("readlinkSync") &&
-		symlinkManagerSource.includes("resolve(existingTarget)") &&
-		symlinkManagerSource.includes("=== resolvedTarget") &&
+		symlinkManagerSource.includes("existsSync(linkPath)") &&
 		symlinkManagerSource.includes("return"),
-		"enableExtension should check if symlink already points to correct target and no-op",
+		"enableExtension should check if entry exists and no-op",
 	);
 
-	// Verify rmSync with force/recursive is used instead of unlinkSync
+	// Verify disableExtension uses rmSync for robust cleanup
 	assert.ok(
 		symlinkManagerSource.includes("rmSync") &&
 		symlinkManagerSource.includes("recursive: true") &&
 		symlinkManagerSource.includes("force: true"),
-		"enableExtension should use rmSync with force/recursive for robust cleanup",
+		"disableExtension should use rmSync with force/recursive for robust cleanup",
+	);
+
+	// Verify isExtensionEnabled uses lstatSync (catches broken symlinks)
+	assert.ok(
+		symlinkManagerSource.includes("lstatSync"),
+		"isExtensionEnabled should use lstatSync to detect broken symlinks",
 	);
 });

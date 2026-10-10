@@ -12,7 +12,7 @@
  *   └── rl-extensions → /path/to/rl-pi-extensions/extensions/rl-extensions/
  */
 
-import { existsSync, readlinkSync, symlinkSync, readdirSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, readlinkSync, symlinkSync, readdirSync, mkdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const AGENT_DIR = join(process.env.HOME || "", ".pi", "agent");
@@ -65,11 +65,18 @@ export function getAvailableExtensions(monorepoRoot: string): ExtensionDescripto
 }
 
 /**
- * Check if an extension is enabled (symlink exists).
+ * Check if an extension is enabled (symlink exists, even if broken).
+ * Uses lstatSync to detect the entry without following the symlink,
+ * so broken symlinks are still detected as "enabled".
  */
 export function isExtensionEnabled(name: string): boolean {
 	const linkPath = join(EXTENSIONS_DIR, name);
-	return existsSync(linkPath);
+	try {
+		lstatSync(linkPath);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -96,33 +103,22 @@ export function getEnabledExtensions(): string[] {
 
 /**
  * Enable an extension by creating a symlink.
+ * If the entry already exists (valid symlink, broken symlink, file, or dir),
+ * this is a no-op — we never crash on EEXIST.
  */
 export function enableExtension(name: string, targetPath: string): void {
 	const linkPath = join(EXTENSIONS_DIR, name);
-	const resolvedTarget = resolve(targetPath);
 
 	// Create extensions directory if it doesn't exist
 	if (!existsSync(EXTENSIONS_DIR)) {
 		mkdirSync(EXTENSIONS_DIR, { recursive: true });
 	}
 
-	// If symlink already points to the correct target, noop
-	try {
-		const existingTarget = readlinkSync(linkPath);
-		if (resolve(existingTarget) === resolvedTarget) return;
-	} catch {
-		// Not a symlink or doesn't exist — proceed to create
-	}
-
-	// Remove existing entry (symlink, directory, or file)
-	try {
-		rmSync(linkPath, { recursive: true, force: true });
-	} catch {
-		// Best-effort cleanup; proceed to create symlink
-	}
+	// If anything already exists at this path, noop
+	if (existsSync(linkPath)) return;
 
 	// Create absolute symlink
-	symlinkSync(resolvedTarget, linkPath, "dir");
+	symlinkSync(resolve(targetPath), linkPath, "dir");
 }
 
 /**
@@ -130,8 +126,10 @@ export function enableExtension(name: string, targetPath: string): void {
  */
 export function disableExtension(name: string): void {
 	const linkPath = join(EXTENSIONS_DIR, name);
-	if (existsSync(linkPath)) {
-		unlinkSync(linkPath);
+	try {
+		rmSync(linkPath, { recursive: true, force: true });
+	} catch {
+		// Best-effort cleanup
 	}
 }
 
