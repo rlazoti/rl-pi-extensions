@@ -70,7 +70,9 @@ rl-pi-extensions/
 │   ├── emacs-feedback/
 │   │   ├── index.ts                # Extension entry point
 │   │   ├── implementation.ts       # Real extension code (Pi side)
-│   │   └── pi-feedback.el          # Emacs client (source-region feedback)
+│   │   ├── emacs/
+│   │   │   ├── pi-feedback.el      # Emacs client (source-region feedback)
+│   │   │   └── pi-feedback-test.el # Emacs ERT tests
 │   └── rl-extensions/
 │       └── index.ts                # TUI extension manager
 ```

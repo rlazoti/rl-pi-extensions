@@ -20,7 +20,7 @@ pi install ./rl-pi-extensions
 Load the Emacs client (included in this package):
 
 ```elisp
-(add-to-list 'load-path "/path/to/rl-pi-extensions/extensions/emacs-feedback")
+(add-to-list 'load-path "/path/to/rl-pi-extensions/extensions/emacs-feedback/emacs")
 (require 'pi-feedback)
 ```
 
