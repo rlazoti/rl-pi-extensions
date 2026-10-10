@@ -57,6 +57,9 @@ extensions/
 ├── snippets/
 │   ├── index.ts                    # Entry point
 │   └── ...                         # Multiple implementation files
+├── emacs-feedback/
+│   ├── index.ts                    # Entry point (re-exports implementation)
+│   └── implementation.ts           # Real extension code
 └── rl-extensions/
     └── index.ts                    # TUI extension manager
 ```
