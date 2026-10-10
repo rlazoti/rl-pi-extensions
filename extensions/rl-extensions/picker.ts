@@ -171,6 +171,10 @@ export class ExtensionPicker implements Component, Focusable {
 		const filtered = this.filteredExtensions();
 		const visible = filtered.length > 0 ? filtered : EXTENSIONS;
 
+		// Reserve rows: search + separator + status + button + footer
+		const reservedRows = 5;
+		const listRows = Math.max(0, contentRows - reservedRows);
+
 		// Search input line
 		const searchPrefix = this.searchFocused
 			? this.theme.fg("accent", "Search › ")
@@ -179,8 +183,11 @@ export class ExtensionPicker implements Component, Focusable {
 		const searchColor = this.searchFocused ? "accent" : "muted";
 		lines.push(fit(this.theme.fg(searchColor, searchPrefix + searchInput), contentWidth));
 
+		// Separator
+		lines.push("");
+
 		// Extension list
-		for (let i = 0; i < Math.min(visible.length, contentRows - 1); i++) {
+		for (let i = 0; i < Math.min(visible.length, listRows); i++) {
 			const ext = visible[i];
 			const isSelected = i === this.selectedIndex;
 			const enabled = isExtensionEnabled(ext.name);
