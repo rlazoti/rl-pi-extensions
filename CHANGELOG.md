@@ -24,4 +24,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **rl-extensions picker**: Navigation using keybindings instead of raw key constants
 - **rl-extensions picker**: Adopted framed picker UI from snippets extension
 
-## [Unreleased]
+## [1.1.0] - 2026-07-18
+
+### Added
+
+- **emacs-feedback**: Source-region and Magit diff-line feedback from Emacs — review Pi-authored changes in Emacs, attach notes, send to Pi, and ask it to address them
+- Visual **Done** button in extension picker (reachable with Tab)
+- Separator lines between search input, extension list, and status for better visual hierarchy
+
+### Changed
+
+- **rl-extensions picker**: Toggles are now tracked in-memory — Space shows visual feedback immediately, Enter applies all pending changes, Esc discards them
+
+### Fixed
+
+- **rl-extensions picker**: Esc now properly cancels — no symlink changes are applied until Enter is pressed
+- **symlink-manager**: EEXIST crash when enabling an extension with a stale/broken symlink — now uses `rmSync` for robust cleanup and noops if the entry already exists
+- **symlink-manager**: `isExtensionEnabled` now uses `lstatSync` to detect broken symlinks (was returning false for broken symlinks)
+- **rl-extensions picker**: Crash from using `theme.bg("dim")` — "dim" is a style modifier, not a valid color
+
+### Updated
+
+- Clarified snippets description: "Insert predefined text snippets into the prompt"
