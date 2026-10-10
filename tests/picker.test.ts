@@ -187,11 +187,15 @@ test("picker: toggle uses getVisibleList for extension lookup", () => {
 		"utf-8",
 	);
 
-	// Space key handler should get visible list and use it
-	const spaceHandler = pickerSource.match(/matchesKey\(data,\s*Key\.space\)[\s\S]*?toggleExtension/);
+	// Space key handler should get visible list and update pendingChanges
+	const spaceHandler = pickerSource.match(/matchesKey\(data,\s*Key\.space\)[\s\S]*?pendingChanges\.set/);
 	assert.ok(spaceHandler, "should find space key handler");
 	assert.ok(
 		spaceHandler[0].includes("getVisibleList()"),
 		"space toggle should use getVisibleList to find extension",
+	);
+	assert.ok(
+		spaceHandler[0].includes("isExtensionEnabled"),
+		"space toggle should check current enabled state",
 	);
 });

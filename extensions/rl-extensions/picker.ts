@@ -14,7 +14,8 @@ import {
 	getAvailableExtensions,
 	getEnabledExtensions,
 	isExtensionEnabled,
-	toggleExtension,
+	enableExtension,
+	disableExtension,
 	type ExtensionDescriptor,
 } from "../symlink-manager.js";
 
@@ -68,6 +69,7 @@ export class ExtensionPicker implements Component, Focusable {
 	private selectedIndex = 0;
 	private searchQuery = "";
 	private searchFocused = false;
+	private pendingChanges = new Map<string, boolean>();
 	private completed = false;
 	private isFocused = false;
 	private abortListener: (() => void) | undefined;
@@ -146,8 +148,22 @@ export class ExtensionPicker implements Component, Focusable {
 		} else if (matchesKey(data, Key.space)) {
 			const visible = this.getVisibleList();
 			const ext = visible[this.selectedIndex];
-			if (ext) toggleExtension(ext.name, ext.path);
+			if (ext) {
+				const currentEnabled = isExtensionEnabled(ext.name);
+				this.pendingChanges.set(ext.name, !currentEnabled);
+				this.changed();
+				return;
+			}
 		} else if (this.keybindings.matches(data, "tui.select.confirm")) {
+			// Apply all pending changes
+			for (const [name, enabled] of this.pendingChanges) {
+				if (enabled) {
+					enableExtension(name, EXTENSIONS.find((e) => e.name === name)?.path ?? "");
+				} else {
+					disableExtension(name);
+				}
+			}
+			this.pendingChanges.clear();
 			this.complete({ kind: "apply", enabledCount: this.enabledCount() });
 			return;
 		} else if (matchesKey(data, Key.escape)) {
@@ -190,7 +206,8 @@ export class ExtensionPicker implements Component, Focusable {
 		for (let i = 0; i < Math.min(visible.length, listRows); i++) {
 			const ext = visible[i];
 			const isSelected = i === this.selectedIndex;
-			const enabled = isExtensionEnabled(ext.name);
+			const pendingEnabled = this.pendingChanges.get(ext.name);
+			const enabled = pendingEnabled !== undefined ? pendingEnabled : isExtensionEnabled(ext.name);
 			const marker = enabled ? this.theme.fg("success", "●") : this.theme.fg("dim", "○");
 			const prefix = isSelected ? this.theme.fg("accent", "› ") : "  ";
 			const nameStyle = isSelected ? "accent" : enabled ? "text" : "muted";
@@ -240,7 +257,10 @@ export class ExtensionPicker implements Component, Focusable {
 	}
 
 	private enabledCount(): number {
-		return EXTENSIONS.filter((ext) => isExtensionEnabled(ext.name)).length;
+		return EXTENSIONS.filter((e) => {
+			const pending = this.pendingChanges.get(e.name);
+			return pending !== undefined ? pending : isExtensionEnabled(e.name);
+		}).length;
 	}
 
 	private complete(result: ExtensionPickerResult): void {
