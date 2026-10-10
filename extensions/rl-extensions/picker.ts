@@ -204,9 +204,15 @@ export class ExtensionPicker implements Component, Focusable {
 			lines.push(fit(this.theme.fg("warning", "No matching extensions"), contentWidth));
 		}
 
+		// Separator before status
+		lines.push("");
+
 		// Status line
 		const enabledCount = EXTENSIONS.filter((e) => isExtensionEnabled(e.name)).length;
 		lines.push(fit(this.theme.fg("dim", `${enabledCount}/${EXTENSIONS.length} enabled`), contentWidth));
+
+		// Separator after status
+		lines.push("");
 
 		// Footer
 		lines.push(
