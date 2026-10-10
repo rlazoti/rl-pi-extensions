@@ -4,7 +4,7 @@ TUI manager for enabling/disabling rl-pi-extensions.
 
 ## What it does
 
-Provides a framed picker to browse and toggle extensions on/off. Extensions are managed via symlinks in `~/.pi/agent/extensions/`. Changes take effect after `/reload`.
+Provides a framed picker to browse and toggle extensions on/off. Changes are tracked in-memory and only applied when you press Enter. Extensions are managed via symlinks in `~/.pi/agent/extensions/`. Changes take effect after `/reload`.
 
 ## Usage
 
@@ -15,17 +15,18 @@ Run `/rl-extensions` to open the extension picker.
 The picker uses a centered framed panel with a search bar, extension list, and status footer:
 
 - `↑` / `↓`: navigate through extensions
-- `Space`: toggle the selected extension
+- `Space`: toggle the selected extension (visual only)
 - `/`: focus search; search matches name and description
-- `Enter`: apply changes and close
-- `Escape`: cancel without saving
+- `Tab`: focus the Done button
+- `Enter` (on list or button): apply all pending changes and close
+- `Escape`: cancel without saving (discards all pending changes)
 
 ### Visual Feedback
 
 - `●` = enabled, `○` = disabled
 - `›` highlights the currently selected item
 - Status footer shows `X/Y enabled` count
-- State updates immediately after toggle
+- Toggled state shows immediately; symlinks only update on Enter
 
 ## Enable/Disable
 

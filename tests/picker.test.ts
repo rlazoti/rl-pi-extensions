@@ -199,3 +199,43 @@ test("picker: toggle uses getVisibleList for extension lookup", () => {
 		"space toggle should check current enabled state",
 	);
 });
+
+test("picker: tracks pending changes for undoable toggles", () => {
+	const pickerSource = readFileSync(
+		new URL("../extensions/rl-extensions/picker.ts", import.meta.url),
+		"utf-8",
+	);
+
+	// Space updates pendingChanges (in-memory), not symlinks directly
+	assert.ok(
+		pickerSource.includes("pendingChanges.set") &&
+		pickerSource.includes("isExtensionEnabled"),
+		"Space should update pendingChanges map based on current enabled state",
+	);
+
+	// Enter applies pending changes via enable/disableExtension
+	assert.ok(
+		pickerSource.includes("pendingChanges.clear()") &&
+		pickerSource.includes("enableExtension") &&
+		pickerSource.includes("disableExtension"),
+		"Enter should apply pending changes and clear the map",
+	);
+
+	// Render respects pending state
+	assert.ok(
+		pickerSource.includes("pendingChanges.get(ext.name)"),
+		"Render should check pendingChanges before falling back to isExtensionEnabled",
+	);
+
+	// enabledCount respects pending state
+	assert.ok(
+		pickerSource.includes("pendingChanges.get(e.name)"),
+		"enabledCount should check pendingChanges before falling back to isExtensionEnabled",
+	);
+
+	// Does NOT call toggleExtension (which immediately modifies symlinks)
+	assert.ok(
+		!pickerSource.includes("toggleExtension("),
+		"picker should not call toggleExtension (which immediately modifies symlinks)",
+	);
+});
