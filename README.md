@@ -10,6 +10,7 @@ Personal Pi coding agent extensions, managed as a single package with a TUI for 
 | **session-banner** | Colored banner + auto-naming for Pi sessions |
 | **session-attention** | Desktop notifications when Pi needs your attention |
 | **snippets** | Insert snippets into the current draft |
+| **emacs-feedback** | Source-region and Magit diff-line feedback from Emacs |
 
 ## Usage
 
@@ -66,6 +67,9 @@ rl-pi-extensions/
 │   ├── snippets/
 │   │   ├── index.ts                # Extension entry point
 │   │   └── ...                     # Multiple implementation files
+│   ├── emacs-feedback/
+│   │   ├── index.ts                # Extension entry point
+│   │   └── implementation.ts       # Real extension code
 │   └── rl-extensions/
 │       └── index.ts                # TUI extension manager
 ```

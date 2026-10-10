@@ -55,6 +55,12 @@ export function getAvailableExtensions(monorepoRoot: string): ExtensionDescripto
 			description: "Insert snippets into the current draft",
 			path: join(monorepoRoot, "extensions", "snippets"),
 		},
+		{
+			name: "emacs-feedback",
+			label: "emacs-feedback",
+			description: "Source-region and Magit diff-line feedback from Emacs",
+			path: join(monorepoRoot, "extensions", "emacs-feedback"),
+		},
 	];
 }
 

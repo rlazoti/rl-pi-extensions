@@ -52,4 +52,8 @@ test("manager includes all registered extensions in registry", async () => {
 		symlinkManagerSource.includes('"session-banner"'),
 		"symlink-manager should include session-banner in registry",
 	);
+	assert.ok(
+		symlinkManagerSource.includes('"emacs-feedback"'),
+		"symlink-manager should include emacs-feedback in registry",
+	);
 });
