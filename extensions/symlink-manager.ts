@@ -12,7 +12,7 @@
  *   └── rl-extensions → /path/to/rl-pi-extensions/extensions/rl-extensions/
  */
 
-import { existsSync, readlinkSync, symlinkSync, unlinkSync, readdirSync, mkdirSync } from "node:fs";
+import { existsSync, readlinkSync, symlinkSync, readdirSync, mkdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const AGENT_DIR = join(process.env.HOME || "", ".pi", "agent");
@@ -99,19 +99,30 @@ export function getEnabledExtensions(): string[] {
  */
 export function enableExtension(name: string, targetPath: string): void {
 	const linkPath = join(EXTENSIONS_DIR, name);
+	const resolvedTarget = resolve(targetPath);
 
 	// Create extensions directory if it doesn't exist
 	if (!existsSync(EXTENSIONS_DIR)) {
 		mkdirSync(EXTENSIONS_DIR, { recursive: true });
 	}
 
-	// Remove existing symlink if it exists
-	if (existsSync(linkPath)) {
-		unlinkSync(linkPath);
+	// If symlink already points to the correct target, noop
+	try {
+		const existingTarget = readlinkSync(linkPath);
+		if (resolve(existingTarget) === resolvedTarget) return;
+	} catch {
+		// Not a symlink or doesn't exist — proceed to create
+	}
+
+	// Remove existing entry (symlink, directory, or file)
+	try {
+		rmSync(linkPath, { recursive: true, force: true });
+	} catch {
+		// Best-effort cleanup; proceed to create symlink
 	}
 
 	// Create absolute symlink
-	symlinkSync(resolve(targetPath), linkPath, "dir");
+	symlinkSync(resolvedTarget, linkPath, "dir");
 }
 
 /**

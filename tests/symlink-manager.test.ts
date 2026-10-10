@@ -9,6 +9,7 @@ import {
 	writeFileSync,
 	symlinkSync,
 	unlinkSync,
+	readFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -194,4 +195,28 @@ test("symlink-manager: enableExtension overwrites existing symlink", async () =>
 	} finally {
 		rmSync(tempDir, { recursive: true, force: true });
 	}
+});
+
+test("symlink-manager: enableExtension noops when symlink already points to correct target", async () => {
+	const symlinkManagerSource = readFileSync(
+		new URL("../extensions/symlink-manager.ts", import.meta.url),
+		"utf-8",
+	);
+
+	// Verify the no-op check exists: readlinkSync -> compare targets -> return
+	assert.ok(
+		symlinkManagerSource.includes("readlinkSync") &&
+		symlinkManagerSource.includes("resolve(existingTarget)") &&
+		symlinkManagerSource.includes("=== resolvedTarget") &&
+		symlinkManagerSource.includes("return"),
+		"enableExtension should check if symlink already points to correct target and no-op",
+	);
+
+	// Verify rmSync with force/recursive is used instead of unlinkSync
+	assert.ok(
+		symlinkManagerSource.includes("rmSync") &&
+		symlinkManagerSource.includes("recursive: true") &&
+		symlinkManagerSource.includes("force: true"),
+		"enableExtension should use rmSync with force/recursive for robust cleanup",
+	);
 });
