@@ -28,11 +28,11 @@ test("manager command handler is registered", async () => {
 		"utf-8",
 	);
 
-	// Verify the handler calls showExtensionManager
+	// Verify the handler calls openExtensionPicker
 	assert.ok(
 		managerSource.includes("handler: async (_args, ctx) =>") &&
-		managerSource.includes("await showExtensionManager(ctx)"),
-		"manager handler should call showExtensionManager",
+		managerSource.includes("openExtensionPicker(ctx.ui)"),
+		"manager handler should call openExtensionPicker",
 	);
 });
 

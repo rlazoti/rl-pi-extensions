@@ -2,38 +2,34 @@
 
 TUI manager for enabling/disabling rl-pi-extensions.
 
+## What it does
+
+Provides a framed picker to browse and toggle extensions on/off. Extensions are managed via symlinks in `~/.pi/agent/extensions/`. Changes take effect after `/reload`.
+
 ## Usage
 
-Run `/rl-extensions` in Pi to open the extension manager.
+Run `/rl-extensions` to open the extension picker.
 
-### Navigation
+### Picker Controls
 
-| Key | Action |
-|---|---|
-| ↑ / ↓ | Navigate extensions |
-| Space | Toggle the selected extension |
-| Enter (on Done) | Apply changes and close |
-| Esc | Cancel without saving |
+The picker uses a centered framed panel with a search bar, extension list, and status footer:
+
+- `↑` / `↓`: navigate through extensions
+- `Space`: toggle the selected extension
+- `/`: focus search; search matches name and description
+- `Enter`: apply changes and close
+- `Escape`: cancel without saving
 
 ### Visual Feedback
 
 - `●` = enabled, `○` = disabled
-- `▶` highlights the currently selected item
+- `›` highlights the currently selected item
+- Status footer shows `X/Y enabled` count
 - State updates immediately after toggle
 
-## Config
+## Enable/Disable
 
-Extensions are configured in `~/.pi/agent/rl-extensions.json`:
-
-```json
-{
-  "enabled": {
-    "tmux-feedback": true
-  }
-}
-```
-
-Unconfigured extensions are enabled by default.
+Extensions are enabled/disabled via symlinks in `~/.pi/agent/extensions/`. The picker manages these automatically.
 
 ## License
 
