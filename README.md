@@ -11,8 +11,6 @@ Personal Pi coding agent extensions, managed as a single package with a TUI for 
 | **session-attention** | Desktop notifications when Pi needs your attention |
 | **snippets** | Insert snippets into the current draft |
 
-More extensions coming soon (emacs-feedback, snippets, etc.).
-
 ## Usage
 
 ### Install

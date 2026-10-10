@@ -106,6 +106,16 @@ export class ExtensionPicker implements Component, Focusable {
 		return this.searchFocused ? "search" : "list";
 	}
 
+	private getVisibleList(): ExtensionDescriptor[] {
+		const filtered = this.filteredExtensions();
+		return filtered.length > 0 ? filtered : EXTENSIONS;
+	}
+
+	private clampIndex(index: number): number {
+		const visible = this.getVisibleList();
+		return Math.max(0, Math.min(visible.length - 1, index));
+	}
+
 	handleInput(data: string): void {
 		if (this.completed) return;
 
@@ -125,18 +135,17 @@ export class ExtensionPicker implements Component, Focusable {
 			return;
 		}
 
-		const filtered = this.filteredExtensions();
-
 		if (this.keybindings.matches(data, "tui.select.up")) {
-			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+			this.selectedIndex = this.clampIndex(this.selectedIndex - 1);
 		} else if (this.keybindings.matches(data, "tui.select.down")) {
-			this.selectedIndex = Math.min(filtered.length - 1, this.selectedIndex + 1);
+			this.selectedIndex = this.clampIndex(this.selectedIndex + 1);
 		} else if (matchesKey(data, "/")) {
 			this.searchFocused = true;
 			this.changed();
 			return;
 		} else if (matchesKey(data, Key.space)) {
-			const ext = filtered[this.selectedIndex];
+			const visible = this.getVisibleList();
+			const ext = visible[this.selectedIndex];
 			if (ext) toggleExtension(ext.name, ext.path);
 		} else if (this.keybindings.matches(data, "tui.select.confirm")) {
 			this.complete({ kind: "apply", enabledCount: this.enabledCount() });
