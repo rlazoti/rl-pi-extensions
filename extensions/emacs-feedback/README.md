@@ -8,7 +8,6 @@ Review Pi-authored source changes in Emacs, attach notes to selected source regi
 
 - [Pi](https://github.com/earendil-works/pi-coding-agent) coding agent
 - [Emacs](https://www.gnu.org/software/emacs/) 27.1 or newer
-- The Emacs client (`emacs/pi-feedback.el`) from [pi-emacs-feedback](https://github.com/shopify-playground/pi-emacs-feedback)
 
 ## Install
 
@@ -18,10 +17,10 @@ This extension is part of the [rl-pi-extensions](..) monorepo. Install the whole
 pi install ./rl-pi-extensions
 ```
 
-Load the Emacs client separately:
+Load the Emacs client (included in this package):
 
 ```elisp
-(add-to-list 'load-path "/path/to/pi-emacs-feedback/emacs")
+(add-to-list 'load-path "/path/to/rl-pi-extensions/extensions/emacs-feedback")
 (require 'pi-feedback)
 ```
 

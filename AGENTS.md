@@ -59,7 +59,8 @@ extensions/
 │   └── ...                         # Multiple implementation files
 ├── emacs-feedback/
 │   ├── index.ts                    # Entry point (re-exports implementation)
-│   └── implementation.ts           # Real extension code
+│   ├── implementation.ts           # Real extension code (Pi side)
+│   └── pi-feedback.el              # Emacs client (source-region feedback)
 └── rl-extensions/
     └── index.ts                    # TUI extension manager
 ```
