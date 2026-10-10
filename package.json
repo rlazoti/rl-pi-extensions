@@ -1,7 +1,7 @@
 {
 	"name": "rl-pi-extensions",
-	"version": "0.1.0",
-	"description": "Personal Pi extensions — tmux feedback, session banner",
+	"version": "1.0.0",
+	"description": "Personal Pi coding agent extensions — tmux feedback, session banner, session attention, snippets",
 	"type": "module",
 	"license": "MIT",
 	"author": "Rodrigo Lazoti",
