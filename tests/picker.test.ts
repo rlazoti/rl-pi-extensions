@@ -102,16 +102,16 @@ test("picker: keyboard shortcuts match snippets picker", () => {
 	);
 
 	assert.ok(
-		pickerSource.includes("Key.up") && pickerSource.includes("Key.down"),
-		"picker should support up/down navigation",
+		pickerSource.includes('"tui.select.up"') && pickerSource.includes('"tui.select.down"'),
+		"picker should support up/down navigation via keybindings",
 	);
 	assert.ok(
 		pickerSource.includes("Key.space"),
 		"picker should support space to toggle",
 	);
 	assert.ok(
-		pickerSource.includes("Key.enter"),
-		"picker should support enter to apply",
+		pickerSource.includes('"tui.select.confirm"'),
+		"picker should support confirm via keybindings",
 	);
 	assert.ok(
 		pickerSource.includes("Key.escape"),

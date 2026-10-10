@@ -123,9 +123,9 @@ export class ExtensionPicker implements Component, Focusable {
 
 		const filtered = this.filteredExtensions();
 
-		if (matchesKey(data, Key.up) || matchesKey(data, Key.left)) {
+		if (this.keybindings.matches(data, "tui.select.up")) {
 			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
-		} else if (matchesKey(data, Key.down) || matchesKey(data, Key.right)) {
+		} else if (this.keybindings.matches(data, "tui.select.down")) {
 			this.selectedIndex = Math.min(filtered.length - 1, this.selectedIndex + 1);
 		} else if (matchesKey(data, "/")) {
 			this.searchFocused = true;
@@ -134,7 +134,7 @@ export class ExtensionPicker implements Component, Focusable {
 		} else if (matchesKey(data, Key.space)) {
 			const ext = filtered[this.selectedIndex];
 			if (ext) toggleExtension(ext.name, ext.path);
-		} else if (matchesKey(data, Key.enter)) {
+		} else if (this.keybindings.matches(data, "tui.select.confirm")) {
 			this.complete({ kind: "apply", enabledCount: this.enabledCount() });
 			return;
 		} else if (matchesKey(data, Key.escape)) {
