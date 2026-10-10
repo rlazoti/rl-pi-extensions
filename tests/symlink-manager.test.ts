@@ -53,7 +53,7 @@ test("symlink-manager: getAvailableExtensions returns correct extensions", async
 	assert.equal(exts[0].description, "Inline feedback for tmux scrollback selection");
 	assert.equal(exts[1].description, "Colored banner + auto-naming for Pi sessions");
 	assert.equal(exts[2].description, "Desktop notifications when Pi needs your attention");
-	assert.equal(exts[3].description, "Insert snippets into the current draft");
+	assert.equal(exts[3].description, "Insert predefined text snippets into the prompt");
 	assert.equal(exts[4].description, "Source-region and Magit diff-line feedback from Emacs");
 });
 

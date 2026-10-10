@@ -195,11 +195,11 @@ export function registerSnippetsExtension(
 ): SnippetsController {
 	const controller = new SnippetsController(dependencies);
 	pi.registerCommand("snippets", {
-		description: "Insert snippets into the current draft",
+		description: "Insert predefined text snippets into the prompt",
 		handler: async (_args, ctx) => controller.open(ctx),
 	});
 	pi.registerShortcut(SNIPPETS_SHORTCUT, {
-		description: "Insert snippets into the current draft",
+		description: "Insert predefined text snippets into the prompt",
 		handler: async (ctx) => controller.open(ctx),
 	});
 	pi.on("session_start", (_event, ctx) => controller.startSession(ctx));

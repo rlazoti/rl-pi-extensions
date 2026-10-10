@@ -9,7 +9,7 @@ Personal Pi coding agent extensions, managed as a single package with a TUI for 
 | **tmux-feedback** | Inline feedback for tmux scrollback selection |
 | **session-banner** | Colored banner + auto-naming for Pi sessions |
 | **session-attention** | Desktop notifications when Pi needs your attention |
-| **snippets** | Insert snippets into the current draft |
+| **snippets** | Insert predefined text snippets into the prompt |
 | **emacs-feedback** | Source-region and Magit diff-line feedback from Emacs |
 
 ## Usage

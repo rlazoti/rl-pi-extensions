@@ -52,7 +52,7 @@ export function getAvailableExtensions(monorepoRoot: string): ExtensionDescripto
 		{
 			name: "snippets",
 			label: "snippets",
-			description: "Insert snippets into the current draft",
+			description: "Insert predefined text snippets into the prompt",
 			path: join(monorepoRoot, "extensions", "snippets"),
 		},
 		{
