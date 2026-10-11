@@ -12,18 +12,21 @@ import {
 
 import {
 	getAvailableExtensions,
-	getEnabledExtensions,
-	isExtensionEnabled,
+	getMonorepoRoot,
 	enableExtension,
 	disableExtension,
+	getExtensionStatus,
 	type ExtensionDescriptor,
+	type ExtensionStatus,
 } from "../symlink-manager.js";
 
 export interface ExtensionPickerOptions {
 	readonly signal?: AbortSignal;
 }
 
-export type ExtensionPickerResult = Readonly<{ kind: "cancel" }> | Readonly<{ kind: "apply"; enabledCount: number }>;
+export type ExtensionPickerResult =
+	| Readonly<{ kind: "cancel" }>
+	| Readonly<{ kind: "apply"; enabledCount: number; errors: readonly string[] }>;
 
 const PICKER_HEIGHT_PERCENT = 60;
 
@@ -55,7 +58,10 @@ function fillRows(lines: readonly string[], rows: number): string[] {
 	return Array.from({ length: rows }, (_, index) => lines[index] ?? "");
 }
 
-const EXTENSIONS: ExtensionDescriptor[] = getAvailableExtensions(process.cwd());
+// Derive the monorepo root from this file's location, never from the current
+// working directory (which is the user's project when Pi runs) — links
+// created from the cwd would point at nonexistent <project>/extensions/* paths.
+const EXTENSIONS: ExtensionDescriptor[] = getAvailableExtensions(getMonorepoRoot());
 
 const SEARCH_PLACEHOLDER = "name or description";
 
@@ -149,22 +155,34 @@ export class ExtensionPicker implements Component, Focusable {
 			const visible = this.getVisibleList();
 			const ext = visible[this.selectedIndex];
 			if (ext) {
-				const currentEnabled = isExtensionEnabled(ext.name);
-				this.pendingChanges.set(ext.name, !currentEnabled);
+				// Enabled → disable. Broken or disabled → enable (a broken
+				// symlink is repaired by re-pointing it at this checkout).
+				const status = getExtensionStatus(ext.name);
+				this.pendingChanges.set(ext.name, status !== "enabled");
 				this.changed();
 				return;
 			}
 		} else if (this.keybindings.matches(data, "tui.select.confirm")) {
-			// Apply all pending changes
+			// Apply all pending changes, reporting per-extension failures
+			const errors: string[] = [];
 			for (const [name, enabled] of this.pendingChanges) {
-				if (enabled) {
-					enableExtension(name, EXTENSIONS.find((e) => e.name === name)?.path ?? "");
-				} else {
-					disableExtension(name);
+				try {
+					if (enabled) {
+						const ext = EXTENSIONS.find((e) => e.name === name);
+						if (!ext) {
+							errors.push(`${name}: unknown extension`);
+							continue;
+						}
+						enableExtension(name, ext.path);
+					} else {
+						disableExtension(name);
+					}
+				} catch (error) {
+					errors.push(`${name}: ${error instanceof Error ? error.message : String(error)}`);
 				}
 			}
 			this.pendingChanges.clear();
-			this.complete({ kind: "apply", enabledCount: this.enabledCount() });
+			this.complete({ kind: "apply", enabledCount: this.enabledCount(), errors });
 			return;
 		} else if (matchesKey(data, Key.escape)) {
 			this.complete({ kind: "cancel" });
@@ -207,10 +225,20 @@ export class ExtensionPicker implements Component, Focusable {
 			const ext = visible[i];
 			const isSelected = i === this.selectedIndex;
 			const pendingEnabled = this.pendingChanges.get(ext.name);
-			const enabled = pendingEnabled !== undefined ? pendingEnabled : isExtensionEnabled(ext.name);
-			const marker = enabled ? this.theme.fg("success", "●") : this.theme.fg("dim", "○");
+			const effective: ExtensionStatus =
+				pendingEnabled !== undefined
+					? pendingEnabled
+						? "enabled"
+						: "disabled"
+					: getExtensionStatus(ext.name);
+			const marker =
+				effective === "enabled"
+					? this.theme.fg("success", "●")
+					: effective === "broken"
+						? this.theme.fg("warning", "✕")
+						: this.theme.fg("dim", "○");
 			const prefix = isSelected ? this.theme.fg("accent", "› ") : "  ";
-			const nameStyle = isSelected ? "accent" : enabled ? "text" : "muted";
+			const nameStyle = isSelected ? "accent" : effective === "enabled" ? "text" : effective === "broken" ? "warning" : "muted";
 			const name = this.theme.fg(nameStyle, ext.label);
 			const desc = this.theme.fg("muted", ext.description);
 			lines.push(fit(`${prefix}${marker} ${name} — ${desc}`, contentWidth));
@@ -224,9 +252,16 @@ export class ExtensionPicker implements Component, Focusable {
 		// Separator before status
 		lines.push("");
 
-		// Status line
-		const enabledCount = EXTENSIONS.filter((e) => isExtensionEnabled(e.name)).length;
-		lines.push(fit(this.theme.fg("dim", `${enabledCount}/${EXTENSIONS.length} enabled`), contentWidth));
+		// Status line (reflects pending changes so the count matches the list)
+		const effectiveStatuses = EXTENSIONS.map((e) => {
+			const pending = this.pendingChanges.get(e.name);
+			return pending !== undefined ? (pending ? "enabled" : "disabled") : getExtensionStatus(e.name);
+		});
+		const enabledCount = effectiveStatuses.filter((s) => s === "enabled").length;
+		const brokenTotal = effectiveStatuses.filter((s) => s === "broken").length;
+		const statusText = `${enabledCount}/${EXTENSIONS.length} enabled${brokenTotal > 0 ? ` • ${brokenTotal} broken` : ""}`;
+		const statusStyle = brokenTotal > 0 ? "warning" : "dim";
+		lines.push(fit(this.theme.fg(statusStyle, statusText), contentWidth));
 
 		// Separator after status
 		lines.push("");
@@ -259,7 +294,7 @@ export class ExtensionPicker implements Component, Focusable {
 	private enabledCount(): number {
 		return EXTENSIONS.filter((e) => {
 			const pending = this.pendingChanges.get(e.name);
-			return pending !== undefined ? pending : isExtensionEnabled(e.name);
+			return pending !== undefined ? pending : getExtensionStatus(e.name) === "enabled";
 		}).length;
 	}
 
