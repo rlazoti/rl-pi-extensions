@@ -6,7 +6,7 @@ import {
 	formatAskBody,
 	truncateText,
 	inactiveReason,
-} from "./implementation.js";
+} from "./implementation.ts";
 
 // --- claimProcessRole tests ---
 
@@ -71,17 +71,35 @@ test("formatAskBody: returns default message for non-object args", () => {
 });
 
 test("formatAskBody: returns question count for multiple questions", () => {
-	const args = { questions: ["Question 1", "Question 2", "Question 3"] };
+	const args = {
+		questions: [
+			{ id: "a", question: "Question 1", label: "A" },
+			{ id: "b", question: "Question 2", label: "B" },
+			{ id: "c", question: "Question 3", label: "C" },
+		],
+	};
 	assert.equal(formatAskBody(args), "3 questions waiting for your input");
 });
 
 test("formatAskBody: returns single question text", () => {
-	const args = { questions: ["What is your name?"] };
+	const args = { questions: [{ id: "q", question: "What is your name?", label: "Q" }] };
 	assert.equal(formatAskBody(args), "What is your name?");
 });
 
-test("formatAskBody: returns default for empty question", () => {
-	const args = { questions: [""] };
+test("formatAskBody: accepts a single question object instead of an array", () => {
+	const args = { questions: { id: "q", question: "Solo question?", label: "Q" } };
+	assert.equal(formatAskBody(args), "Solo question?");
+});
+
+test("formatAskBody: truncates long question text", () => {
+	const args = { questions: [{ id: "q", question: "A".repeat(250), label: "Q" }] };
+	const result = formatAskBody(args);
+	assert.equal(result.length, 200);
+	assert.ok(result.endsWith("…"));
+});
+
+test("formatAskBody: returns default for empty question text", () => {
+	const args = { questions: [{ id: "q", question: "   ", label: "Q" }] };
 	assert.equal(formatAskBody(args), "Waiting for your input");
 });
 

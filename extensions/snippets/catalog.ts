@@ -73,7 +73,7 @@ function snapshot(
 	});
 }
 
-function normalizedSource(content: string): string {
+export function normalizedSource(content: string): string {
 	const withoutBom = content.startsWith("\uFEFF") ? content.slice(1) : content;
 	return withoutBom.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
@@ -84,7 +84,7 @@ function normalizedSource(content: string): string {
  * Snippet files use exact delimiter lines. The body starts after only the exact
  * closing delimiter's newline, so any following blank separator is body text.
  */
-function extractBody(normalized: string): string {
+export function extractBody(normalized: string): string {
 	if (!normalized.startsWith("---")) return normalized;
 
 	const openingEnd = normalized.indexOf("\n");
