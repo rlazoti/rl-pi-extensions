@@ -17,8 +17,7 @@ The picker uses a centered framed panel with a search bar, extension list, and s
 - `↑` / `↓`: navigate through extensions
 - `Space`: toggle the selected extension (visual only)
 - `/`: focus search; search matches name and description
-- `Tab`: focus the Done button
-- `Enter` (on list or button): apply all pending changes and close
+- `Enter`: apply all pending changes and close
 - `Escape`: cancel without saving (discards all pending changes)
 
 ### Visual Feedback
