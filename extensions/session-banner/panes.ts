@@ -97,8 +97,11 @@ export class RenderScheduler {
 	private interval = DEFAULT_TICK_MS;
 	private timer: ReturnType<typeof setInterval> | null = null;
 	private lastPaint = Number.NEGATIVE_INFINITY; // first request always paints immediately
+	private readonly paint: () => void;
 
-	constructor(private readonly paint: () => void) {}
+	constructor(paint: () => void) {
+		this.paint = paint;
+	}
 
 	/** Update the animated-pane count + desired interval; (re)arms/stops the tick. */
 	setAnimation(animatedCount: number, minIntervalMs: number): void {
