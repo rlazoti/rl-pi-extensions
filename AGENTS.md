@@ -103,10 +103,9 @@ rm ~/.pi/agent/extensions/tmux-feedback
 ## 5. Testing Expectations
 
 - **Run `npm test`** before every commit. All tests must pass.
-- **Test coverage targets:**
-  - `symlink-manager.test.ts`: symlink creation/removal, toggle logic, directory structure
-  - `manager.test.ts`: command registration, handler existence (source inspection since Pi deps unavailable)
-  - `extension-loading.test.ts`: validates all import paths resolve to existing files
+- **Discovery:** `npm test` runs `node --test .` with recursive discovery — every `*.test.ts` / `*.test.mjs` under `tests/` and `extensions/` runs automatically. Never hardcode file lists.
+- **Pi packages in tests:** `test-support/register.mjs` (loaded via `--import`) registers a resolve hook that aliases `@earendil-works/*` and `@mariozechner/*` to the real packages in the local Pi install (`~/.pi/agent/install/releases/<version>`, override with `PI_CODING_AGENT_DIR`) and remaps jiti-style `.js` relative imports to `.ts` inside this repo. Test files import sibling sources with `.ts` extensions.
+- **Coverage map:** emacs-feedback (53, behavioral), session-attention (process roles, ask-body formatting, truncation), snippets (display-safe, placeholders, frontmatter helpers), tmux-feedback (state reconstruction, message formatting, command handlers via fake Pi), symlink-manager + picker + extension-loading (string/behavioral). The three unported vitest suites are named `*.test.vitest.ts` (out of discovery) until ported.
 - **Test isolation:** Each test creates its own temp directory. Clean up in the same test.
 - **No regressions:** When fixing a bug, add a test that reproduces it first.
 

@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **tests**: 74 new runnable tests — session-attention (process roles, ask-body formatting, truncation), snippets (display-safe, placeholders, frontmatter catalog helpers), tmux-feedback (branch state reconstruction, message formatting, all six command handlers via a fake Pi)
+- **tests**: `test-support/` resolve hooks that let bare `node --test` load extension sources — aliases `@earendil-works/*`/`@mariozechner/*` to the real packages from the local Pi install and remaps jiti-style `.js` relative imports to `.ts`
+
+### Changed
+
+- **tests**: `npm test` now discovers all `*.test.{ts,mjs}` recursively; the previous hardcoded file list is what let test suites go dead without failing. Three unported vitest suites are named `*.test.vitest.ts` (outside discovery) until they are ported to `node:test`
+
 ## [1.0.0] - 2025-07-11
 
 ### Added
