@@ -10,11 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **tests**: 74 new runnable tests — session-attention (process roles, ask-body formatting, truncation), snippets (display-safe, placeholders, frontmatter catalog helpers), tmux-feedback (branch state reconstruction, message formatting, all six command handlers via a fake Pi)
+- **tests**: 124 more — the session-banner `helpers` (98: emoji/title parsing, world-context detection, auto-naming context + URL reduction, generated-name cleaning) and `panes` (26: RenderScheduler coalescing/animation via `mock.timers`, paneRegistry singleton/host/panes) vitest suites ported to `node:test`
 - **tests**: `test-support/` resolve hooks that let bare `node --test` load extension sources — aliases `@earendil-works/*`/`@mariozechner/*` to the real packages from the local Pi install and remaps jiti-style `.js` relative imports to `.ts`
 
 ### Changed
 
-- **tests**: `npm test` now discovers all `*.test.{ts,mjs}` recursively; the previous hardcoded file list is what let test suites go dead without failing. Three unported vitest suites are named `*.test.vitest.ts` (outside discovery) until they are ported to `node:test`
+- **tests**: `npm test` now discovers all `*.test.{ts,mjs}` recursively; the previous hardcoded file list is what let test suites go dead without failing. The one remaining unported vitest suite (session-banner `index`) is named `*.test.vitest.ts` (outside discovery) until it is ported to `node:test`
+- **session-banner**: `RenderScheduler` constructor no longer uses a TypeScript parameter property (type stripping, used by the test runner, does not support them); behavior unchanged
 
 ## [1.0.0] - 2025-07-11
 
