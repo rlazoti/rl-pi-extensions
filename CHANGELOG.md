@@ -11,12 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **tests**: 74 new runnable tests — session-attention (process roles, ask-body formatting, truncation), snippets (display-safe, placeholders, frontmatter catalog helpers), tmux-feedback (branch state reconstruction, message formatting, all six command handlers via a fake Pi)
 - **tests**: 124 more — the session-banner `helpers` (98: emoji/title parsing, world-context detection, auto-naming context + URL reduction, generated-name cleaning) and `panes` (26: RenderScheduler coalescing/animation via `mock.timers`, paneRegistry singleton/host/panes) vitest suites ported to `node:test`
+- **tests**: 126 more — the session-banner `index` vitest suite (the full extension behavior: lifecycle hooks, rich-editor host handoff + banner pane, deferred title re-asserts, auto-naming incl. SKIP/back-off/stale-result drops, Herdr tab rename + ownership persistence, cmux workspace rename, `/title`) ported to `node:test` with `mock.timers`
+- **tests**: null-gated test seams in session-banner `implementation.ts` (`setCompleteForTesting`, `setExecFileForTesting`, `setFsForTesting`) — Node 26's test runner has no ESM module mocking, so the LLM/CLI/fs dependencies are injectable instead; production behavior unchanged
 - **tests**: `test-support/` resolve hooks that let bare `node --test` load extension sources — aliases `@earendil-works/*`/`@mariozechner/*` to the real packages from the local Pi install and remaps jiti-style `.js` relative imports to `.ts`
 
 ### Changed
 
-- **tests**: `npm test` now discovers all `*.test.{ts,mjs}` recursively; the previous hardcoded file list is what let test suites go dead without failing. The one remaining unported vitest suite (session-banner `index`) is named `*.test.vitest.ts` (outside discovery) until it is ported to `node:test`
+- **tests**: `npm test` now discovers all `*.test.{ts,mjs}` recursively; the previous hardcoded file list is what let test suites go dead without failing. All three previously-dead session-banner vitest suites are now ported and run in every `npm test`
 - **session-banner**: `RenderScheduler` constructor no longer uses a TypeScript parameter property (type stripping, used by the test runner, does not support them); behavior unchanged
+- **session-banner**: `PI_SESSION_BANNER_PROVIDER` / `PI_SESSION_BANNER_MODEL` / `CMUX_WORKSPACE_ID` are read lazily at use instead of captured at module load — Pi's env never changes mid-run, so production behavior is identical; tests no longer need module re-imports to change them
+- **tests**: the `test-support` hooks now mirror Pi's own extension loader for `pi-ai` — the package root resolves to the compat entrypoint (which exports the legacy `complete` API), not the core entry, matching `virtual-modules.js`
 
 ## [1.0.0] - 2025-07-11
 

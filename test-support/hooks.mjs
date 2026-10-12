@@ -48,13 +48,30 @@ export async function resolve(specifier, context, nextResolve) {
 			result = error;
 		}
 		if (piNodeModulesDir) {
-			const name = specifier.split("/")[1];
+			const parts = specifier.split("/");
+			const name = parts[1];
+			const subpath = parts.slice(2);
 			const physicalScope = specifier.startsWith("@mariozechner")
 				? "@earendil-works"
 				: specifier.split("/")[0];
 			const candidate = path.join(piNodeModulesDir, physicalScope, name);
-			if (existsSync(candidate) && existsSync(path.join(candidate, "dist", "index.js"))) {
-				const entry = pathToFileURL(path.join(candidate, "dist", "index.js")).href;
+			// Mirror Pi's own extension loader (virtual-modules.js): the pi-ai
+			// ROOT resolves to the compat entrypoint (a strict superset of the
+			// core entry — it exports the legacy `complete` global API); subpaths
+			// map to dist/<subpath>.js; everything else uses dist/index.js.
+			let entryFile;
+			if (name === "pi-ai" && subpath.length === 0) {
+				entryFile = path.join(candidate, "dist", "compat.js");
+			} else if (name === "pi-ai") {
+				entryFile = path.join(candidate, "dist", ...subpath, "index.js");
+				if (!existsSync(entryFile)) {
+					entryFile = path.join(candidate, "dist", subpath.join("/") + ".js");
+				}
+			} else {
+				entryFile = path.join(candidate, "dist", "index.js");
+			}
+			if (existsSync(candidate) && existsSync(entryFile)) {
+				const entry = pathToFileURL(entryFile).href;
 				return nextResolve(entry, context);
 			}
 		}

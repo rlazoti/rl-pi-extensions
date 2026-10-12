@@ -61,6 +61,23 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { truncateToWidth } from "@mariozechner/pi-tui";
 
 import { paneRegistry, type BannerOutput } from "./panes.js";
+
+// ─── Test seams ───────────────────────────────────────────────────────────
+// Node's test runner cannot mock ESM modules, so the LLM + I/O dependencies
+// are injectable. Each setter is null-gated: production runs keep the real
+// implementation untouched.
+let execFileFn: typeof execFile = execFile;
+export function setExecFileForTesting(fn: typeof execFile | null): void {
+	if (fn) execFileFn = fn;
+}
+let fsLike: typeof fs = fs;
+export function setFsForTesting(impl: typeof fs | null): void {
+	if (impl) fsLike = impl;
+}
+let completeFn: typeof complete = complete;
+export function setCompleteForTesting(fn: typeof complete | null): void {
+	if (fn) completeFn = fn;
+}
 import {
 	AUTO_NAME_SYSTEM_PROMPT,
 	AUTO_NAME_SYSTEM_PROMPT_FORCE,
@@ -79,8 +96,11 @@ import {
 	randomTitleColor,
 } from "./helpers.js";
 
-const PROVIDER = process.env.PI_SESSION_BANNER_PROVIDER || "anthropic";
-const MODEL_ID = process.env.PI_SESSION_BANNER_MODEL || "claude-haiku-4-5";
+// Read lazily rather than captured at module load: env set after import (e.g.
+// by the test suite) is honored; Pi's env never changes mid-run, so behavior
+// in production is identical.
+const provider = () => process.env.PI_SESSION_BANNER_PROVIDER || "anthropic";
+const modelId = () => process.env.PI_SESSION_BANNER_MODEL || "claude-haiku-4-5";
 const MAX_AUTO_TURNS = 3;
 const HERDR_TITLE_STATE_LIMIT = 50;
 const OPEN_HERDR_TAB_TITLE = "📭 Open";
@@ -104,8 +124,6 @@ function herdrTitleStatePath(): string {
 // Docked panes (cmux Dock terminals, `dock_scope` set — e.g. a global dock
 // terminal that cmux reports inside every workspace) are not workspace tabs,
 // so they are excluded from that count.
-const CMUX_WORKSPACE_ID = process.env.CMUX_WORKSPACE_ID;
-
 type HerdrTabGetResponse = { result?: { tab?: { label?: unknown } } };
 
 function herdrTabLabelFromJson(stdout: string): string | null {
@@ -120,7 +138,7 @@ function herdrTabLabelFromJson(stdout: string): string | null {
 
 function getHerdrTabLabel(tabId: string): Promise<string | null> {
   return new Promise((resolve) => {
-    execFile("herdr", ["tab", "get", tabId], (error, stdout) => {
+    execFileFn("herdr", ["tab", "get", tabId], (error, stdout) => {
       if (error) {
         resolve(null);
         return;
@@ -132,7 +150,7 @@ function getHerdrTabLabel(tabId: string): Promise<string | null> {
 
 function writeHerdrTabTitle(tabId: string, title: string): Promise<boolean> {
   return new Promise((resolve) => {
-    execFile("herdr", ["tab", "rename", tabId, title], (error) => resolve(!error));
+    execFileFn("herdr", ["tab", "rename", tabId, title], (error) => resolve(!error));
   });
 }
 
@@ -185,14 +203,15 @@ function cmuxWorkspaceHasMultipleTabs(stdout: string): boolean {
 }
 
 function renameCmuxWorkspace(title: string): void {
-  if (!CMUX_WORKSPACE_ID) return;
+  const workspaceId = process.env.CMUX_WORKSPACE_ID;
+  if (!workspaceId) return;
   // Async + best-effort; never block the agent loop or surface CLI errors.
-  execFile("cmux", ["--json", "tree", "--workspace", CMUX_WORKSPACE_ID], (error, stdout) => {
+  execFileFn("cmux", ["--json", "tree", "--workspace", workspaceId], (error, stdout) => {
     if (error) return;
     if (cmuxWorkspaceHasMultipleTabs(stdout)) return;
-    execFile(
+    execFileFn(
       "cmux",
-      ["rename-workspace", "--workspace", CMUX_WORKSPACE_ID, "--", title],
+      ["rename-workspace", "--workspace", workspaceId, "--", title],
       () => {},
     );
   });
@@ -290,7 +309,7 @@ export default function (pi: ExtensionAPI) {
     if (persistedHerdrTitles) return persistedHerdrTitles;
 
     try {
-      const parsed = JSON.parse(fs.readFileSync(herdrTitleStatePath(), "utf-8")) as unknown;
+      const parsed = JSON.parse(fsLike.readFileSync(herdrTitleStatePath(), "utf-8")) as unknown;
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         persistedHerdrTitles = pruneHerdrTitles(
           Object.fromEntries(
@@ -329,8 +348,8 @@ export default function (pi: ExtensionAPI) {
 
           const statePath = herdrTitleStatePath();
           const snapshot = `${JSON.stringify(persistedHerdrTitles, null, 2)}\n`;
-          await fs.promises.mkdir(path.dirname(statePath), { recursive: true });
-          await fs.promises.writeFile(statePath, snapshot, { mode: 0o600 });
+          await fsLike.promises.mkdir(path.dirname(statePath), { recursive: true });
+          await fsLike.promises.writeFile(statePath, snapshot, { mode: 0o600 });
         } catch {
           // Best-effort state only; persistence must never reject into the rename queue.
         }
@@ -626,13 +645,13 @@ export default function (pi: ExtensionAPI) {
 		options?: { forceTitle?: boolean },
 	): Promise<{ emoji: string; label: string } | null> {
 		try {
-			const model = ctx.modelRegistry.find(PROVIDER, MODEL_ID);
+			const model = ctx.modelRegistry.find(provider(), modelId());
 			if (!model) return null;
 
 			const auth = await getRequestAuth(ctx, model);
 			if (!auth) return null;
 
-			const response = await complete(
+			const response = await completeFn(
 				model,
 				{
 					systemPrompt: options?.forceTitle ? AUTO_NAME_SYSTEM_PROMPT_FORCE : AUTO_NAME_SYSTEM_PROMPT,
@@ -890,7 +909,7 @@ export default function (pi: ExtensionAPI) {
 				autoNamingActive = wasAutoNamingActive;
 			}
 			if (!result) {
-				ctx.ui.notify(`Failed to generate name (provider=${PROVIDER}, model=${MODEL_ID})`, "warning");
+				ctx.ui.notify(`Failed to generate name (provider=${provider()}, model=${modelId()})`, "warning");
 				return;
 			}
 
