@@ -56,9 +56,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { complete } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { truncateToWidth } from "@mariozechner/pi-tui";
+import { complete } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 
 import { paneRegistry, type BannerOutput } from "./panes.js";
 import {

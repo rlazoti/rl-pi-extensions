@@ -51,3 +51,41 @@ test("extensions: all entry points have valid import paths", async () => {
 		}
 	}
 });
+
+test("extensions: all sources import from @earendil-works scope, not @mariozechner (M7)", () => {
+	// Pi's loader aliases both scopes, but the repo standardizes on
+	// @earendil-works so a future Pi that drops the alias fails loudly here.
+	const scan = (dir: string): void => {
+		for (const entry of readdirSync(dir)) {
+			if (entry.startsWith(".")) continue;
+			const full = join(dir, entry);
+			const stat = statSync(full);
+			if (stat.isDirectory()) {
+				scan(full);
+				continue;
+			}
+			if (!entry.endsWith(".ts")) continue;
+			// Dead vitest files (still named *.test.ts on this branch) are
+			// replaced by the test-wiring port; only production sources are bound.
+			if (entry.includes(".test.")) continue;
+			const source = readFileSync(full, "utf-8");
+			assert.ok(
+				!source.includes("@mariozechner/"),
+				`${relative(process.cwd(), full)} must import from @earendil-works/*, not @mariozechner/*`,
+			);
+		}
+	};
+	scan(join(process.cwd(), "extensions"));
+});
+
+test("extensions: entry points type the ExtensionAPI parameter, not `pi: any` (M5)", () => {
+	for (const entry of readdirSync(join(process.cwd(), "extensions"))) {
+		const indexPath = join(process.cwd(), "extensions", entry, "index.ts");
+		if (!existsSync(indexPath)) continue;
+		const source = readFileSync(indexPath, "utf-8");
+		assert.ok(
+			!/pi:\s*any\b/.test(source),
+			"extensions/" + entry + "/index.ts must not type the extension API as any",
+		);
+	}
+});
