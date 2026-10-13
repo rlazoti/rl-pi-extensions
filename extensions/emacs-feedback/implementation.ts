@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import {
   mkdir,
@@ -44,6 +44,12 @@ export interface FeedbackBundle {
 
 export interface SessionDescriptor {
   version: 1;
+  /**
+   * Stable descriptor key: the Pi session id (sanitized, see
+   * descriptorSessionId) when available, otherwise a random UUID. The inbox
+   * and archive paths derive from it, so a stable id keeps a session's queued
+   * notes reachable across switches, resumes, and reloads.
+   */
   sessionId: string;
   projectRoot: string;
   cwd: string;
@@ -88,6 +94,9 @@ export interface DescriptorFileOperations {
 export interface CommandContextLike {
   hasUI?: boolean;
   isIdle(): boolean;
+  sessionManager?: {
+    getSessionId?(): string | undefined;
+  };
   ui?: {
     notify?(message: string, type?: NotifyType): void;
     setStatus?(key: string, value: string | undefined): void;
@@ -156,6 +165,26 @@ function normalizeSessionName(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const normalized = value.trim().replace(/\s+/g, ' ');
   return normalized === '' ? undefined : normalized;
+}
+
+const SAFE_DESCRIPTOR_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/**
+ * Map a Pi session id to a stable, filename-safe descriptor id.
+ *
+ * The descriptor id is also the inbox/archive key, so the same session must
+ * always map to the same id — across switches, resumes, reloads, and process
+ * restarts — or queued notes get stranded in an unreachable inbox. Safe ids
+ * pass through unchanged; anything else is hashed deterministically. Returns
+ * undefined when no usable id is available (callers fall back to a random
+ * UUID).
+ */
+export function descriptorSessionId(raw: string | undefined | null): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  if (trimmed === '') return undefined;
+  if (SAFE_DESCRIPTOR_ID.test(trimmed)) return trimmed;
+  return createHash('sha256').update(trimmed).digest('hex');
 }
 
 const descriptorFileOperations: DescriptorFileOperations = {
@@ -690,8 +719,23 @@ export function registerSessionLifecycle(
       }
     }
 
+    // Key the descriptor by Pi's stable session id so a session switch,
+    // resume, or reload recreates it with the SAME id — and therefore the
+    // SAME inbox path — keeping queued notes reachable when the user returns
+    // to the session. Random-UUID fallback for runtimes without the getter.
+    let stableSessionId: string | undefined;
     try {
-      descriptor = await createSessionDescriptor({ ...createOptions, sessionName });
+      stableSessionId = descriptorSessionId(ctx.sessionManager?.getSessionId?.());
+    } catch (_error) {
+      // A stale context can throw; the random fallback keeps registration alive.
+    }
+
+    try {
+      descriptor = await createSessionDescriptor({
+        ...createOptions,
+        sessionId: createOptions.sessionId ?? stableSessionId,
+        sessionName,
+      });
       await refreshStatus(ctx, descriptor, storage);
     } catch (error) {
       await notify(
@@ -741,8 +785,12 @@ export function registerSessionLifecycle(
     if (!descriptor) return;
     const descriptorToRemove = descriptor;
     descriptor = undefined;
-    // Remove only the session descriptor on shutdown. Inbox JSONL files may hold
-    // unaddressed Emacs feedback, so they are kept until address/clear truncates them.
+    // Remove only the session descriptor on shutdown, so Emacs no longer
+    // matches this (no longer active) session. Inbox JSONL files may hold
+    // unaddressed Emacs feedback, so they are kept until address/clear
+    // truncates them. The descriptor itself is disposable: the next
+    // session_start for the same stable session id recreates it pointing at
+    // the same inbox (see descriptorSessionId).
     await removeSessionDescriptor(descriptorToRemove, storage).catch(() => undefined);
   });
 

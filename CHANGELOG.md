@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **docs**: rl-extensions README no longer documents a "Done button" (Tab) that never shipped, and the 1.1.0 entry below was corrected; a guard test keeps the README from claiming picker controls that don't exist
+- **emacs-feedback**: queued feedback was orphaned when switching away from a session and back — every activation minted a random descriptor id (new inbox), so notes left in the old inbox were unreachable. Descriptors are now keyed by the stable Pi session id, so switch/resume/reload re-attaches to the same inbox until notes are addressed or cleared
 
 ## [1.0.0] - 2025-07-11
 

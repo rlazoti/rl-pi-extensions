@@ -1057,3 +1057,97 @@ test('refreshStatus sets note count and clears status when the inbox is empty', 
     { key: 'emacs-feedback', value: undefined },
   ]);
 });
+
+// --- Stable session id (B3: inbox must survive session switch/resume) ---
+
+test('descriptorSessionId passes safe session ids through unchanged', () => {
+  const id = '123e4567-e89b-12d3-a456-426614174000';
+  assert.equal(emacsFeedback.descriptorSessionId(id), id);
+  assert.equal(emacsFeedback.descriptorSessionId('plain-name_1.2-3'), 'plain-name_1.2-3');
+  assert.equal(emacsFeedback.descriptorSessionId('  padded-id  '), 'padded-id');
+});
+
+test('descriptorSessionId hashes unsafe ids deterministically to safe ids', () => {
+  const unsafe = 'weird/id with spaces & \x01';
+  const first = emacsFeedback.descriptorSessionId(unsafe);
+  const second = emacsFeedback.descriptorSessionId(unsafe);
+  assert.notEqual(first, unsafe);
+  assert.equal(first, second, 'same input must always map to the same id');
+  assert.match(first, /^[a-f0-9]{64}$/);
+  assert.notEqual(first, emacsFeedback.descriptorSessionId('other/id'));
+});
+
+test('descriptorSessionId returns undefined for missing or empty ids', () => {
+  assert.equal(emacsFeedback.descriptorSessionId(undefined), undefined);
+  assert.equal(emacsFeedback.descriptorSessionId(null), undefined);
+  assert.equal(emacsFeedback.descriptorSessionId(''), undefined);
+  assert.equal(emacsFeedback.descriptorSessionId('   \t '), undefined);
+});
+
+test('createSessionDescriptor re-created with the same id reuses the same inbox', async () => {
+  const home = await makeTempDir('emacs-feedback-home-');
+  const storage = storagePaths(home);
+  const sessionId = 'stable-session-1';
+
+  const first = await emacsFeedback.createSessionDescriptor({ home, cwd: home, sessionId });
+  await fs.appendFile(first.inboxPath, `${JSON.stringify(bundleA)}\n`);
+
+  // Simulate a later activation of the same Pi session (switch back / reload)
+  const second = await emacsFeedback.createSessionDescriptor({ home, cwd: home, sessionId });
+  assert.equal(second.inboxPath, first.inboxPath);
+
+  const parsed = await emacsFeedback.readInbox(second.inboxPath);
+  assert.equal(emacsFeedback.countNotes(parsed.bundles), 1, 'queued notes must survive descriptor re-creation');
+});
+
+test('registerSessionLifecycle keeps the same inbox when switching away and back (B3 regression)', async () => {
+  const home = await makeTempDir('emacs-feedback-home-');
+  const storage = storagePaths(home);
+  const pi = makeFakePi({ getSessionName: () => 'A' });
+  const getDescriptor = emacsFeedback.registerSessionLifecycle(pi, storage, { home, cwd: home });
+
+  const startSession = async (sessionId, name) => {
+    const ctx = makeFakeCtx();
+    ctx.sessionManager = { getSessionId: () => sessionId };
+    await pi.events.get('session_start')({}, ctx);
+  };
+
+  // Session A starts and receives a queued Emacs feedback bundle
+  await startSession('stable-A', 'A');
+  const inboxA = getDescriptor().inboxPath;
+  const descriptorPathA = path.join(storage.sessionsDir, 'stable-A.json');
+  assert.equal(getDescriptor().sessionId, 'stable-A');
+  await fs.appendFile(inboxA, `${JSON.stringify(bundleA)}\n`);
+
+  // Session replacement: A shuts down (descriptor removed), B starts
+  await pi.events.get('session_shutdown')({ reason: 'resume' });
+  assert.equal(getDescriptor(), undefined);
+  assert.equal(await pathExists(descriptorPathA), false);
+  await startSession('stable-B', 'B');
+  assert.notEqual(getDescriptor().inboxPath, inboxA, 'different session gets its own inbox');
+
+  // Switch back to A: same stable id must re-attach to A's original inbox
+  await pi.events.get('session_shutdown')({ reason: 'resume' });
+  await startSession('stable-A', 'A');
+  assert.equal(getDescriptor().inboxPath, inboxA);
+
+  const parsed = await emacsFeedback.readInbox(getDescriptor().inboxPath);
+  assert.equal(emacsFeedback.countNotes(parsed.bundles), 1, 'A\'s queued notes must still be reachable after switch away and back');
+});
+
+test('registerSessionLifecycle falls back to unique random ids without a session manager', async () => {
+  const home = await makeTempDir('emacs-feedback-home-');
+  const storage = storagePaths(home);
+  const pi = makeFakePi({});
+  const getDescriptor = emacsFeedback.registerSessionLifecycle(pi, storage, { home, cwd: home });
+
+  const ctx = makeFakeCtx();
+  await pi.events.get('session_start')({}, ctx);
+  const firstId = getDescriptor().sessionId;
+  await pi.events.get('session_shutdown')({ reason: 'quit' });
+
+  await pi.events.get('session_start')({}, ctx);
+  const secondId = getDescriptor().sessionId;
+  assert.notEqual(firstId, secondId, 'without a stable id, activations must not collide');
+  assert.match(firstId, /^[a-f0-9-]{36}$/);
+});

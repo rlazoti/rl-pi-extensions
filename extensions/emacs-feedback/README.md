@@ -60,6 +60,8 @@ Uses local filesystem storage under `~/.pi/emacs-feedback/`:
 └── archive/     # Bundles archived after /emacs-feedback-address
 ```
 
+Descriptors are keyed by the **stable Pi session id** (`ctx.sessionManager.getSessionId()`, sanitized), not a random value per activation. Switching away from a session, resuming it, reloading, or restarting Pi re-creates the descriptor pointing at the **same inbox file**, so queued feedback stays reachable until you address or clear it. (Runtimes without a session id fall back to a random UUID per activation.)
+
 ## Session Matching
 
 Pi and Emacs match sessions by normalized project context:
