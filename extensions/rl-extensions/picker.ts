@@ -1,18 +1,17 @@
+import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
 import {
 	Key,
 	matchesKey,
-	type Theme,
 	type TUI,
 	type KeybindingsManager,
 	type Focusable,
 	type Component,
-	truncateToWidth,
-	visibleWidth,
 } from "@earendil-works/pi-tui";
+
+import { fit, fillRows, frameLines, panelLine } from "../panel.js";
 
 import {
 	getAvailableExtensions,
-	getEnabledExtensions,
 	isExtensionEnabled,
 	enableExtension,
 	disableExtension,
@@ -26,34 +25,6 @@ export interface ExtensionPickerOptions {
 export type ExtensionPickerResult = Readonly<{ kind: "cancel" }> | Readonly<{ kind: "apply"; enabledCount: number }>;
 
 const PICKER_HEIGHT_PERCENT = 60;
-
-function fit(line: string, width: number): string {
-	return truncateToWidth(line, Math.max(1, width), "", true);
-}
-
-function panelLine(theme: Theme, line: string, width: number): string {
-	const background = theme.getBgAnsi("customMessageBg");
-	const padded = fit(line, width);
-	const restored = padded.replace(/\u001b\[(?:0|49)?m/g, (reset) => reset + background);
-	return theme.bg("customMessageBg", restored);
-}
-
-function frameLines(theme: Theme, content: readonly string[], width: number, paddingY: number): string[] {
-	const inner = width - 4;
-	const border = (text: string) => theme.fg("accent", text);
-	const title = truncateToWidth(" Extensions ", width - 2, "");
-	const top = border(`╔${title}${"═".repeat(Math.max(0, width - 2 - visibleWidth(title)))}╗`);
-	const bottom = border(`╚${"═".repeat(width - 2)}╝`);
-	const blank = border("║") + " ".repeat(width - 2) + border("║");
-	const body = content.map((line) => border("║") + " " + fit(line, inner) + " " + border("║"));
-	return [top, ...Array<string>(paddingY).fill(blank), ...body, ...Array<string>(paddingY).fill(blank), bottom].map(
-		(line) => panelLine(theme, line, width),
-	);
-}
-
-function fillRows(lines: readonly string[], rows: number): string[] {
-	return Array.from({ length: rows }, (_, index) => lines[index] ?? "");
-}
 
 const EXTENSIONS: ExtensionDescriptor[] = getAvailableExtensions(process.cwd());
 
@@ -132,7 +103,9 @@ export class ExtensionPicker implements Component, Focusable {
 			} else if (data.length === 1) {
 				this.searchQuery += data;
 			}
-			this.selectedIndex = 0;
+			// A keystroke may shrink the visible list; clamp instead of resetting
+			// so the selection never points out of range (and rarely jumps).
+			this.selectedIndex = this.clampIndex(this.selectedIndex);
 			this.changed();
 			return;
 		}
@@ -224,9 +197,10 @@ export class ExtensionPicker implements Component, Focusable {
 		// Separator before status
 		lines.push("");
 
-		// Status line
-		const enabledCount = EXTENSIONS.filter((e) => isExtensionEnabled(e.name)).length;
-		lines.push(fit(this.theme.fg("dim", `${enabledCount}/${EXTENSIONS.length} enabled`), contentWidth));
+		// Status line — pending-aware, matching the list markers above
+		const enabledCount = this.enabledCount();
+		const pendingNote = this.pendingChanges.size > 0 ? ` • ${this.pendingChanges.size} pending` : "";
+		lines.push(fit(this.theme.fg("dim", `${enabledCount}/${EXTENSIONS.length} enabled${pendingNote}`), contentWidth));
 
 		// Separator after status
 		lines.push("");
@@ -241,7 +215,7 @@ export class ExtensionPicker implements Component, Focusable {
 
 		const content = fillRows(lines, contentRows);
 		return framed
-			? frameLines(this.theme, content, safeWidth, paddingY)
+			? frameLines(this.theme, content, safeWidth, paddingY, " Extensions ")
 			: content.map((line) => panelLine(this.theme, line, safeWidth));
 	}
 
@@ -282,7 +256,7 @@ export class ExtensionPicker implements Component, Focusable {
 }
 
 export async function openExtensionPicker(
-	ui: Pick<import("@earendil-works/pi-coding-agent").ExtensionUIContext, "custom">,
+	ui: Pick<ExtensionUIContext, "custom">,
 	options: ExtensionPickerOptions = {},
 ): Promise<ExtensionPickerResult> {
 	if (options.signal?.aborted) return { kind: "cancel" };

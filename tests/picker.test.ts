@@ -239,3 +239,121 @@ test("picker: tracks pending changes for undoable toggles", () => {
 		"picker should not call toggleExtension (which immediately modifies symlinks)",
 	);
 });
+
+test("picker: does not import getEnabledExtensions (M1)", () => {
+	const pickerSource = readFileSync(
+		new URL("../extensions/rl-extensions/picker.ts", import.meta.url),
+		"utf-8",
+	);
+
+	assert.ok(
+		!pickerSource.includes("getEnabledExtensions"),
+		"picker should not import getEnabledExtensions — it is unused and broader than its name implies",
+	);
+});
+
+test("picker: imports Theme from pi-coding-agent, not pi-tui (M10)", () => {
+	const pickerSource = readFileSync(
+		new URL("../extensions/rl-extensions/picker.ts", import.meta.url),
+		"utf-8",
+	);
+
+	assert.ok(
+		pickerSource.match(/import\s+type\s*{[^}]*Theme[^}]*}\s*from\s*"@earendil-works\/pi-coding-agent"/),
+		"Theme type must come from pi-coding-agent — pi-tui does not export Theme",
+	);
+	const piTuiImport = pickerSource.match(/import\s*{[\s\S]*?}\s*from\s*"@earendil-works\/pi-tui"/)?.[0] ?? "";
+	assert.ok(
+		!piTuiImport.includes("Theme"),
+		"pi-tui import block must not reference Theme",
+	);
+});
+
+test("picker: status line is pending-aware and shows pending count (M2)", () => {
+	const pickerSource = readFileSync(
+		new URL("../extensions/rl-extensions/picker.ts", import.meta.url),
+		"utf-8",
+	);
+
+	// Status line must use the same pending-aware count as the list markers
+	assert.ok(
+		pickerSource.match(/\/\/ Status line[\s\S]*?const enabledCount = this\.enabledCount\(\)/),
+		"status line should use the pending-aware enabledCount() helper",
+	);
+	assert.ok(
+		!pickerSource.match(/Status line[\s\S]*?isExtensionEnabled\(e\.name\)\)\.length/),
+		"status line must not count raw live symlinks (would disagree with pending markers)",
+	);
+	assert.ok(
+		pickerSource.includes('pendingChanges.size > 0') && pickerSource.includes("pending`"),
+		"status line should surface the number of pending (unapplied) toggles",
+	);
+});
+
+test("picker: search keystrokes clamp the selection instead of resetting it (M3)", () => {
+	const pickerSource = readFileSync(
+		new URL("../extensions/rl-extensions/picker.ts", import.meta.url),
+		"utf-8",
+	);
+
+	const searchBlock = pickerSource.match(/if \(this\.searchFocused\) \{[\s\S]*?\n\t\t\}/)?.[0] ?? "";
+	assert.ok(searchBlock, "should find the search-focused input block");
+	assert.ok(
+		searchBlock.includes("this.clampIndex(this.selectedIndex)"),
+		"search keystrokes should clamp the current selection to the (possibly smaller) visible list",
+	);
+	assert.ok(
+		!searchBlock.includes("this.selectedIndex = 0"),
+		"search keystrokes must not reset the selection to 0",
+	);
+});
+
+test("picker: shared panel layout comes from ../panel.js (M4)", () => {
+	const pickerSource = readFileSync(
+		new URL("../extensions/rl-extensions/picker.ts", import.meta.url),
+		"utf-8",
+	);
+
+	assert.ok(
+		pickerSource.match(/import\s*{\s*fit\s*,\s*fillRows\s*,\s*frameLines\s*,\s*panelLine\s*}\s*from\s*"..\/panel\.js"/),
+		"picker should import fit/fillRows/frameLines/panelLine from the shared panel module",
+	);
+	assert.ok(
+		frameCallHasTitle(pickerSource, '" Extensions "'),
+		"picker should pass its frame title to the shared frameLines",
+	);
+	assert.ok(
+		!pickerSource.includes("function frameLines(") &&
+			!pickerSource.includes("function panelLine(") &&
+			!pickerSource.includes("function fillRows(") &&
+			!pickerSource.match(/function fit\(/),
+		"picker should not define its own panel layout helpers anymore",
+	);
+});
+
+test("snippets picker: shared panel layout comes from ../panel.js (M4)", () => {
+	const pickerSource = readFileSync(
+		new URL("../extensions/snippets/picker.ts", import.meta.url),
+		"utf-8",
+	);
+
+	assert.ok(
+		pickerSource.match(/import\s*{\s*fit\s*,\s*fillRows\s*,\s*frameLines\s*,\s*panelLine\s*}\s*from\s*"..\/panel\.js"/),
+		"snippets picker should import fit/fillRows/frameLines/panelLine from the shared panel module",
+	);
+	assert.ok(
+		frameCallHasTitle(pickerSource, '" Snippets "'),
+		"snippets picker should pass its frame title to the shared frameLines",
+	);
+	assert.ok(
+		!pickerSource.includes("function frameLines(") &&
+			!pickerSource.includes("function panelLine(") &&
+			!pickerSource.includes("function fillRows(") &&
+			!pickerSource.match(/function fit\(/),
+		"snippets picker should not define its own panel layout helpers anymore",
+	);
+});
+
+function frameCallHasTitle(source: string, title: string): boolean {
+	return source.includes(`frameLines(this.theme, content, safeWidth, paddingY, ${title})`);
+}

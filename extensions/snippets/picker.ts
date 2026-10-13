@@ -5,14 +5,13 @@ import {
 	Key,
 	matchesKey,
 	Text,
-	truncateToWidth,
-	visibleWidth,
 	type Component,
 	type EditorTheme,
 	type Focusable,
 	type TUI,
 } from "@earendil-works/pi-tui";
 
+import { fit, fillRows, frameLines, panelLine } from "../panel.js";
 import type { SnippetCatalog } from "./catalog.js";
 import { displaySafe } from "./display-safe.js";
 import { PickerState } from "./picker-state.js";
@@ -38,36 +37,8 @@ interface FieldEditorEntry {
 const BROWSE_FOCUS: readonly BrowseFocus[] = ["search", "list", "preview"];
 const PICKER_HEIGHT_PERCENT = 70;
 
-function fit(line: string, width: number): string {
-	return truncateToWidth(line, Math.max(1, width), "", true);
-}
-
 function renderText(text: string, width: number): string[] {
 	return new Text(text.length === 0 ? "(empty)" : text, 0, 0).render(Math.max(1, width));
-}
-
-function panelLine(theme: Theme, line: string, width: number): string {
-	const background = theme.getBgAnsi("customMessageBg");
-	const padded = fit(line, width);
-	const restored = padded.replace(/\u001b\[(?:0|49)?m/g, (reset) => reset + background);
-	return theme.bg("customMessageBg", restored);
-}
-
-function frameLines(theme: Theme, content: readonly string[], width: number, paddingY: number): string[] {
-	const inner = width - 4;
-	const border = (text: string) => theme.fg("accent", text);
-	const title = truncateToWidth(" Snippets ", width - 2, "");
-	const top = border(`╔${title}${"═".repeat(Math.max(0, width - 2 - visibleWidth(title)))}╗`);
-	const bottom = border(`╚${"═".repeat(width - 2)}╝`);
-	const blank = border("║") + " ".repeat(width - 2) + border("║");
-	const body = content.map((line) => border("║") + " " + fit(line, inner) + " " + border("║"));
-	return [top, ...Array<string>(paddingY).fill(blank), ...body, ...Array<string>(paddingY).fill(blank), bottom].map(
-		(line) => panelLine(theme, line, width),
-	);
-}
-
-function fillRows(lines: readonly string[], rows: number): string[] {
-	return Array.from({ length: rows }, (_, index) => lines[index] ?? "");
 }
 
 function editorTheme(theme: Theme): EditorTheme {
@@ -220,7 +191,7 @@ export class SnippetPicker implements Component, Focusable {
 		this.syncChildFocus();
 		const content = fillRows(lines, contentRows);
 		return framed
-			? frameLines(this.theme, content, safeWidth, paddingY)
+			? frameLines(this.theme, content, safeWidth, paddingY, " Snippets ")
 			: content.map((line) => panelLine(this.theme, line, safeWidth));
 	}
 
