@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **docs**: rl-extensions README no longer documents a "Done button" (Tab) that never shipped, and the 1.1.0 entry below was corrected; a guard test keeps the README from claiming picker controls that don't exist
+
 ## [1.0.0] - 2025-07-11
 
 ### Added
@@ -29,7 +35,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **emacs-feedback**: Source-region and Magit diff-line feedback from Emacs — review Pi-authored changes in Emacs, attach notes, send to Pi, and ask it to address them
-- Visual **Done** button in extension picker (reachable with Tab)
 - Separator lines between search input, extension list, and status for better visual hierarchy
 
 ### Changed

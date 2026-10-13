@@ -187,7 +187,7 @@ export class ExtensionPicker implements Component, Focusable {
 		const filtered = this.filteredExtensions();
 		const visible = filtered.length > 0 ? filtered : EXTENSIONS;
 
-		// Reserve rows: search + separator + status + button + footer
+		// Reserve rows: search + 2 separators + status + footer
 		const reservedRows = 5;
 		const listRows = Math.max(0, contentRows - reservedRows);
 

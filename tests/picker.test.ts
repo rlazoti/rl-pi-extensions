@@ -239,3 +239,22 @@ test("picker: tracks pending changes for undoable toggles", () => {
 		"picker should not call toggleExtension (which immediately modifies symlinks)",
 	);
 });
+
+test("picker: README does not document controls the picker does not implement", () => {
+	const readme = readFileSync(
+		new URL("../extensions/rl-extensions/README.md", import.meta.url),
+		"utf-8",
+	);
+
+	// Regression guard: a "Done button" (Tab) was documented in the v1.1.0
+	// release but never implemented. Keep the README in sync with the keys
+	// the picker actually handles (up/down/space///enter/escape).
+	assert.ok(
+		!readme.includes("Done button"),
+		"README must not document a Done button (picker.ts has none)",
+	);
+	assert.ok(
+		!readme.includes("`Tab`"),
+		"README must not document Tab focus (picker has no Tab focus target)",
+	);
+});
