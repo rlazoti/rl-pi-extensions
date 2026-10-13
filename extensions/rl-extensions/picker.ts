@@ -1,15 +1,8 @@
 import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
 
-import {
-	Key,
-	matchesKey,
-	type TUI,
-	type KeybindingsManager,
-	type Focusable,
-	type Component,
-	truncateToWidth,
-	visibleWidth,
-} from "@earendil-works/pi-tui";
+import { Key, matchesKey, type TUI, type KeybindingsManager, type Focusable, type Component } from "@earendil-works/pi-tui";
+
+import { fit, fillRows, frameLines, panelLine } from "../panel.js";
 
 import {
 	getAvailableExtensions,
@@ -30,34 +23,6 @@ export type ExtensionPickerResult =
 	| Readonly<{ kind: "apply"; enabledCount: number; errors: readonly string[] }>;
 
 const PICKER_HEIGHT_PERCENT = 60;
-
-function fit(line: string, width: number): string {
-	return truncateToWidth(line, Math.max(1, width), "", true);
-}
-
-function panelLine(theme: Theme, line: string, width: number): string {
-	const background = theme.getBgAnsi("customMessageBg");
-	const padded = fit(line, width);
-	const restored = padded.replace(/\u001b\[(?:0|49)?m/g, (reset) => reset + background);
-	return theme.bg("customMessageBg", restored);
-}
-
-function frameLines(theme: Theme, content: readonly string[], width: number, paddingY: number): string[] {
-	const inner = width - 4;
-	const border = (text: string) => theme.fg("accent", text);
-	const title = truncateToWidth(" Extensions ", width - 2, "");
-	const top = border(`╔${title}${"═".repeat(Math.max(0, width - 2 - visibleWidth(title)))}╗`);
-	const bottom = border(`╚${"═".repeat(width - 2)}╝`);
-	const blank = border("║") + " ".repeat(width - 2) + border("║");
-	const body = content.map((line) => border("║") + " " + fit(line, inner) + " " + border("║"));
-	return [top, ...Array<string>(paddingY).fill(blank), ...body, ...Array<string>(paddingY).fill(blank), bottom].map(
-		(line) => panelLine(theme, line, width),
-	);
-}
-
-function fillRows(lines: readonly string[], rows: number): string[] {
-	return Array.from({ length: rows }, (_, index) => lines[index] ?? "");
-}
 
 // Derive the monorepo root from this file's location, never from the current
 // working directory (which is the user's project when Pi runs) — links
@@ -139,7 +104,9 @@ export class ExtensionPicker implements Component, Focusable {
 			} else if (data.length === 1) {
 				this.searchQuery += data;
 			}
-			this.selectedIndex = 0;
+			// A keystroke may shrink the visible list; clamp instead of resetting
+			// so the selection never points out of range (and rarely jumps).
+			this.selectedIndex = this.clampIndex(this.selectedIndex);
 			this.changed();
 			return;
 		}
@@ -267,7 +234,8 @@ export class ExtensionPicker implements Component, Focusable {
 		});
 		const enabledCount = effectiveStatuses.filter((s) => s === "enabled").length;
 		const brokenTotal = effectiveStatuses.filter((s) => s === "broken").length;
-		const statusText = `${enabledCount}/${EXTENSIONS.length} enabled${brokenTotal > 0 ? ` • ${brokenTotal} broken` : ""}`;
+		const pendingNote = this.pendingChanges.size > 0 ? ` • ${this.pendingChanges.size} pending` : "";
+		const statusText = `${enabledCount}/${EXTENSIONS.length} enabled${brokenTotal > 0 ? ` • ${brokenTotal} broken` : ""}${pendingNote}`;
 		const statusStyle = brokenTotal > 0 ? "warning" : "dim";
 		lines.push(fit(this.theme.fg(statusStyle, statusText), contentWidth));
 
@@ -284,7 +252,7 @@ export class ExtensionPicker implements Component, Focusable {
 
 		const content = fillRows(lines, contentRows);
 		return framed
-			? frameLines(this.theme, content, safeWidth, paddingY)
+			? frameLines(this.theme, content, safeWidth, paddingY, " Extensions ")
 			: content.map((line) => panelLine(this.theme, line, safeWidth));
 	}
 

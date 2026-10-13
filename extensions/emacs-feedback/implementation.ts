@@ -4,6 +4,7 @@ import { realpathSync } from 'node:fs';
 import {
   mkdir,
   open,
+  readdir,
   readFile,
   rename,
   rm,
@@ -367,7 +368,7 @@ export async function clearInbox(inboxPath: string): Promise<void> {
   await writeFile(inboxPath, '', 'utf8');
 }
 
-export async function archiveBundlesAndClearInbox(
+export async function archiveBundles(
   descriptor: SessionDescriptor,
   bundles: FeedbackBundle[],
   storage: StoragePaths,
@@ -379,8 +380,44 @@ export async function archiveBundlesAndClearInbox(
     const archivePath = path.join(sessionArchiveDir, `${bundle.bundleId}.json`);
     await writeFile(archivePath, `${JSON.stringify(bundle, null, 2)}\n`, 'utf8');
   }
+}
 
+export async function archiveBundlesAndClearInbox(
+  descriptor: SessionDescriptor,
+  bundles: FeedbackBundle[],
+  storage: StoragePaths,
+): Promise<void> {
+  await archiveBundles(descriptor, bundles, storage);
   await clearInbox(descriptor.inboxPath);
+}
+
+/** Bundle ids already saved in this session's archive dir (missing dir = empty). */
+export async function readArchivedBundleIds(
+  descriptor: SessionDescriptor,
+  storage: StoragePaths,
+): Promise<Set<string>> {
+  const sessionArchiveDir = path.join(storage.archiveDir, descriptor.sessionId);
+  try {
+    const entries = await readdir(sessionArchiveDir);
+    return new Set(
+      entries.filter((entry) => entry.endsWith('.json')).map((entry) => entry.slice(0, -'.json'.length)),
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return new Set();
+    throw error;
+  }
+}
+
+/** Best-effort removal of archive files (used to roll back a failed send). */
+export async function removeArchivedBundles(
+  descriptor: SessionDescriptor,
+  bundles: FeedbackBundle[],
+  storage: StoragePaths,
+): Promise<void> {
+  const sessionArchiveDir = path.join(storage.archiveDir, descriptor.sessionId);
+  for (const bundle of bundles) {
+    await rm(path.join(sessionArchiveDir, `${bundle.bundleId}.json`), { force: true });
+  }
 }
 
 export async function removeSessionDescriptor(
@@ -478,14 +515,55 @@ export function registerCommands(
         }
 
         const noteCount = countNotes(parsed.bundles);
+        const noteLabel = noteCount === 1 ? 'note' : 'notes';
         if (noteCount === 0) {
           await notify(pi, ctx, 'No queued Emacs feedback to address', 'info');
           await refreshStatus(ctx, descriptor, storage);
           return;
         }
 
-        const message = buildFeedbackMessage(parsed.bundles);
+        // Bundles already in the session archive are never re-sent: a crash
+        // between send and the old post-send cleanup would otherwise deliver
+        // the same notes again on the next /emacs-feedback-address.
+        let archivedIds: Set<string>;
+        try {
+          archivedIds = await readArchivedBundleIds(descriptor, storage);
+        } catch (error) {
+          await notify(pi, ctx, `Failed to read the Emacs feedback archive: ${errorMessage(error)}`, 'error');
+          await refreshStatus(ctx, descriptor, storage);
+          return;
+        }
+        const freshBundles = parsed.bundles.filter((bundle) => !archivedIds.has(bundle.bundleId));
+        if (freshBundles.length === 0) {
+          // Everything is already archived (e.g. a crash after archive, before
+          // the inbox clear): the notes are preserved in the archive; just
+          // clean up the stale inbox.
+          try {
+            await clearInbox(descriptor.inboxPath);
+          } catch {
+            // The archive is the source of truth; the stale inbox retries next address.
+          }
+          await notify(
+            pi,
+            ctx,
+            `${noteCount} Emacs feedback ${noteLabel} were already sent and archived; the inbox was cleaned up.`,
+            'info',
+          );
+          await refreshStatus(ctx, descriptor, storage);
+          return;
+        }
 
+        // Archive before sending so a crash cannot double-send. An
+        // unwritable archive still sends (as before) but warns — the notes
+        // then exist only in the sent message.
+        let archiveError: unknown;
+        try {
+          await archiveBundles(descriptor, freshBundles, storage);
+        } catch (error) {
+          archiveError = error;
+        }
+
+        const message = buildFeedbackMessage(freshBundles);
         try {
           if (ctx.isIdle()) {
             pi.sendUserMessage(message);
@@ -493,7 +571,17 @@ export function registerCommands(
             pi.sendUserMessage(message, { deliverAs: 'followUp' });
           }
         } catch (error) {
+          if (archiveError === undefined) {
+            try {
+              // Roll the write-ahead archive back so the next address retries
+              // the send instead of silently skipping these bundles.
+              await removeArchivedBundles(descriptor, freshBundles, storage);
+            } catch {
+              // Leave the archive copy in place; the next address will skip it.
+            }
+          }
           await notify(pi, ctx, `Failed to send Emacs feedback: ${errorMessage(error)}`, 'error');
+          await refreshStatus(ctx, descriptor, storage);
           return;
         }
 
@@ -507,19 +595,21 @@ export function registerCommands(
         }
 
         try {
-          await archiveBundlesAndClearInbox(descriptor, parsed.bundles, storage);
-        } catch (cleanupError) {
-          let clearDetail = '';
-          try {
-            await clearInbox(descriptor.inboxPath);
-          } catch (clearError) {
-            clearDetail = ` Also failed to clear inbox: ${errorMessage(clearError)}`;
-          }
-
+          await clearInbox(descriptor.inboxPath);
+        } catch (clearError) {
           await notify(
             pi,
             ctx,
-            `Sent Emacs feedback, but cleanup failed: ${errorMessage(cleanupError)}.${clearDetail}`,
+            `Sent Emacs feedback, but clearing the inbox failed: ${errorMessage(clearError)}. Already-sent bundles are skipped on the next address.`,
+            'error',
+          );
+        }
+
+        if (archiveError !== undefined) {
+          await notify(
+            pi,
+            ctx,
+            `Sent Emacs feedback, but archiving failed: ${errorMessage(archiveError)}. The notes now exist only in the sent message.`,
             'error',
           );
         }
@@ -625,7 +715,9 @@ export function isFeedbackNote(value: unknown): value is FeedbackNote {
     (!('lineSide' in value) ||
       value.lineSide === 'new' ||
       value.lineSide === 'old' ||
-      value.lineSide === 'mixed')
+      value.lineSide === 'mixed') &&
+    (!('location' in value) || typeof value.location === 'string') &&
+    (!('hunkHeader' in value) || typeof value.hunkHeader === 'string')
   );
 }
 

@@ -44,7 +44,7 @@ Run `/rl-extensions` to toggle this extension on/off. Changes apply after `/relo
 
 | Command | Description |
 |---|---|
-| `/emacs-feedback-address` | Send queued inbox feedback to the assistant, then archive and clear |
+| `/emacs-feedback-address` | Send queued inbox feedback to the assistant and clear the inbox. Bundles are archived **before** sending and skipped when already archived, so a crash can never make notes be sent twice; a failed send rolls the archive back so the next run retries |
 | `/emacs-feedback-list` | Show queued inbox feedback and any malformed inbox lines |
 | `/emacs-feedback-clear` | Discard queued inbox feedback (with confirmation) |
 | `/emacs-feedback-help` | Show setup, workflow, storage paths, and caveats |
@@ -57,7 +57,7 @@ Uses local filesystem storage under `~/.pi/emacs-feedback/`:
 ~/.pi/emacs-feedback/
 ├── sessions/    # Live Pi session descriptors
 ├── inbox/       # Per-session JSONL inboxes (Emacs appends feedback)
-└── archive/     # Bundles archived after /emacs-feedback-address
+└── archive/     # Bundles archived by /emacs-feedback-address (before sending)
 ```
 
 Descriptors are keyed by the **stable Pi session id** (`ctx.sessionManager.getSessionId()`, sanitized), not a random value per activation. Switching away from a session, resuming it, reloading, or restarting Pi re-creates the descriptor pointing at the **same inbox file**, so queued feedback stays reachable until you address or clear it. (Runtimes without a session id fall back to a random UUID per activation.)

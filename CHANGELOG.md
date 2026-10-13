@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **symlink-manager**: `enableExtension` validates the target directory exists before creating a link, so the picker can no longer create broken symlinks
 - **symlink-manager**: broken symlinks are no longer reported as "enabled"; `isExtensionEnabled` now means loadable
 - **symlink-manager**: `disableExtension` only removes symlinks; a real file/directory at the link path is never clobbered
+- **rl-extensions**: toggling an extension off and on again inside the picker was a no-op — the Space handler computed the new state from the disk alone (which only changes on apply), so the marker never returned to ● and Enter would disable an extension the user had just re-selected. The toggle now flips the effective state (pending ?? disk)
+- **emacs-feedback**: `/emacs-feedback-address` can no longer re-send the same notes after a crash (bundles are archived before sending and skipped when already archived; a failed send rolls the archive back so the next run retries). A non-string `location`/`hunkHeader` in a feedback note is now rejected by validation
 
 ### Added
 
@@ -24,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **tests**: 126 more — the session-banner `index` vitest suite (the full extension behavior: lifecycle hooks, rich-editor host handoff + banner pane, deferred title re-asserts, auto-naming incl. SKIP/back-off/stale-result drops, Herdr tab rename + ownership persistence, cmux workspace rename, `/title`) ported to `node:test` with `mock.timers`
 - **tests**: null-gated test seams in session-banner `implementation.ts` (`setCompleteForTesting`, `setExecFileForTesting`, `setFsForTesting`) — Node 26's test runner has no ESM module mocking, so the LLM/CLI/fs dependencies are injectable instead; production behavior unchanged
 - **tests**: `test-support/` resolve hooks that let bare `node --test` load extension sources — aliases `@earendil-works/*`/`@mariozechner/*` to the real packages from the local Pi install and remaps jiti-style `.js` relative imports to `.ts`
+- **tests**: 22 new tests across the M batch (picker status/search/panel guards, import-scope + typing guards, emacs archive/dedupe/rollback behavior, note validation)
 
 ### Changed
 
@@ -34,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **rl-extensions picker**: broken symlinks render as `✕` (warning) with a `• N broken` count in the status footer; Space on a broken entry marks it for repair
 - **rl-extensions picker**: per-extension apply failures are reported to the user via error notifications instead of being silently skipped
 - **tests**: `tests/symlink-manager.test.ts` rewritten as real behavioral tests against the module (temp-dir injected); covers broken-symlink repair, stale re-pointing, missing-target and occupied-path errors
+- **pickers**: shared panel layout extracted to `extensions/panel.ts` (both pickers were carrying ~40 duplicated lines); the extension picker's status line is pending-aware and shows unapplied toggles; search keystrokes clamp the selection instead of resetting it; `Theme` now comes from pi-coding-agent (pi-tui doesn't export it)
+- **snippets**: the extension entry point types its API as `ExtensionAPI` instead of `any`
+- **session-banner**: imports standardized on `@earendil-works/*`; comments corrected against the pinned Pi 1.1.0 (it emits no `session_switch`/`session_fork`/`session_branch` — those handlers are OMP compatibility; `session_shutdown` reasons are quit/reload/new/resume/fork); README documents that the title color is intentionally not persisted
 
 ## [1.0.0] - 2025-07-11
 

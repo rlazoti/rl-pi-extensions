@@ -45,6 +45,7 @@ Each extension has a simple entry point that re-exports the implementation:
 ```
 extensions/
 ├── symlink-manager.ts              # Shared symlink management
+├── panel.ts                        # Shared picker panel layout (frameLines)
 ├── tmux-feedback/
 │   ├── index.ts                    # Entry point (re-exports implementation)
 │   └── implementation.ts           # Real extension code
@@ -64,7 +65,8 @@ extensions/
 │   │   ├── pi-feedback.el          # Emacs client (source-region feedback)
 │   │   └── pi-feedback-test.el     # Emacs ERT tests
 └── rl-extensions/
-    └── index.ts                    # TUI extension manager
+    ├── index.ts                    # TUI extension manager
+    └── picker.ts                   # Picker overlay (layout via panel.ts)
 ```
 
 ### Entry Point Pattern

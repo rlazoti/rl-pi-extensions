@@ -463,6 +463,16 @@ test('isFeedbackNote rejects an unsupported line side', () => {
   assert.equal(emacsFeedback.isFeedbackNote({ ...noteA, lineSide: 'left' }), false);
 });
 
+test('isFeedbackNote rejects a non-string location', () => {
+  assert.equal(emacsFeedback.isFeedbackNote({ ...noteA, location: 42 }), false);
+  assert.equal(emacsFeedback.isFeedbackNote({ ...noteA, location: { file: 'a.rb' } }), false);
+});
+
+test('isFeedbackNote rejects a non-string hunkHeader', () => {
+  assert.equal(emacsFeedback.isFeedbackNote({ ...noteA, hunkHeader: 7 }), false);
+  assert.equal(emacsFeedback.isFeedbackNote({ ...noteA, hunkHeader: ['@@'] }), false);
+});
+
 test('countNotes sums notes across bundles', () => {
   assert.equal(countNotes([bundleA, bundleB]), 2);
 });
@@ -1025,7 +1035,30 @@ test('/emacs-feedback-address leaves inbox unchanged when sendUserMessage throws
   });
 });
 
-test('/emacs-feedback-address truncates inbox and warns if cleanup fails after successful send', async () => {
+test('/emacs-feedback-address still sends and clears the inbox when archiving fails', async () => {
+  const { storage, descriptor } = await setupInboxWithBundle();
+  // Session archive dir exists but is read-only: mkdir succeeds (recursive),
+  // the archive write fails with EACCES, the send must still go through.
+  const sessionArchiveDir = path.join(storage.archiveDir, descriptor.sessionId);
+  await fs.mkdir(sessionArchiveDir, { recursive: true });
+  await fs.chmod(sessionArchiveDir, 0o500);
+  const pi = makeFakePi();
+  const ctx = makeFakeCtx();
+  emacsFeedback.registerCommands(pi, () => descriptor, storage);
+
+  try {
+    await pi.commands.get('emacs-feedback-address').handler([], ctx);
+  } finally {
+    await fs.chmod(sessionArchiveDir, 0o700);
+  }
+
+  assert.equal(pi.sentUserMessages.length, 1);
+  assert.equal(await fs.readFile(descriptor.inboxPath, 'utf8'), '');
+  assert.equal(ctx.notifications.at(-1).type, 'error');
+  assert.match(ctx.notifications.at(-1).message, /Sent Emacs feedback, but archiving failed/);
+});
+
+test('/emacs-feedback-address refuses to send when the archive itself cannot be read', async () => {
   const home = await makeTempDir('emacs-feedback-home-');
   const storage = storagePaths(home);
   const descriptor = makeDescriptor(storage);
@@ -1038,10 +1071,104 @@ test('/emacs-feedback-address truncates inbox and warns if cleanup fails after s
 
   await pi.commands.get('emacs-feedback-address').handler([], ctx);
 
-  assert.equal(pi.sentUserMessages.length, 1);
-  assert.equal(await fs.readFile(descriptor.inboxPath, 'utf8'), '');
+  // Without a readable archive there is no way to know what was already sent,
+  // so the handler must not send instead of risking a duplicate delivery.
+  assert.equal(pi.sentUserMessages.length, 0);
+  assert.equal(await fs.readFile(descriptor.inboxPath, 'utf8'), JSON.stringify(bundleA), 'inbox untouched');
   assert.equal(ctx.notifications.at(-1).type, 'error');
-  assert.match(ctx.notifications.at(-1).message, /Sent Emacs feedback, but cleanup failed/);
+  assert.match(ctx.notifications.at(-1).message, /Failed to read the Emacs feedback archive/);
+});
+
+test('/emacs-feedback-address warns when clearing the inbox fails after a successful send', async () => {
+  const { storage, descriptor } = await setupInboxWithBundle();
+  // Read-only inbox file: readInbox succeeds, clearInbox's write fails (EACCES).
+  await fs.chmod(descriptor.inboxPath, 0o400);
+  const pi = makeFakePi();
+  const ctx = makeFakeCtx();
+  emacsFeedback.registerCommands(pi, () => descriptor, storage);
+
+  try {
+    await pi.commands.get('emacs-feedback-address').handler([], ctx);
+  } finally {
+    await fs.chmod(descriptor.inboxPath, 0o600);
+  }
+
+  assert.equal(pi.sentUserMessages.length, 1);
+  assert.equal(await pathExists(path.join(storage.archiveDir, descriptor.sessionId, 'bundle-a.json')), true);
+  assert.equal(await fs.readFile(descriptor.inboxPath, 'utf8'), JSON.stringify(bundleA), 'inbox left in place for the next address');
+  assert.equal(ctx.notifications.at(-1).type, 'error');
+  assert.match(ctx.notifications.at(-1).message, /Sent Emacs feedback, but clearing the inbox failed/);
+});
+
+test('/emacs-feedback-address does not resend bundles that are already archived', async () => {
+  // Simulates a crash between send and the old post-send cleanup: the bundle
+  // is in the archive AND still queued in the inbox.
+  const { storage, descriptor } = await setupInboxWithBundle();
+  const sessionArchiveDir = path.join(storage.archiveDir, descriptor.sessionId);
+  await fs.mkdir(sessionArchiveDir, { recursive: true });
+  await fs.writeFile(path.join(sessionArchiveDir, 'bundle-a.json'), JSON.stringify(bundleA), 'utf8');
+  const pi = makeFakePi();
+  const ctx = makeFakeCtx();
+  emacsFeedback.registerCommands(pi, () => descriptor, storage);
+
+  await pi.commands.get('emacs-feedback-address').handler([], ctx);
+
+  assert.equal(pi.sentUserMessages.length, 0);
+  assert.equal(await fs.readFile(descriptor.inboxPath, 'utf8'), '', 'stale inbox truncated');
+  assert.equal(ctx.notifications.at(-1).type, 'info');
+  assert.match(ctx.notifications.at(-1).message, /already sent and archived/);
+});
+
+test('/emacs-feedback-address sends only the not-yet-archived bundles', async () => {
+  const { storage, descriptor } = await setupInboxWithBundle();
+  await writeInbox(descriptor, [JSON.stringify(bundleA), JSON.stringify(bundleB)]);
+  const sessionArchiveDir = path.join(storage.archiveDir, descriptor.sessionId);
+  await fs.mkdir(sessionArchiveDir, { recursive: true });
+  await fs.writeFile(path.join(sessionArchiveDir, 'bundle-a.json'), JSON.stringify(bundleA), 'utf8');
+  const pi = makeFakePi();
+  const ctx = makeFakeCtx();
+  emacsFeedback.registerCommands(pi, () => descriptor, storage);
+
+  await pi.commands.get('emacs-feedback-address').handler([], ctx);
+
+  assert.equal(pi.sentUserMessages.length, 1);
+  assert.match(pi.sentUserMessages[0][0], /test\/widget_test\.rb/, 'only bundle-b (noteB) is sent');
+  assert.doesNotMatch(pi.sentUserMessages[0][0], /app\/models\/widget\.rb/, 'already-archived bundle-a is not re-sent');
+  assert.equal(await fs.readFile(descriptor.inboxPath, 'utf8'), '');
+  assert.equal(await pathExists(path.join(sessionArchiveDir, 'bundle-b.json')), true);
+});
+
+test('/emacs-feedback-address retries the send after a failed send rolls back the archive', async () => {
+  const { storage, descriptor } = await setupInboxWithBundle();
+  const failedPi = makeFakePi({ sendThrows: true });
+  const ctx = makeFakeCtx();
+  emacsFeedback.registerCommands(failedPi, () => descriptor, storage);
+
+  await failedPi.commands.get('emacs-feedback-address').handler([], ctx);
+
+  assert.equal(await fs.readFile(descriptor.inboxPath, 'utf8'), JSON.stringify(bundleA));
+  assert.equal(await pathExists(path.join(storage.archiveDir, descriptor.sessionId, 'bundle-a.json')), false, 'write-ahead archive rolled back');
+
+  const retryPi = makeFakePi();
+  emacsFeedback.registerCommands(retryPi, () => descriptor, storage);
+  await retryPi.commands.get('emacs-feedback-address').handler([], ctx);
+
+  assert.equal(retryPi.sentUserMessages.length, 1);
+  assert.equal(await fs.readFile(descriptor.inboxPath, 'utf8'), '');
+  assert.equal(await pathExists(path.join(storage.archiveDir, descriptor.sessionId, 'bundle-a.json')), true);
+});
+
+test('readArchivedBundleIds returns bundle ids and tolerates a missing archive dir', async () => {
+  const { storage, descriptor } = await setupInboxWithBundle();
+
+  assert.deepEqual(await emacsFeedback.readArchivedBundleIds(descriptor, storage), new Set());
+
+  const sessionArchiveDir = path.join(storage.archiveDir, descriptor.sessionId);
+  await fs.mkdir(sessionArchiveDir, { recursive: true });
+  await fs.writeFile(path.join(sessionArchiveDir, 'bundle-a.json'), '{}', 'utf8');
+  await fs.writeFile(path.join(sessionArchiveDir, 'not-a-bundle.txt'), 'x', 'utf8');
+
+  assert.deepEqual(await emacsFeedback.readArchivedBundleIds(descriptor, storage), new Set(['bundle-a']));
 });
 
 test('refreshStatus sets note count and clears status when the inbox is empty', async () => {
