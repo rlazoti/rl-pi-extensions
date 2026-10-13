@@ -122,8 +122,14 @@ export class ExtensionPicker implements Component, Focusable {
 			const visible = this.getVisibleList();
 			const ext = visible[this.selectedIndex];
 			if (ext) {
-				const currentEnabled = isExtensionEnabled(ext.name);
-				this.pendingChanges.set(ext.name, !currentEnabled);
+				// Flip the EFFECTIVE state (pending ?? disk). The disk only changes
+				// on apply, so toggling from isExtensionEnabled() alone made
+				// toggle-off-then-toggle-on a no-op (v1.1.0 bug): the marker never
+				// returned, and Enter would leave the extension disabled even
+				// though the user had re-selected it.
+				const pending = this.pendingChanges.get(ext.name);
+				const effective = pending !== undefined ? pending : isExtensionEnabled(ext.name);
+				this.pendingChanges.set(ext.name, !effective);
 				this.changed();
 				return;
 			}

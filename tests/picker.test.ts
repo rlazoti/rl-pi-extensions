@@ -354,6 +354,26 @@ test("snippets picker: shared panel layout comes from ../panel.js (M4)", () => {
 	);
 });
 
+test("picker: space toggle flips the effective state, not the disk alone (v1.1.0 regression)", () => {
+	const pickerSource = readFileSync(
+		new URL("../extensions/rl-extensions/picker.ts", import.meta.url),
+		"utf-8",
+	);
+	const spaceStart = pickerSource.indexOf("matchesKey(data, Key.space)");
+	assert.ok(spaceStart >= 0, "picker should have a space handler");
+	const spaceBlock = pickerSource.slice(spaceStart, pickerSource.indexOf("} else if", spaceStart));
+	assert.ok(
+		spaceBlock.includes("this.pendingChanges.get(ext.name)"),
+		"space toggle must read the pending state (effective = pending ?? disk); computing " +
+			"!isExtensionEnabled() from the disk alone made toggle-off-then-toggle-on a no-op " +
+			"and Enter would disable an extension the user had re-selected",
+	);
+	assert.ok(
+		spaceBlock.match(/!\s*effective\b/) !== null,
+		"space toggle must store the negation of the effective state",
+	);
+});
+
 function frameCallHasTitle(source: string, title: string): boolean {
 	return source.includes(`frameLines(this.theme, content, safeWidth, paddingY, ${title})`);
 }

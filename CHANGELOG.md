@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **rl-extensions**: toggling an extension off and on again inside the picker was a no-op — the Space handler computed the new state from the disk alone (which only changes on apply), so the marker never returned to ● and Enter would disable an extension the user had just re-selected. The toggle now flips the effective state (pending ?? disk)
 - **emacs-feedback**: `/emacs-feedback-address` can no longer re-send the same notes after a crash (bundles are archived before sending and skipped when already archived; a failed send rolls the archive back so the next run retries). A non-string `location`/`hunkHeader` in a feedback note is now rejected by validation
 
 ### Changed
