@@ -7,16 +7,49 @@
  *
  * Example:
  *   ~/.pi/agent/extensions/
- *   ├── tmux-feedback → /path/to/rl-pi-extensions/extensions/tmux-feedback/
- *   ├── session-banner → /path/to/rl-pi-extensions/extensions/session-banner/
- *   └── rl-extensions → /path/to/rl-pi-extensions/extensions/rl-extensions/
+ *   ├── tmux-feedback → /path/to/rl-pi-extensions/extensions/tmux-feedback
+ *   ├── session-banner → /path/to/rl-pi-extensions/extensions/session-banner
+ *   └── rl-extensions → /path/to/rl-pi-extensions/extensions/rl-extensions
+ *
+ * Trustworthiness rules:
+ *   - Monorepo paths are derived from THIS file's location, never from
+ *     process.cwd() (which is the user's project when Pi runs).
+ *   - Enabling validates the target exists before creating a link, so we
+ *     never create a broken symlink.
+ *   - Enabling over a broken or stale (re-pointed) symlink repairs it
+ *     instead of crashing with EEXIST.
+ *   - Disabling only removes symlinks; real files/directories are never
+ *     clobbered.
  */
 
-import { existsSync, lstatSync, readlinkSync, symlinkSync, readdirSync, mkdirSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readlinkSync, readdirSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const AGENT_DIR = join(process.env.HOME || "", ".pi", "agent");
-const EXTENSIONS_DIR = join(AGENT_DIR, "extensions");
+// Test seam: tests point this at a temp directory so the real
+// ~/.pi/agent/extensions/ is never touched. Pass undefined to reset.
+let extensionsDirOverride: string | undefined;
+
+export function setExtensionsDirForTesting(dir: string | undefined): void {
+	extensionsDirOverride = dir;
+}
+
+export function getExtensionsDir(): string {
+	return extensionsDirOverride ?? join(process.env.HOME || "", ".pi", "agent", "extensions");
+}
+
+/**
+ * Resolve the monorepo root (the directory containing `extensions/`) from
+ * this file's location. Works under jiti (Pi runtime, where __dirname is
+ * provided) and under native ESM (node --test, where import.meta.url is
+ * available and __dirname is not).
+ */
+export function getMonorepoRoot(): string {
+	if (typeof __dirname === "string" && __dirname.length > 0) {
+		return resolve(__dirname, "..");
+	}
+	return resolve(dirname(fileURLToPath(import.meta.url)), "..");
+}
 
 export interface ExtensionDescriptor {
 	name: string;
@@ -64,37 +97,52 @@ export function getAvailableExtensions(monorepoRoot: string): ExtensionDescripto
 	];
 }
 
-/**
- * Check if an extension is enabled (symlink exists, even if broken).
- * Uses lstatSync to detect the entry without following the symlink,
- * so broken symlinks are still detected as "enabled".
- */
-export function isExtensionEnabled(name: string): boolean {
-	const linkPath = join(EXTENSIONS_DIR, name);
+export type ExtensionStatus = "enabled" | "broken" | "disabled";
+
+function lstatOrNull(linkPath: string): ReturnType<typeof lstatSync> | undefined {
 	try {
-		lstatSync(linkPath);
-		return true;
+		return lstatSync(linkPath);
 	} catch {
-		return false;
+		return undefined;
 	}
 }
 
 /**
- * Get the current enabled extensions.
+ * Check if an extension is loadable: the symlink exists AND its target
+ * exists. Broken symlinks are NOT enabled (Pi cannot load them).
+ */
+export function isExtensionEnabled(name: string): boolean {
+	return getExtensionStatus(name) === "enabled";
+}
+
+/**
+ * Classify an extension's symlink state.
+ *   enabled  — symlink exists and its target exists (Pi loads it)
+ *   broken   — symlink exists but its target is gone (Pi skips it)
+ *   disabled — no symlink (a non-symlink entry counts as disabled; it is
+ *              never clobbered by enable/disable)
+ */
+export function getExtensionStatus(name: string): ExtensionStatus {
+	const linkPath = join(getExtensionsDir(), name);
+	const stat = lstatOrNull(linkPath);
+	if (!stat || !stat.isSymbolicLink()) return "disabled";
+	return existsSync(linkPath) ? "enabled" : "broken";
+}
+
+/**
+ * Get the current enabled extensions (loadable symlinks only).
  */
 export function getEnabledExtensions(): string[] {
-	if (!existsSync(EXTENSIONS_DIR)) return [];
+	const dir = getExtensionsDir();
+	if (!existsSync(dir)) return [];
 
 	try {
-		const entries = readdirSync(EXTENSIONS_DIR);
+		const entries = readdirSync(dir);
 		return entries.filter((entry) => {
-			const linkPath = join(EXTENSIONS_DIR, entry);
-			// Only include symlinks (not directories or regular files)
-			try {
-				return readlinkSync(linkPath) !== undefined;
-			} catch {
-				return false;
-			}
+			// Only include loadable symlinks (not directories, regular files,
+			// or broken links)
+			const stat = lstatOrNull(join(dir, entry));
+			return stat?.isSymbolicLink() === true && existsSync(join(dir, entry));
 		});
 	} catch {
 		return [];
@@ -102,46 +150,67 @@ export function getEnabledExtensions(): string[] {
 }
 
 /**
- * Enable an extension by creating a symlink.
- * If the entry already exists (valid symlink, broken symlink, file, or dir),
- * this is a no-op — we never crash on EEXIST.
+ * Enable an extension by creating (or repairing) its symlink.
+ *
+ *   - target missing or not a directory → throws (never creates broken links)
+ *   - no entry at the link path → creates the symlink
+ *   - symlink already pointing at the resolved target → no-op
+ *   - broken or stale symlink → removed and re-created (repair)
+ *   - real file/directory at the link path → throws (never clobbers user data)
  */
 export function enableExtension(name: string, targetPath: string): void {
-	const linkPath = join(EXTENSIONS_DIR, name);
+	const dir = getExtensionsDir();
+	const linkPath = join(dir, name);
+	const target = resolve(targetPath);
 
-	// Create extensions directory if it doesn't exist
-	if (!existsSync(EXTENSIONS_DIR)) {
-		mkdirSync(EXTENSIONS_DIR, { recursive: true });
+	if (!existsSync(target) || !statSync(target).isDirectory()) {
+		throw new Error(`Extension target does not exist (expected a directory): ${target}`);
 	}
 
-	// If anything already exists at this path, noop
-	if (existsSync(linkPath)) return;
+	if (!existsSync(dir)) {
+		mkdirSync(dir, { recursive: true });
+	}
 
-	// Create absolute symlink
-	symlinkSync(resolve(targetPath), linkPath, "dir");
+	const existing = lstatOrNull(linkPath);
+	if (existing) {
+		if (existing.isSymbolicLink()) {
+			// Resolve relative to the link's directory, not cwd.
+			const current = resolve(dirname(linkPath), readlinkSync(linkPath));
+			if (current === target) return; // already correct
+			rmSync(linkPath, { force: true }); // broken or stale — repair below
+		} else {
+			throw new Error(
+				`Cannot enable "${name}": ${linkPath} exists and is not a symlink. Remove it manually and retry.`,
+			);
+		}
+	}
+
+	symlinkSync(target, linkPath, "dir");
 }
 
 /**
- * Disable an extension by removing its symlink.
+ * Disable an extension by removing its symlink. Only symlinks are removed;
+ * a real file/directory at the path is left untouched.
  */
 export function disableExtension(name: string): void {
-	const linkPath = join(EXTENSIONS_DIR, name);
+	const linkPath = join(getExtensionsDir(), name);
+	const stat = lstatOrNull(linkPath);
+	if (!stat || !stat.isSymbolicLink()) return;
 	try {
-		rmSync(linkPath, { recursive: true, force: true });
+		rmSync(linkPath, { force: true });
 	} catch {
 		// Best-effort cleanup
 	}
 }
 
 /**
- * Toggle an extension (enable if disabled, disable if enabled).
+ * Toggle an extension (disable if enabled or broken, enable otherwise).
  */
 export function toggleExtension(name: string, targetPath: string): { enabled: boolean } {
-	if (isExtensionEnabled(name)) {
+	if (isExtensionEnabled(name) || getExtensionStatus(name) === "broken") {
 		disableExtension(name);
 		return { enabled: false };
-	} else {
-		enableExtension(name, targetPath);
-		return { enabled: true };
 	}
+	enableExtension(name, targetPath);
+	return { enabled: true };
 }

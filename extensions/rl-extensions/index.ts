@@ -22,6 +22,11 @@ export default function managerExtension(pi: ExtensionAPI) {
 			} else {
 				ctx.ui.notify("All extensions disabled", "info");
 			}
+			// Surface per-extension failures (e.g. a non-symlink entry occupying
+			// the link path) instead of silently skipping them.
+			for (const error of result.errors) {
+				ctx.ui.notify(`rl-extensions: ${error}`, "error");
+			}
 		},
 	});
 }

@@ -36,6 +36,8 @@ Run `/rl-extensions` in Pi to open the TUI manager where you can:
 
 **Changes take effect after `/reload`.** Extensions are enabled/disabled via symlinks in `~/.pi/agent/extensions/`. Only symlinked extensions appear in Pi's `[Extensions]` list.
 
+**Broken links** (e.g. after the repo was moved or renamed) show as `✕` in the picker; enabling them re-creates the symlink pointing at this checkout. Symlink targets are always derived from this package's location, so they can't drift into the directory Pi was started from.
+
 ### Manual Config
 
 Extensions are managed via symlinks in `~/.pi/agent/extensions/`:

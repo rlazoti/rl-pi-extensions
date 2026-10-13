@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **docs**: rl-extensions README no longer documents a "Done button" (Tab) that never shipped, and the 1.1.0 entry below was corrected; a guard test keeps the README from claiming picker controls that don't exist
 - **emacs-feedback**: queued feedback was orphaned when switching away from a session and back — every activation minted a random descriptor id (new inbox), so notes left in the old inbox were unreachable. Descriptors are now keyed by the stable Pi session id, so switch/resume/reload re-attaches to the same inbox until notes are addressed or cleared
+- **symlink-manager**: EEXIST crash when enabling an extension whose symlink was broken — the guard now uses `lstatSync` and repairs (re-points) broken or stale symlinks instead of no-oping or throwing
+- **rl-extensions picker**: extension paths were derived from `process.cwd()` (the user's project), so enabling an extension from another directory created instantly-broken symlinks — paths now come from the package's own location
+- **symlink-manager**: `enableExtension` validates the target directory exists before creating a link, so the picker can no longer create broken symlinks
+- **symlink-manager**: broken symlinks are no longer reported as "enabled"; `isExtensionEnabled` now means loadable
+- **symlink-manager**: `disableExtension` only removes symlinks; a real file/directory at the link path is never clobbered
 
 ### Added
 
@@ -26,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **session-banner**: `RenderScheduler` constructor no longer uses a TypeScript parameter property (type stripping, used by the test runner, does not support them); behavior unchanged
 - **session-banner**: `PI_SESSION_BANNER_PROVIDER` / `PI_SESSION_BANNER_MODEL` / `CMUX_WORKSPACE_ID` are read lazily at use instead of captured at module load — Pi's env never changes mid-run, so production behavior is identical; tests no longer need module re-imports to change them
 - **tests**: the `test-support` hooks now mirror Pi's own extension loader for `pi-ai` — the package root resolves to the compat entrypoint (which exports the legacy `complete` API), not the core entry, matching `virtual-modules.js`
+- **rl-extensions picker**: broken symlinks render as `✕` (warning) with a `• N broken` count in the status footer; Space on a broken entry marks it for repair
+- **rl-extensions picker**: per-extension apply failures are reported to the user via error notifications instead of being silently skipped
+- **tests**: `tests/symlink-manager.test.ts` rewritten as real behavioral tests against the module (temp-dir injected); covers broken-symlink repair, stale re-pointing, missing-target and occupied-path errors
 
 ## [1.0.0] - 2025-07-11
 
