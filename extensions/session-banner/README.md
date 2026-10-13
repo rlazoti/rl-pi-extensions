@@ -64,7 +64,7 @@ This extension is part of the [rl-pi-extensions](..) monorepo. Run `/rl-extensio
 
 ## World monorepo support
 
-Auto-detects the worktree name (`root`, `t1`, `t2`, …) and zone path from the cwd for the terminal title. Each session gets a random emoji and title color for quick visual identification across multiple windows.
+Auto-detects the worktree name (`root`, `t1`, `t2`, …) and zone path from the cwd for the terminal title. Each new session gets a random emoji and title color for quick visual identification across multiple windows. The emoji is persisted inside the session name itself; the title color is deliberately **not** persisted — it re-rolls on every session restore or switch, so a restored session keeps its name and emoji but may render in a different color.
 
 ## Relation to `retitle`
 

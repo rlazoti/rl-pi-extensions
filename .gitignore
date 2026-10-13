@@ -1,3 +1,4 @@
 node_modules/
 *.zip
 tests/.test-*
+tests/.symlink-test-*

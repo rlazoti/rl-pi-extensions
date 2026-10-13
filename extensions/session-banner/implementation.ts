@@ -720,12 +720,15 @@ export default function (pi: ExtensionAPI) {
 		//      live session; after a reload-to-disabled it's just stale). The fresh
 		//      instance re-sets it on session_start when still enabled.
 		//
-		// pi >= 0.80 also fires session_shutdown on same-instance session
-		// replacement (reason "new"/"resume"/"back"); there the SAME instance's
-		// session_switch updates the pane/title, so we skip teardown to avoid a
-		// needless flicker. The pinned SDK type has no `reason` (and there
-		// session_shutdown fires only on exit), so a missing reason is a quit.
-		// Optional-chain the cast so a malformed or missing event can't throw.
+		// The pinned Pi 1.1.0 fires session_shutdown with reason
+		// "new"/"resume"/"fork" on same-instance session replacement (see
+		// SessionShutdownEvent in the SDK) just before the replacement's
+		// session_start runs. On replacement we skip teardown: the pane id is
+		// stable and that session_start re-renders it, and clearing the title
+		// would only add flicker before the new session paints its own. "quit"
+		// and "reload" discard this module instance, so they always tear down;
+		// a missing reason (older runtimes) is treated as a quit. Optional-chain
+		// the cast so a malformed or missing event can't throw.
 		const reason = (event as { reason?: string } | null | undefined)?.reason;
 		if (reason === undefined || reason === "quit" || reason === "reload") {
 			unregisterBannerPane();
@@ -759,11 +762,13 @@ export default function (pi: ExtensionAPI) {
 		initSessionState(ctx);
 	};
 
+	// OMP-compatibility block: verified against the pinned Pi 1.1.0 dist that
+	// Pi itself emits none of session_switch / session_fork / session_branch —
+	// they fire only under OMP, the user's runtime. Pi's replacement flows
+	// arrive as session_shutdown (reason new/resume/fork) + session_start,
+	// which are handled separately above. The handler map is keyed by string,
+	// so registering OMP-only names is safe in both runtimes.
 	pi.on("session_fork", initBranchedSession);
-	// OMP emits `session_branch` for tree-branch operations; its fork flow uses
-	// `session_switch`, which is handled above.
-	// The pinned Pi SDK types do not include OMP's event name, but both runtimes
-	// store handlers by string key and accept additional lifecycle events.
 	const ompApi = pi as unknown as {
 		on(event: "session_branch", handler: typeof initBranchedSession): void;
 	};

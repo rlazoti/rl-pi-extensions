@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **emacs-feedback**: `/emacs-feedback-address` can no longer re-send the same notes after a crash (bundles are archived before sending and skipped when already archived; a failed send rolls the archive back so the next run retries). A non-string `location`/`hunkHeader` in a feedback note is now rejected by validation
+
+### Changed
+
+- **pickers**: shared panel layout extracted to `extensions/panel.ts` (both pickers were carrying ~40 duplicated lines); the extension picker's status line is pending-aware and shows unapplied toggles; search keystrokes clamp the selection instead of resetting it; `Theme` now comes from pi-coding-agent (pi-tui doesn't export it)
+- **snippets**: the extension entry point types its API as `ExtensionAPI` instead of `any`
+- **session-banner**: imports standardized on `@earendil-works/*`; comments corrected against the pinned Pi 1.1.0 (it emits no `session_switch`/`session_fork`/`session_branch` — those handlers are OMP compatibility; `session_shutdown` reasons are quit/reload/new/resume/fork); README documents that the title color is intentionally not persisted
+
+### Added
+
+- **tests**: 22 new tests across the M batch (picker status/search/panel guards, import-scope + typing guards, emacs archive/dedupe/rollback behavior, note validation)
+
 ## [1.0.0] - 2025-07-11
 
 ### Added
