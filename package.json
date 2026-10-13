@@ -16,6 +16,6 @@
 		]
 	},
 	"scripts": {
-		"test": "node --experimental-strip-types --test tests/*.test.ts extensions/emacs-feedback/emacs-feedback.test.mjs"
+		"test": "node --experimental-strip-types --import ./test-support/register.mjs --test ."
 	}
 }

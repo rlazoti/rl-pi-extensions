@@ -218,7 +218,7 @@ async function safeExec(
 	}
 }
 
-function inactiveReason(
+export function inactiveReason(
 	role: ProcessRole,
 	disabled: boolean,
 	platform: NodeJS.Platform,
@@ -231,7 +231,7 @@ function inactiveReason(
 	return "inactive";
 }
 
-function truncateText(text: string, maxLength: number): string {
+export function truncateText(text: string, maxLength: number): string {
 	const normalized = text.replace(/\s+/g, " ").trim() || "Pi needs your attention";
 	return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength - 1)}…`;
 }

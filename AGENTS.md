@@ -103,10 +103,11 @@ rm ~/.pi/agent/extensions/tmux-feedback
 ## 5. Testing Expectations
 
 - **Run `npm test`** before every commit. All tests must pass.
-- **Test coverage targets:**
-  - `symlink-manager.test.ts`: symlink creation/removal, toggle logic, directory structure
-  - `manager.test.ts`: command registration, handler existence (source inspection since Pi deps unavailable)
-  - `extension-loading.test.ts`: validates all import paths resolve to existing files
+- **Discovery:** `npm test` runs `node --test .` with recursive discovery — every `*.test.ts` / `*.test.mjs` under `tests/` and `extensions/` runs automatically. Never hardcode file lists.
+- **Pi packages in tests:** `test-support/register.mjs` (loaded via `--import`) registers a resolve hook that aliases `@earendil-works/*` and `@mariozechner/*` to the real packages in the local Pi install (`~/.pi/agent/install/releases/<version>`, override with `PI_CODING_AGENT_DIR`) and remaps jiti-style `.js` relative imports to `.ts` inside this repo. Test files import sibling sources with `.ts` extensions.
+- **Coverage map:** emacs-feedback (53, behavioral), session-attention (process roles, ask-body formatting, truncation), snippets (display-safe, placeholders, frontmatter helpers), tmux-feedback (state reconstruction, message formatting, command handlers via fake Pi), session-banner (helpers: names/titles/auto-naming/URL reduction; panes: RenderScheduler + paneRegistry via `mock.timers`; index: full extension behavior — lifecycle, host handoff, title re-asserts, auto-naming, Herdr/cmux rename, /title — via `mock.timers` + the null-gated test seams in `implementation.ts`), symlink-manager + picker + extension-loading (string/behavioral). All formerly-dead vitest suites are ported; `npm test` is the only gate.
+- **Strip-compatible TS:** bare-node tests load extension sources via type stripping, which rejects parameter properties and other transform-only syntax — keep extension code strip-compatible (plain `constructor(x) { this.x = x }`).
+- **No ESM module mocking (Node 26):** inject dependencies through null-gated seams exported by the module under test (see session-banner's `setCompleteForTesting` / `setExecFileForTesting` / `setFsForTesting`). For async scheduling use `mock.timers` (`apis: ["setTimeout", "setInterval", "setImmediate", "Date"]` whenever the code compares `Date.now()`). Two differences from vitest fake timers, verified on Node 26: a timer due exactly at a tick's end fires only if it was pending *before* the tick, and a timer scheduled inside a tick callback is due at `tickTarget + delay` — size tick windows to strictly exceed the due time rather than landing on it.
 - **Test isolation:** Each test creates its own temp directory. Clean up in the same test.
 - **No regressions:** When fixing a bug, add a test that reproduces it first.
 
