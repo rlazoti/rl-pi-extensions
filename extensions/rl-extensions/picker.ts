@@ -155,10 +155,17 @@ export class ExtensionPicker implements Component, Focusable {
 			const visible = this.getVisibleList();
 			const ext = visible[this.selectedIndex];
 			if (ext) {
-				// Enabled → disable. Broken or disabled → enable (a broken
-				// symlink is repaired by re-pointing it at this checkout).
-				const status = getExtensionStatus(ext.name);
-				this.pendingChanges.set(ext.name, status !== "enabled");
+				// Flip the EFFECTIVE state (pending ?? disk). Enabled → disable.
+				// Broken or disabled → enable (a broken symlink is repaired by
+				// re-pointing it at this checkout). The disk only changes on
+				// apply, so toggling from getExtensionStatus() alone made
+				// toggle-off-then-toggle-on a no-op (v1.1.0 bug): the marker never
+				// returned, and Enter would disable an extension the user had
+				// just re-selected.
+				const pending = this.pendingChanges.get(ext.name);
+				const effective =
+					pending !== undefined ? pending : getExtensionStatus(ext.name) === "enabled";
+				this.pendingChanges.set(ext.name, !effective);
 				this.changed();
 				return;
 			}

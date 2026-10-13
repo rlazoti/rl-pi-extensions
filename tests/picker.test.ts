@@ -205,12 +205,35 @@ test("picker: space on a broken extension marks it for repair (enable)", () => {
 		new URL("../extensions/rl-extensions/picker.ts", import.meta.url),
 		"utf-8",
 	);
+	const spaceStart = pickerSource.indexOf("matchesKey(data, Key.space)");
+	assert.ok(spaceStart >= 0, "picker should have a space handler");
+	const spaceBlock = pickerSource.slice(spaceStart, pickerSource.indexOf("} else if", spaceStart));
 
-	// pending = (status !== "enabled") — broken and disabled both enable,
-	// which repairs a broken symlink by re-pointing it at this checkout
+	// effective = pending ?? (status === "enabled") — a broken extension has
+	// effective=false, so Space sets pending=true, which repairs the symlink
+	// by re-pointing it at this checkout
 	assert.ok(
-		pickerSource.includes('this.pendingChanges.set(ext.name, status !== "enabled")'),
-		"space toggle should enable for both broken and disabled extensions",
+		spaceBlock.includes('getExtensionStatus(ext.name) === "enabled"'),
+		"effective state must derive enabled-ness from getExtensionStatus",
+	);
+	assert.ok(
+		spaceBlock.includes("this.pendingChanges.get(ext.name)"),
+		"space toggle must consult the pending state",
+	);
+});
+
+test("picker: space toggle flips the effective state, not the disk alone (v1.1.0 regression)", () => {
+	const pickerSource = readFileSync(
+		new URL("../extensions/rl-extensions/picker.ts", import.meta.url),
+		"utf-8",
+	);
+	const spaceStart = pickerSource.indexOf("matchesKey(data, Key.space)");
+	const spaceBlock = pickerSource.slice(spaceStart, pickerSource.indexOf("} else if", spaceStart));
+	assert.ok(
+		spaceBlock.match(/!\s*effective\b/) !== null,
+		"space toggle must store the negation of the effective state; computing from the " +
+			"disk alone made toggle-off-then-toggle-on a no-op and Enter would disable an " +
+			"extension the user had re-selected",
 	);
 });
 
