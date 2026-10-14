@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseTopicFile } from "./schema.ts";
+import { isAssertionKey, parseTopicFile } from "./schema.ts";
 import { buildStore } from "./resolver.ts";
-import { migrationRequests, proposeMigration, renderMigrationReport, simulateMigration, type SourceFile } from "./migrate.ts";
+import { migrationRequests, prepareMigrationStore, proposeMigration, renderMigrationReport, simulateMigration, type SourceFile } from "./migrate.ts";
 
 function source(path: string, text: string, modified = "2026-10-10"): SourceFile {
 	return { path, text, modified, modifiedFrom: "mtime" };
@@ -126,9 +126,174 @@ test("a guessed scope is always flagged, cue or no cue", () => {
 	assert.match(procedure.cues.join(" "), /not named — set project:<name> by hand/);
 });
 
-test("a section that reads like several claims is flagged for splitting, not merged into one blob", () => {
-	const report = proposeMigration([source("knowledge/list.md", "# list\n\n## Rules\n- never push\n- always test\n- run lint first\n- keep it small\n")]);
+test("a section that reads like several claims is split into one entry per claim", () => {
+	const report = proposeMigration([source("knowledge/list.md", "# list\n\n## Rules\n- never push to main\n- always run npm test first\n- run lint before the tests\n- keep commits small\n")]);
+	assert.deepEqual(report.proposals.map((proposal) => proposal.key), [
+		"list.rules",
+		"list.rules.always-npm-test-first",
+		"list.rules.lint-before-tests",
+		"list.rules.keep-commits-small",
+	]);
+	assert.ok(report.proposals.every((proposal) => new Set(proposal.flags).size === proposal.flags.length), "flags must not accumulate across siblings");
+	assert.ok(report.proposals.every((proposal) => !proposal.flags.includes("same-heading-elsewhere")), "sibling claims share a heading by construction; that is not a repeat");
+	assert.ok(report.proposals.every((proposal) => proposal.flags.includes("mechanical-split")));
+	assert.ok(report.proposals.every((proposal) => !proposal.flags.includes("needs-split")));
+	assert.match(report.proposals[1]!.source, /claim 2 of 4/);
+	// Kind is judged per claim, not per section: only the modal bullet is a rule.
+	assert.deepEqual(report.proposals.map((proposal) => proposal.kind), ["rule", "rule", "procedure", "fact"], "kind is judged per claim: only the modal bullets read as rules");
+});
+
+test("an example bullet qualifies the claim above it instead of becoming a claim", () => {
+	const text = `# git
+
+## Branch naming
+
+All branches follow this pattern:
+
+\`\`\`
+rl-<MM>-<DD>-<short_description>
+\`\`\`
+
+- \`MM\` and \`DD\` are the current local month/day, zero-padded
+- Example: rl-02-16-cancel-button
+- Branches are cut from main at the point of the release
+`;
+	const report = proposeMigration([source("knowledge/git-standards.md", text)]);
+	const keys = report.proposals.map((proposal) => proposal.key);
+	assert.deepEqual(keys, ["git-standards.branch-naming", "git-standards.branch-naming.branches-cut-main-point"], "the month/day definition and the worked example qualify the pattern; they do not become claims of their own");
+	const lead = report.proposals[0]!;
+	assert.match(lead.body, /```/);
+	assert.match(lead.body, /zero-padded/);
+	assert.ok(isAssertionKey(lead.key) && keys.every((key) => isAssertionKey(key)));
+});
+
+test("splitting can be turned off, and the section then stays flagged instead", () => {
+	const report = proposeMigration([source("knowledge/list.md", "# list\n\n## Rules\n- never push to main\n- always run npm test first\n- run lint before the tests\n")], { split: false });
+	assert.deepEqual(report.proposals.map((proposal) => proposal.key), ["list.rules"]);
 	assert.ok(report.proposals[0]!.flags.includes("needs-split"));
+});
+
+test("two claims in one section that read alike are flagged, even though the gate cannot see them as rivals", () => {
+	const report = proposeMigration([source("knowledge/list.md", "# list\n\n## Notes on loading\n- never use require at the top level of anything\n- never use require at the top level of modules\n- keep it simple\n")]);
+	const twins = report.proposals.filter((proposal) => proposal.flags.includes("similar-claim"));
+	assert.equal(twins.length, 2, "the lead claim and its paraphrase, not just the paraphrase");
+	assert.ok(twins.every((proposal) => proposal.cues.join(" ").includes("sibling claim")));
+	assert.deepEqual(report.similarClaims.map((group) => group.keys.sort()), [report.proposals.filter((proposal) => proposal.key !== "list.notes-on-loading.keep-simple").map((proposal) => proposal.key).sort()]);
+	// Different keys, so the gate is blind here by construction: the flag is the net.
+	assert.deepEqual(report.keyCollisions, []);
+	assert.match(renderMigrationReport(report), /Claims that read like the same assertion/);
+});
+
+test("a claim lead is shortened rather than turning into an unreadable key", () => {
+	const long = "Extensions load through jiti so types are stripped and never checked which means a repo can be type-broken with zero errors";
+	const report = proposeMigration([source("knowledge/list.md", `# list\n\n## Loading\n- ${long}\n- keep it simple\n- run tsc yourself\n`)]);
+	for (const proposal of report.proposals) {
+		const segment = proposal.key.split(".").pop()!;
+		assert.ok(segment.length <= 40, `${proposal.key} has a ${segment.length}-character final segment`);
+		assert.ok(isAssertionKey(proposal.key), `${proposal.key} is not a valid assertion key`);
+	}
+});
+
+test("in-place migration consumes the prose it read, and keeps claims someone wrote by hand", () => {
+	const prose = `# Docs preference
+
+## Rule
+
+Do NOT create an intent / spec / scenarios trio.
+- One README per component is the source of truth.
+
+## Applies to
+
+Each extension already has its own README.
+
+## rl-docs-preference.readme-first
+
+- kind: rule
+- scope: global
+- asOf: 2026-06-01
+Write the README before the code, not after.
+`;
+	const prepared = prepareMigrationStore(buildStore([parseTopicFile(prose, "knowledge/rl-docs-preference.md")]), ["knowledge/rl-docs-preference.md"]);
+	assert.deepEqual(prepared.consumed.map((entry) => entry.heading), ["Rule", "Applies to"], "unkeyed prose is the migration input, not a claim to preserve");
+	assert.deepEqual(prepared.preserved, ["knowledge/rl-docs-preference.md#rl-docs-preference.readme-first"]);
+
+	const report = proposeMigration([source("knowledge/rl-docs-preference.md", prose)]);
+	const simulation = simulateMigration(prepared.store, migrationRequests(report));
+	const written = simulation.edits.find((edit) => edit.path === "knowledge/rl-docs-preference.md")!.content;
+	assert.match(written, /## rl-docs-preference\.rule/);
+	assert.match(written, /## rl-docs-preference\.readme-first/);
+	assert.equal(written.includes("## Applies to"), false, "the skipped section does not come back dressed up as an entry with a kind: field");
+	assert.match(written, /# Docs preference/, "the file keeps its title");
+});
+
+test("a half-migrated file is not re-mined for claims out of its own metadata", () => {
+	const prose = `# Docs preference
+
+## Rule
+
+Write the README before the code.
+
+## rl-docs-preference.readme-first
+
+- kind: rule
+- scope: global
+- asOf: 2026-06-01
+Write the README before the code, not after.
+`;
+	const report = proposeMigration([source("knowledge/rl-docs-preference.md", prose)]);
+	assert.deepEqual(report.proposals.map((proposal) => proposal.key), ["rl-docs-preference.rule"]);
+	assert.deepEqual(report.alreadyEntries, [{ sourceFile: "knowledge/rl-docs-preference.md", heading: "rl-docs-preference.readme-first" }]);
+	assert.equal(report.proposals.some((proposal) => proposal.body.includes("kind: rule")), false, "an entry's fields are not claims");
+	assert.match(renderMigrationReport(report), /Already entries, left untouched/);
+});
+
+test("a heading that claims to be an entry but is not entry-shaped is reported as broken", () => {
+	const report = proposeMigration([source("knowledge/broken.md", "# broken\n\n## ui.background\nsome prose with no fields\n")]);
+	assert.deepEqual(report.proposals, []);
+	assert.match(report.skippedSections[0]!.reason, /broken entry/);
+});
+
+test("a migrated claim that lands on a hand-written claim is stopped, not applied over it", () => {
+	const prose = `# Docs preference
+
+## Rule
+Write the README before the code, always.
+
+## Scope of the rule
+Each extension already has its own README.
+
+## rl-docs-preference.rule
+
+- kind: rule
+- scope: global
+- asOf: 2026-06-01
+Write the README before the code, not after.
+`;
+	const prepared = prepareMigrationStore(buildStore([parseTopicFile(prose, "knowledge/rl-docs-preference.md")]), ["knowledge/rl-docs-preference.md"]);
+	const report = proposeMigration([source("knowledge/rl-docs-preference.md", prose)]);
+	const simulation = simulateMigration(prepared.store, migrationRequests(report));
+
+	// The gate would have allowed it: same key, same heading, so it reads as an
+	// amendment. A migration does not own a claim someone wrote by hand.
+	assert.deepEqual(simulation.accepted, ["rl-docs-preference.scope-of-the-rule"]);
+	assert.deepEqual(simulation.collided, [{ key: "rl-docs-preference.rule", file: "knowledge/rl-docs-preference.md", first: "knowledge/rl-docs-preference.md#rl-docs-preference.rule", second: "knowledge/rl-docs-preference.md#Rule" }]);
+	const written = simulation.edits.find((edit) => edit.path === "knowledge/rl-docs-preference.md")!.content;
+	assert.match(written, /Write the README before the code, not after\./, "the hand-written claim keeps its own text");
+	assert.equal(written.includes("Write the README before the code, always."), false);
+});
+
+test("a split claim does not inherit the list's indentation", () => {
+	const report = proposeMigration([source("knowledge/indent.md", "# indent\n\n## Rule\nDo NOT create a trio of files\n  for design docs.\n- One README is the source of truth\n- Keep it short\n")]);
+	for (const proposal of report.proposals) {
+		assert.equal(/^ {2,}\S/m.test(proposal.body), false, `${proposal.key} kept the source indentation`);
+	}
+});
+
+test("decided file moves are reported as decisions, not performed", () => {
+	const report = proposeMigration([source("knowledge/planish.md", "# planish\n\n## Done\nShipped.\n")], { moves: [{ from: "knowledge/implementation-plan.md", to: "core/implementation-plan.md", reason: "status snapshot, not durable claims" }] });
+	assert.equal(report.moves.length, 1);
+	assert.match(renderMigrationReport(report), /knowledge\/implementation-plan\.md -> core\/implementation-plan\.md/);
+	assert.ok(!report.proposals.some((proposal) => proposal.sourceFile === "knowledge/implementation-plan.md"));
 });
 
 test("identical slugs in one file and repeated headings across files are both reported", () => {
@@ -190,24 +355,31 @@ test("a section with no recoverable date cannot be migrated as an active claim",
 	assert.equal(simulation.rejected[0]!.reason, "missing-asOf");
 });
 
-test("re-running the migration changes nothing: no duplicate claims, no churn", () => {
+test("re-applying an applied plan stops instead of duplicating or churning", () => {
 	const report = proposeMigration([source("knowledge/git-standards.md", GIT_FILE)]);
 	const requests = migrationRequests(report);
 	const first = simulateMigration(EMPTY_STORE, requests);
 	const migrated = buildStore(first.edits.map((edit) => parseTopicFile(edit.content, edit.path)));
-	const second = simulateMigration(migrated, requests);
 
-	assert.deepEqual(second.accepted, []);
-	assert.deepEqual(second.unchanged.sort(), ["git-standards.branch-naming", "git-standards.github-push-preferences"]);
-	assert.deepEqual(second.edits, []);
+	const replay = simulateMigration(migrated, requests);
+	assert.deepEqual(replay.accepted, []);
+	assert.deepEqual(replay.edits, [], "nothing is rewritten, so a re-run cannot churn the bank");
+	assert.equal(replay.collided.length, 2, "both claims are already in the store under those identities");
+
+	// The honest second pass: re-read the migrated file and it proposes nothing,
+	// because everything in it is already an entry.
+	const second = proposeMigration([source("knowledge/git-standards.md", first.edits[0]!.content)]);
+	assert.deepEqual(second.proposals, []);
+	assert.equal(second.alreadyEntries.length, 2);
 });
 
 test("the report says it wrote nothing and shows every judgement", () => {
 	const report = proposeMigration([source("knowledge/git-standards.md", GIT_FILE), source("knowledge/implementation-plan.md", "# Implementation plan\n\n## Phase 1 (COMPLETE)\ndone\n")]);
 	const text = renderMigrationReport(report);
 	assert.match(text, /^Migration plan \(dry run — nothing was written\)/);
-	assert.match(text, /Proposals: 2; skipped files: 1; skipped sections: 1/);
+	assert.match(text, /Proposals: 2; skipped files: 1; skipped sections: 2/);
 	assert.match(text, /git-standards\.branch-naming\s+→\s+knowledge\/git-standards\.md/);
 	assert.match(text, /asOf 2026-10-10 \(file mtime — inferred\)/);
 	assert.match(text, /Provenance folded into source:/);
+	assert.match(text, /§ Source: provenance . folded into the entries/);
 });

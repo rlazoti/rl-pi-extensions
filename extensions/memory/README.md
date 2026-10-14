@@ -312,6 +312,7 @@ dismissal, a timeout or no UI at all parks the refusal in the pending queue.
 
 | Export | Purpose |
 |---|---|
+| `prepareMigrationStore(store, paths)` | Reduce the files being rewritten to their keyed entries, reporting the prose consumed and the claims preserved. |
 | `proposeMigration(sources)` | Read prose `SourceFile[]`, return proposals + every skip with its reason. Deterministic, so a reviewed plan can be re-run and stays line-for-line the same. |
 | `migrationRequests(report, accept?)` | Proposals expressed as gate `WriteRequest`s, tagged `migratedFrom: <file>#<heading>`. |
 | `simulateMigration(store, requests)` | Fold them through `decide`; returns accepted / unchanged / refused / rejected / collided, the would-be file contents, and violations split by cause. |
@@ -401,34 +402,74 @@ draft); sections with no body; and `## Source`, which is folded into the entries
 reported as a collision for a human to name — never auto-renamed, because a
 generated `-2` is a key nobody chose.
 
-**The batch guard.** `simulateMigration` stops two proposals claiming one identity
-*within one batch* before the gate sees them. The gate deliberately allows a write
-to amend an entry it already owns — rewording your own claim is authoring, not a
-rival claim — and that allowance is wrong for migration: two prose sections that
-slugify to one key have no continuous authorship between them, so the second would
-silently rewrite the first. That is the exact failure this component exists to
-prevent, arriving from an unexpected direction.
+**Bullet-heavy sections are split into one entry per claim.** The asymmetry decides
+it: an over-granular entry is visible, reviewable and mergeable later, while a
+section holding four claims behind one heading makes the conflict gate blind — one
+authority for four assertions, and a rival that touches any of them looks like an
+amendment. Examples and definitions (`Example: …`, a short bullet built around a
+code token) qualify the claim above them and are merged into it. Fenced code stays
+with the block it documents. Each claim is judged on its own for `kind` and `scope`,
+so a modal bullet becomes a rule and its descriptive neighbour stays a fact.
+
+**Naming a split claim.** A key is an identity: it is what `memory_show` takes and
+what provenance points at. So the name comes from the thing the claim is about —
+usually an inline code token — then from the significant words with connectives
+dropped, and otherwise from the position in the section (`claim-3`). The first forty
+characters of a sentence are never a key: `smoke-test-recipe-cd` is a name a human
+can rename, `a-missing-named-export-nope-from` is a fake that will be typed into a
+tool by someone giving up.
+
+**Two claims that read alike are flagged, because the gate cannot see them.** Sibling
+claims with the same leading words get *different* keys, so they are not rivals by
+identity and a bank quietly ends up with two versions of one rule drifting apart.
+`similar-claim` is the net for that gap, and the report prints the family.
+
+**A half-migrated bank is not re-mined.** A heading that is already an assertion key
+is a migrated claim, not prose: its `- kind:` and `- asOf:` lines are metadata. Read
+as bullet text they invent claims out of an entry's own fields — which is exactly
+what a second dry run does if this check is missing. A keyed heading whose body is
+*not* entry-shaped is reported as a broken entry instead of being migrated around.
+
+**In-place rewrite consumes the prose** (`prepareMigrationStore`). The prose these
+proposals came from is also sitting in the store as unkeyed headings, and the
+renderer would serialize it back in entry shape — turning `## Applies to` into a
+claim with a `kind:` field. For the files being migrated, unkeyed headings are the
+*input* and are dropped; the file keeps its title. **Entries with real assertion keys
+are preserved**: someone may have written a claim by hand in the same file, and a
+migration that quietly deleted it would be the worst bug this component could have.
+The report separates headings that became entries from prose that is not carried
+over, so approving the plan means seeing exactly what disappears.
+
+**A migrated claim that lands on a hand-written claim is stopped, not applied.** The
+gate allows a write to amend an entry it already owns, and same key + same heading
+looks exactly like that. A migration does not own the claim, so the collision guard
+stops it before the gate sees it — the same rule that stops two prose sections from
+overwriting each other, applied to the store's existing content.
 
 **The dry run is the gate, not a preview of it.** `simulateMigration` folds the
 proposals through `decide` against a store that grows as each write is accepted, so
 the report answers the only question that matters — *would these writes be
-admitted?* — and the rendered bytes come from the store's own renderer rather than
-a serializer invented for migration day. Re-running a migration is a no-op
-(`unchanged`), which is what makes it safe to re-run after a correction.
+admitted?* — and the rendered bytes come from the store's own renderer rather than a
+serializer invented for migration day. Re-applying an applied plan stops as
+collisions and rewrites nothing; re-reading a migrated file proposes nothing,
+because everything in it is already an entry.
 
-`scripts/migrate-report.mjs [--bank <dir>] [--out <file>]` prints the plan for a
-real bank. It has no `--apply` flag on purpose: a report script that can also
-overwrite your bank is a tool you will eventually run by habit.
+`scripts/migrate-report.mjs [--bank <dir>] [--out <file>] [--preview <dir>]
+[--move "a => b"] [--no-split]` prints the plan for a real bank, and `--preview`
+writes the **exact bytes** the gate would write into a scratch directory. Reading
+the migrated file is the only review that counts: a table of proposals is a summary
+of the decision, not the decision. There is no `--apply` flag on purpose — a report
+script that can also overwrite your bank is a tool you will eventually run by habit.
 
-**Open decisions from the dry run of the live bank** (2026-10-14, 8 files read, 10
-proposals, 0 conflicts, 0 key collisions, no new violations): six sections flagged
-`needs-split` (a bullet list of four claims is not one entry); two that say "this
-repo" without naming it, so the scope is left `global` rather than inventing
-`project:this-repo`; `git-standards.md` dated 2026-05-02 by mtime when the rule
-inside it is older; `knowledge/implementation-plan.md` recommended out of
-`knowledge/` altogether; and whether entries replace the prose **in place** (the
-default here, since cutover replaces the bank) or stage into new files first so
-rollback is a rename.
+**Decisions taken on 2026-10-14** (the first dry run of the live bank, before any of
+this code existed): split bullet-heavy sections; replace the prose in place, with a
+backup mandatory and rollback = restore; `knowledge/implementation-plan.md` is not
+knowledge — move it to `core/`. **Current dry run**: 8 files read, 23 claims from 10
+sections, 0 conflicts, 0 collisions, 0 rejected, no new store violations; 4 files and
+9 sections skipped with reasons; 7 prose sections not carried over (3 structural, 4
+folded into `source:`). **Still judgement calls**: nine `fact`-by-default kinds, two
+sections that say "this repo" without naming it, and `git-standards.md` dated
+2026-05-02 by mtime when the rule inside it is older.
 
 ## Cutover hazards (Phase 5)
 
@@ -452,12 +493,12 @@ rollback is a rename.
 | 4 | recall + budget + deterministic prompt text | ✅ `inject.ts` |
 | 5a | tools, `/memory`, injection hook, pending queue, single-instance guard | ✅ `implementation.ts` `service.ts` `pending.ts` `fs-store.ts` |
 | 5b-1 | migration tooling + dry run of the live bank | ✅ `migrate.ts` `scripts/migrate-report.mjs` |
-| 5b-2 | apply the migration + cutover of the live extension | ⬜ (needs the human decisions below) |
+| 5b-2 | apply the migration + cutover of the live extension | ⬜ (decisions taken; needs the go-ahead) |
 | 6 | daily-rollover fixes (archive never fires, `Carried Forward` vs `Context for Tomorrow`) | ⬜ |
 
 ## Testing map
 
-180 tests in `extensions/memory/`:
+197 tests in `extensions/memory/`:
 
 - `schema.test.ts` (31): grammar and scope parsing; metadata vs body boundaries;
   fenced `##` is body; CRLF; unclosed fence; legacy prose headings flagged
@@ -508,6 +549,7 @@ rollback is a rename.
   the gate; re-refusing one contest updates one record; unreadable queue files are
   reported rather than guessed at; ids are validated before reaching the
   filesystem; the queue is oldest-first.
+- `migrate.test.ts` (27): proposals and their cues; what is skipped and why (structural headings matched whole, status snapshots, non-`knowledge/` paths, bodyless sections, `## Source` folded into provenance); split families, qualifier merging, fence attachment, per-claim `kind`, placeholder-degrading keys, `similar-claim`; already-entry skip and the broken-entry report; prose consumption with hand-written claims preserved and a colliding proposal stopped; batch collisions; determinism and re-application idempotence; the report's own text.
 - `service.test.ts` (19): write / resolveQueued / show / search / injection /
   doctor against a scratch bank — a parked refusal leaves the bank byte-identical;
   an answered contest clears its queue entry; a queue entry resolved after the
