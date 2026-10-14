@@ -18,7 +18,8 @@ The picker uses a centered framed panel with a search bar, extension list, and s
 - `Space`: toggle the selected extension (visual only)
 - `/`: focus search; search matches name and description
 - `Enter`: apply all pending changes and close
-- `Escape`: cancel without saving (discards all pending changes)
+- `Escape`: from the search box, leave it — the filter stays active and the query
+  stays rendered; from the list, cancel without saving (discards all pending changes)
 
 ### Visual Feedback
 

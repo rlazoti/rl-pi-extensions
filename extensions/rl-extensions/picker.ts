@@ -184,12 +184,16 @@ export class ExtensionPicker implements Component, Focusable {
 		const reservedRows = 5;
 		const listRows = Math.max(0, contentRows - reservedRows);
 
-		// Search input line
+		// Search input line. The query stays rendered when the search box is not
+		// focused, because filteredExtensions() keeps applying it to the list.
+		// Rendering the placeholder instead hid an active filter: users then
+		// toggled rows they believed belonged to the unfiltered list.
+		const hasQuery = this.searchQuery.length > 0;
 		const searchPrefix = this.searchFocused
 			? this.theme.fg("accent", "Search › ")
 			: "Search   ";
-		const searchInput = this.searchFocused ? this.searchQuery : SEARCH_PLACEHOLDER;
-		const searchColor = this.searchFocused ? "accent" : "muted";
+		const searchInput = hasQuery ? this.searchQuery : this.searchFocused ? "" : SEARCH_PLACEHOLDER;
+		const searchColor = this.searchFocused ? "accent" : hasQuery ? "text" : "muted";
 		lines.push(fit(this.theme.fg(searchColor, searchPrefix + searchInput), contentWidth));
 
 		// Separator

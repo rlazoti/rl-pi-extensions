@@ -1,6 +1,59 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { ExtensionPicker } from "../extensions/rl-extensions/picker.ts";
+import { setExtensionsDirForTesting } from "../extensions/symlink-manager.ts";
+
+// Behavioral harness: a real ExtensionPicker rendered against a fake TUI/theme/
+// keybindings and a temp extensions dir. The source-string tests in this file
+// only pin the shape of the module; the interaction bugs (hidden filter,
+// phantom rows, off-screen selection) are only observable by rendering.
+interface PickerHarness {
+	picker: ExtensionPicker;
+	readonly rows: string[];
+	close(): void;
+}
+
+function createPickerHarness(terminalRows = 40, terminalCols = 80): PickerHarness {
+	const dir = mkdtempSync(join(tmpdir(), "rl-picker-test-"));
+	setExtensionsDirForTesting(dir);
+	const theme = {
+		fg: (_style: string, text: string) => text,
+		bg: (_style: string, text: string) => text,
+		getBgAnsi: () => "",
+	} as never;
+	const tui = { terminal: { rows: terminalRows, cols: terminalCols }, requestRender() {} } as never;
+	const keybindings = {
+		matches: (data: string, id: string) =>
+			(id === "tui.select.up" && data === "up") ||
+			(id === "tui.select.down" && data === "down") ||
+			(id === "tui.select.confirm" && data === "enter"),
+	} as never;
+	const picker = new ExtensionPicker(tui, theme, keybindings, () => {});
+	return {
+		picker,
+		get rows() {
+			return picker.render(terminalCols).map((line) => line.replace(/\u001b\[[0-9;]*m/g, "").trimEnd());
+		},
+		close() {
+			setExtensionsDirForTesting(undefined);
+			rmSync(dir, { recursive: true, force: true });
+		},
+	};
+}
+
+function searchLine(rows: string[]): string | undefined {
+	return rows.find((row) => row.includes("Search"));
+}
+
+function listRows(rows: string[]): string[] {
+	return rows.filter((row) =>
+		/tmux-feedback|session-banner|session-attention|snippets|emacs-feedback/.test(row),
+	);
+}
 
 // Test that the picker module exists and exports the expected symbols
 test("picker: module exports openExtensionPicker", () => {
@@ -449,6 +502,32 @@ test("picker: space toggle flips the effective state, not the disk alone (v1.1.0
 		spaceBlock.match(/!\s*effective\b/) !== null,
 		"space toggle must store the negation of the effective state",
 	);
+});
+
+test("picker: an active search query stays visible after leaving the search box", () => {
+	const harness = createPickerHarness();
+	try {
+		harness.picker.handleInput("/");
+		for (const char of "emacs") harness.picker.handleInput(char);
+		assert.ok(
+			searchLine(harness.rows)?.includes("Search › emacs"),
+			"the focused search box shows the query",
+		);
+
+		harness.picker.handleInput("\u001b"); // Esc leaves the box; the filter stays applied
+		const line = searchLine(harness.rows);
+		assert.ok(
+			line?.includes("emacs"),
+			`an unfocused search box must keep showing the active filter, got: ${JSON.stringify(line)}`,
+		);
+		assert.ok(
+			!line?.includes("name or description"),
+			"the placeholder must not mask an active filter (users otherwise act on a list they\n" +
+				"believe is unfiltered — the bug that let Space toggle a row the search had filtered out)",
+		);
+	} finally {
+		harness.close();
+	}
 });
 
 function frameCallHasTitle(source: string, title: string): boolean {
