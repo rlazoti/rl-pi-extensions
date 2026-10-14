@@ -14,6 +14,9 @@
  * Trustworthiness rules:
  *   - Monorepo paths are derived from THIS file's location, never from
  *     process.cwd() (which is the user's project when Pi runs).
+ *   - The extensions directory is always absolute: $HOME when usable,
+ *     otherwise os.homedir(). A relative result is refused with an error
+ *     instead of silently creating symlinks inside the user's project.
  *   - Enabling validates the target exists before creating a link, so we
  *     never create a broken symlink.
  *   - Enabling over a broken or stale (re-pointed) symlink repairs it
@@ -23,7 +26,8 @@
  */
 
 import { existsSync, lstatSync, mkdirSync, readlinkSync, readdirSync, rmSync, statSync, symlinkSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { homedir, userInfo } from "node:os";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // Test seam: tests point this at a temp directory so the real
@@ -34,8 +38,38 @@ export function setExtensionsDirForTesting(dir: string | undefined): void {
 	extensionsDirOverride = dir;
 }
 
+/**
+ * Pick the home directory the extensions directory hangs off.
+ *
+ * Pi's jiti runtime has historically been inconsistent about os.homedir(), so
+ * $HOME wins when it is usable — but a missing or relative $HOME must never
+ * degrade to a *relative* extensions directory. `process.env.HOME || ""` did
+ * exactly that: enableExtension() then created .pi/agent/extensions/<name>
+ * inside whatever project Pi was started in and reported success.
+ */
+export function resolveHomeDir(envHome: string | undefined, systemHome: string): string {
+	const home = envHome && isAbsolute(envHome) ? envHome : systemHome;
+	if (!isAbsolute(home)) {
+		throw new Error(
+			`Cannot resolve an absolute home directory (HOME=${JSON.stringify(envHome)}, ` +
+				`system home=${JSON.stringify(systemHome)}); refusing to manage extensions relative to the cwd`,
+		);
+	}
+	return home;
+}
+
+// os.homedir() returns "" when HOME is set but empty, so fall through to
+// os.userInfo(), which reads the password entry and ignores $HOME.
+function systemHomeDir(): string {
+	try {
+		return homedir() || userInfo().homedir;
+	} catch {
+		return "";
+	}
+}
+
 export function getExtensionsDir(): string {
-	return extensionsDirOverride ?? join(process.env.HOME || "", ".pi", "agent", "extensions");
+	return extensionsDirOverride ?? join(resolveHomeDir(process.env.HOME, systemHomeDir()), ".pi", "agent", "extensions");
 }
 
 /**

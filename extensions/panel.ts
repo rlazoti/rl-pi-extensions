@@ -1,4 +1,5 @@
-import { truncateToWidth, visibleWidth, type Theme } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { Theme } from "@earendil-works/pi-coding-agent";
 
 /**
  * Shared framed-panel layout helpers for the overlay pickers (rl-extensions,

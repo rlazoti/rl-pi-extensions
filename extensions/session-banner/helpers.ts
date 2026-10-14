@@ -300,6 +300,12 @@ const OPAQUE_SLACK_PATH = /^\/(?:app_redirect|archives|client)(?:\/|$)/;
 const GITHUB_ARTIFACT_PATH = /^\/[^/]+\/[^/]+\/(?:pull|issues)\/(\d+)(?:\/|$|\.(?:diff|patch)$)/i;
 
 function autoNameArtifactId(url: URL): string | undefined {
+  // Non-goal (deliberate, pinned by helpers.test.ts): only the canonical
+  // github.com/<org>/<repo>/(pull|issues)/N shape is reduced. Deeper
+  // enterprise-style paths and GHE hosts (github.<company>.com) are
+  // preserved, never guessed at — a stale pre-node:test vitest suite once
+  // expected the deeper shapes to reduce; that expectation was never
+  // implemented and is intentionally not supported.
   if (url.hostname === "github.com") return url.pathname.match(GITHUB_ARTIFACT_PATH)?.[1];
   return undefined;
 }

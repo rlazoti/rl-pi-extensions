@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **rl-extensions picker**: a search that matched nothing rendered the full unfiltered list *plus* "No matching extensions" — the fallback reused the unfiltered list, so Space toggled a row the user could not see as filtered and Enter applied it. An empty result now renders no rows
+- **rl-extensions picker**: the visible list could exceed the panel height, pushing the selected row (and its state marker) off-screen with no way to scroll back — the row budget is now derived from the terminal height, clamped to the visible window and scrollable
+- **rl-extensions picker**: Esc in the search box cleared the visible query while the filter stayed applied, so the list looked truncated and the cursor sat on an off-screen row. Esc now clears the filter too
+- **rl-extensions**: extension paths were derived from `process.cwd()`, so opening the picker from any other project produced paths that `enableExtension` turned into symlinks pointing nowhere — and the picker listed every extension as broken. Paths now come from the module's own location
+- **session-banner**: `complete()` was imported from the pi-ai package root. In Pi that specifier is served by the compat entrypoint, but pi-ai exports no such name at its root — under plain ESM the extension fails to load outright, and `generateName()` would otherwise have swallowed the error and left auto-naming silently dead. It now imports `@earendil-works/pi-ai/compat`, which resolves identically in Pi, in tests and under `tsc`
+- **session-attention**: clicking a notification activated `com.googlecode.iterm2` in both activation paths, bringing an unrelated (often not even running) app forward for Ghostty, Terminal.app, herdr and cmux users. The terminal bundle id is now read from `__CFBundleIdentifier`, with iTerm2 kept as the fallback for a bare TTY
+- **session-attention**: `/attention-status` reported an *active* status in print mode because it tested `mode !== "headless"` — a value Pi never emits (`ExtensionMode` is tui/rpc/json/print)
+
+### Added
+
+- **tests**: `npm run typecheck` — a strict `tsc --noEmit` gate over `extensions/` and `tests/`. Pi loads extensions through jiti, which strips types without checking them, so nothing in this repo had ever been type-checked; the gate found 31 errors, including the two broken imports above
+- **tests**: 16 behavioral picker tests driving the real `PickerComponent` through a keyboard/theme harness (search focus, Esc, row budgets, selection clamping, apply-result seam)
+- **tests**: 12 real-filesystem `symlink-manager` tests (temp dirs, no fakes) plus `getExtensionsDir()` absolute-path pins for the cwd bug
+- **tests**: session-attention activation tests (bundle id from env, iTerm fallback, sanitization of a value that is interpolated into a shell command)
+- **tests**: a pin that session-banner imports `complete()` from a pi-ai specifier that actually exports it
+
+### Changed
+
+- **session-banner**: the `execFile` and `fs` test seams are typed as the narrow shapes the extension actually uses instead of whole node modules, so their test fakes are structurally honest
+- **session-banner / tmux-feedback**: `session_switch`, `session_fork` and `session_branch` registrations go through one documented cast (Pi 1.2.0 does not emit them; they are OMP-only events) instead of an ad-hoc cast at each site
+- **docs**: the CHANGELOG sections were out of order (1.0.0 before 1.1.0) and dated 2025-07-11 / 2026-07-18; both releases actually landed on 2026-10-10, and 1.1.0 was never tagged
+
 ## [1.2.0] - 2026-10-12
 
 ### Fixed
@@ -41,26 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **snippets**: the extension entry point types its API as `ExtensionAPI` instead of `any`
 - **session-banner**: imports standardized on `@earendil-works/*`; comments corrected against the pinned Pi 1.1.0 (it emits no `session_switch`/`session_fork`/`session_branch` — those handlers are OMP compatibility; `session_shutdown` reasons are quit/reload/new/resume/fork); README documents that the title color is intentionally not persisted
 
-## [1.0.0] - 2025-07-11
-
-### Added
-
-- **rl-extensions**: TUI picker for managing extensions with framed panel UI
-- **session-attention**: Desktop notifications when Pi needs your attention
-- **snippets**: Snippet insertion into current draft with picker UI
-- Navigation with ↑↓, toggle with Space, search with /
-- Symlink-based enable/disable management
-- Comprehensive test suite (24 tests)
-- CHANGELOG.md following Keep a Changelog format
-
-### Fixed
-
-- **rl-extensions picker**: Navigation and toggle not working when no search query is active. Picker now uses consistent visible list for display and navigation.
-- **rl-extensions picker**: Focus routing for search input
-- **rl-extensions picker**: Navigation using keybindings instead of raw key constants
-- **rl-extensions picker**: Adopted framed picker UI from snippets extension
-
-## [1.1.0] - 2026-07-18
+## [1.1.0] - 2026-10-10 (released by version bump, never tagged)
 
 ### Added
 
@@ -81,3 +88,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Updated
 
 - Clarified snippets description: "Insert predefined text snippets into the prompt"
+
+## [1.0.0] - 2026-10-10
+
+### Added
+
+- **rl-extensions**: TUI picker for managing extensions with framed panel UI
+- **session-attention**: Desktop notifications when Pi needs your attention
+- **snippets**: Snippet insertion into current draft with picker UI
+- Navigation with ↑↓, toggle with Space, search with /
+- Symlink-based enable/disable management
+- Comprehensive test suite (24 tests)
+- CHANGELOG.md following Keep a Changelog format
+
+### Fixed
+
+- **rl-extensions picker**: Navigation and toggle not working when no search query is active. Picker now uses consistent visible list for display and navigation.
+- **rl-extensions picker**: Focus routing for search input
+- **rl-extensions picker**: Navigation using keybindings instead of raw key constants
+- **rl-extensions picker**: Adopted framed picker UI from snippets extension

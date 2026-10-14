@@ -20,7 +20,7 @@ export interface ExtensionPickerOptions {
 
 export type ExtensionPickerResult =
 	| Readonly<{ kind: "cancel" }>
-	| Readonly<{ kind: "apply"; enabledCount: number; errors: readonly string[] }>;
+	| Readonly<{ kind: "apply"; enabledCount: number; changedCount: number; errors: readonly string[] }>;
 
 const PICKER_HEIGHT_PERCENT = 60;
 
@@ -39,6 +39,7 @@ export class ExtensionPicker implements Component, Focusable {
 	private readonly options: ExtensionPickerOptions;
 
 	private selectedIndex = 0;
+	private scrollOffset = 0;
 	private searchQuery = "";
 	private searchFocused = false;
 	private pendingChanges = new Map<string, boolean>();
@@ -81,13 +82,34 @@ export class ExtensionPicker implements Component, Focusable {
 	}
 
 	private getVisibleList(): ExtensionDescriptor[] {
-		const filtered = this.filteredExtensions();
-		return filtered.length > 0 ? filtered : EXTENSIONS;
+		// No fallback to the full catalog: when a search matched nothing, the old
+		// "filtered or everything" expression re-rendered every row next to
+		// "No matching extensions", and Space/Enter then toggled row 0 of a list
+		// the user could see was empty.
+		return this.filteredExtensions();
 	}
 
 	private clampIndex(index: number): number {
 		const visible = this.getVisibleList();
 		return Math.max(0, Math.min(visible.length - 1, index));
+	}
+
+	// Keep the selected row inside the rendered window (the snippets picker's
+	// PickerState.clampScroll, applied here). The list had no scroll offset at
+	// all: on a 22-row terminal Down moved the marker off the panel entirely and
+	// Space toggled an extension the user could not see.
+	private clampScroll(count: number, listRows: number): number {
+		if (count === 0 || listRows <= 0) {
+			this.scrollOffset = 0;
+			return 0;
+		}
+		if (this.selectedIndex < this.scrollOffset) {
+			this.scrollOffset = this.selectedIndex;
+		} else if (this.selectedIndex >= this.scrollOffset + listRows) {
+			this.scrollOffset = this.selectedIndex - listRows + 1;
+		}
+		this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, count - listRows));
+		return this.scrollOffset;
 	}
 
 	handleInput(data: string): void {
@@ -140,6 +162,13 @@ export class ExtensionPicker implements Component, Focusable {
 		} else if (this.keybindings.matches(data, "tui.select.confirm")) {
 			// Apply all pending changes, reporting per-extension failures
 			const errors: string[] = [];
+			// Count what really differs from the disk, before anything is written:
+			// toggling an enabled extension off and back on queues an entry but
+			// changes nothing, and the caller's message must not claim a change.
+			const changedCount = EXTENSIONS.filter((e) => {
+				const pending = this.pendingChanges.get(e.name);
+				return pending !== undefined && pending !== (getExtensionStatus(e.name) === "enabled");
+			}).length;
 			for (const [name, enabled] of this.pendingChanges) {
 				try {
 					if (enabled) {
@@ -157,7 +186,7 @@ export class ExtensionPicker implements Component, Focusable {
 				}
 			}
 			this.pendingChanges.clear();
-			this.complete({ kind: "apply", enabledCount: this.enabledCount(), errors });
+			this.complete({ kind: "apply", enabledCount: this.enabledCount(), changedCount, errors });
 			return;
 		} else if (matchesKey(data, Key.escape)) {
 			this.complete({ kind: "cancel" });
@@ -172,60 +201,74 @@ export class ExtensionPicker implements Component, Focusable {
 		const safeWidth = Math.max(1, Math.floor(width));
 		const availableRows = Math.max(1, Math.floor((this.tui.terminal.rows * PICKER_HEIGHT_PERCENT) / 100));
 		const framed = safeWidth >= 8 && availableRows >= 5;
-		const paddingY = framed && availableRows >= 9 ? 1 : 0;
+		// Vertical padding is paid for in list rows, so keep it only while the whole
+		// catalog still fits alongside the search line, status and footer.
+		const paddingY = framed && availableRows >= 15 ? 1 : 0;
 		const contentWidth = framed ? safeWidth - 4 : safeWidth;
 		const contentRows = availableRows - (framed ? 2 + 2 * paddingY : 0);
 		const lines: string[] = [];
 
-		const filtered = this.filteredExtensions();
-		const visible = filtered.length > 0 ? filtered : EXTENSIONS;
+		const visible = this.getVisibleList();
 
-		// Reserve rows: search + 2 separators + status + footer
-		const reservedRows = 5;
+		// Row budget. Search and status are mandatory; separators and the footer are
+		// dropped before the list loses rows. The previous fixed 5-row reservation
+		// under-counted its own separators, so the footer was silently truncated at
+		// 24 terminal rows and the list collapsed to a single row (or vanished
+		// entirely) on shorter terminals.
+		const showSeparators = contentRows >= 7;
+		const showFooter = contentRows >= 9;
+		const reservedRows =
+			2 + (showSeparators ? 2 : 0) + (showFooter ? 1 + (showSeparators ? 1 : 0) : 0);
 		const listRows = Math.max(0, contentRows - reservedRows);
+		const scroll = this.clampScroll(visible.length, listRows);
 
-		// Search input line
+		// Search input line. The query stays rendered when the search box is not
+		// focused, because filteredExtensions() keeps applying it to the list.
+		// Rendering the placeholder instead hid an active filter: users then
+		// toggled rows they believed belonged to the unfiltered list.
+		const hasQuery = this.searchQuery.length > 0;
 		const searchPrefix = this.searchFocused
 			? this.theme.fg("accent", "Search › ")
 			: "Search   ";
-		const searchInput = this.searchFocused ? this.searchQuery : SEARCH_PLACEHOLDER;
-		const searchColor = this.searchFocused ? "accent" : "muted";
+		const searchInput = hasQuery ? this.searchQuery : this.searchFocused ? "" : SEARCH_PLACEHOLDER;
+		const searchColor = this.searchFocused ? "accent" : hasQuery ? "text" : "muted";
 		lines.push(fit(this.theme.fg(searchColor, searchPrefix + searchInput), contentWidth));
 
-		// Separator
-		lines.push("");
+		if (showSeparators) lines.push("");
 
-		// Extension list
-		for (let i = 0; i < Math.min(visible.length, listRows); i++) {
-			const ext = visible[i];
-			const isSelected = i === this.selectedIndex;
-			const pendingEnabled = this.pendingChanges.get(ext.name);
-			const effective: ExtensionStatus =
-				pendingEnabled !== undefined
-					? pendingEnabled
-						? "enabled"
-						: "disabled"
-					: getExtensionStatus(ext.name);
-			const marker =
-				effective === "enabled"
-					? this.theme.fg("success", "●")
-					: effective === "broken"
-						? this.theme.fg("warning", "✕")
-						: this.theme.fg("dim", "○");
-			const prefix = isSelected ? this.theme.fg("accent", "› ") : "  ";
-			const nameStyle = isSelected ? "accent" : effective === "enabled" ? "text" : effective === "broken" ? "warning" : "muted";
-			const name = this.theme.fg(nameStyle, ext.label);
-			const desc = this.theme.fg("muted", ext.description);
-			lines.push(fit(`${prefix}${marker} ${name} — ${desc}`, contentWidth));
-		}
-
-		// Empty state
-		if (filtered.length === 0 && this.searchQuery.length > 0) {
-			lines.push(fit(this.theme.fg("warning", "No matching extensions"), contentWidth));
+		// Extension list (or the empty state, which replaces the rows rather than
+		// being appended below them and pushing the footer out of the panel)
+		if (visible.length === 0) {
+			if (listRows > 0 && this.searchQuery.length > 0) {
+				lines.push(fit(this.theme.fg("warning", "No matching extensions"), contentWidth));
+			}
+		} else {
+			for (let i = 0; i < Math.min(visible.length, listRows); i++) {
+				const ext = visible[scroll + i];
+				const isSelected = scroll + i === this.selectedIndex;
+				const pendingEnabled = this.pendingChanges.get(ext.name);
+				const effective: ExtensionStatus =
+					pendingEnabled !== undefined
+						? pendingEnabled
+							? "enabled"
+							: "disabled"
+						: getExtensionStatus(ext.name);
+				const marker =
+					effective === "enabled"
+						? this.theme.fg("success", "●")
+						: effective === "broken"
+							? this.theme.fg("warning", "✕")
+							: this.theme.fg("dim", "○");
+				const prefix = isSelected ? this.theme.fg("accent", "› ") : "  ";
+				const nameStyle = isSelected ? "accent" : effective === "enabled" ? "text" : effective === "broken" ? "warning" : "muted";
+				const name = this.theme.fg(nameStyle, ext.label);
+				const desc = this.theme.fg("muted", ext.description);
+				lines.push(fit(`${prefix}${marker} ${name} — ${desc}`, contentWidth));
+			}
 		}
 
 		// Separator before status
-		lines.push("");
+		if (showSeparators) lines.push("");
 
 		// Status line (reflects pending changes so the count matches the list)
 		const effectiveStatuses = EXTENSIONS.map((e) => {
@@ -235,20 +278,24 @@ export class ExtensionPicker implements Component, Focusable {
 		const enabledCount = effectiveStatuses.filter((s) => s === "enabled").length;
 		const brokenTotal = effectiveStatuses.filter((s) => s === "broken").length;
 		const pendingNote = this.pendingChanges.size > 0 ? ` • ${this.pendingChanges.size} pending` : "";
-		const statusText = `${enabledCount}/${EXTENSIONS.length} enabled${brokenTotal > 0 ? ` • ${brokenTotal} broken` : ""}${pendingNote}`;
+		// Say so when the panel cannot draw every row — the selection is kept on
+		// screen by scrolling, but the count would otherwise look wrong.
+		const shown = Math.min(visible.length, listRows);
+		const shownNote = visible.length > shown ? ` • ${shown}/${visible.length} shown` : "";
+		const statusText = `${enabledCount}/${EXTENSIONS.length} enabled${brokenTotal > 0 ? ` • ${brokenTotal} broken` : ""}${pendingNote}${shownNote}`;
 		const statusStyle = brokenTotal > 0 ? "warning" : "dim";
 		lines.push(fit(this.theme.fg(statusStyle, statusText), contentWidth));
 
-		// Separator after status
-		lines.push("");
-
 		// Footer
-		lines.push(
-			fit(
-				this.theme.fg("dim", "↑↓ navigate • Space toggle • / search • Enter apply • Esc cancel"),
-				contentWidth,
-			),
-		);
+		if (showFooter) {
+			if (showSeparators) lines.push("");
+			lines.push(
+				fit(
+					this.theme.fg("dim", "↑↓ navigate • Space toggle • / search • Enter apply • Esc cancel"),
+					contentWidth,
+				),
+			);
+		}
 
 		const content = fillRows(lines, contentRows);
 		return framed
@@ -259,7 +306,7 @@ export class ExtensionPicker implements Component, Focusable {
 	invalidate(): void {}
 
 	private filteredExtensions(): ExtensionDescriptor[] {
-		if (this.searchQuery.length === 0) return [];
+		if (this.searchQuery.length === 0) return EXTENSIONS;
 		const query = this.searchQuery.toLowerCase();
 		return EXTENSIONS.filter(
 			(ext) =>

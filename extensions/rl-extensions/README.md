@@ -18,13 +18,17 @@ The picker uses a centered framed panel with a search bar, extension list, and s
 - `Space`: toggle the selected extension (visual only)
 - `/`: focus search; search matches name and description
 - `Enter`: apply all pending changes and close
-- `Escape`: cancel without saving (discards all pending changes)
+- `Escape`: from the search box, leave it — the filter stays active and the query
+  stays rendered; from the list, cancel without saving (discards all pending changes)
 
 ### Visual Feedback
 
 - `●` = enabled, `○` = disabled, `✕` = broken symlink (target missing — Pi cannot load it)
-- `›` highlights the currently selected item
-- Status footer shows `X/Y enabled` count, plus `• N broken` when any symlink is broken
+- `›` highlights the currently selected item; `↑`/`↓` scroll it into view when the
+  panel is shorter than the list
+- Status footer shows `X/Y enabled` count, plus `• N broken` when any symlink is
+  broken, plus `• N pending` and `• N/M shown` when there are deferred changes
+  or the panel had to hide rows
 - Toggled state shows immediately; symlinks only update on Enter
 
 ### Broken Links

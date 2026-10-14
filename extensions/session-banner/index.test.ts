@@ -14,12 +14,15 @@
  *    implementation now reads the PROVIDER/MODEL/CMUX env vars lazily
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, mock, test } from "node:test";
 import sessionBanner from "./index.ts";
 import {
 	setCompleteForTesting,
 	setExecFileForTesting,
 	setFsForTesting,
+	type ExecFileFn,
+	type FsSeam,
 } from "./implementation.ts";
 import { paneRegistry } from "./panes.ts";
 
@@ -29,7 +32,7 @@ interface StubState {
 	completeCalls: unknown[][];
 	completeOnce: unknown[]; // resolved values | Errors | promises
 	execFileCalls: unknown[][];
-	execFileImpl: ((...args: unknown[]) => unknown) | null;
+	execFileImpl: ExecFileFn | null;
 	readFileSyncCalls: unknown[][];
 	readFileSyncValue: unknown; // string | Error
 	mkdirCalls: unknown[][];
@@ -56,9 +59,9 @@ function resetStubs(): void {
 	stubs.completeOnce.length = 0;
 	stubs.execFileCalls.length = 0;
 	// Default: every CLI call succeeds with empty output (like the vitest suite).
-	stubs.execFileImpl = (command, args, callback?: (error: Error | null, stdout: string, stderr: string) => void) => {
-		callback?.(null, "", "");
-		return {} as never;
+	stubs.execFileImpl = (command, args, callback) => {
+		callback(null, "", "");
+		return {};
 	};
 	stubs.readFileSyncCalls.length = 0;
 	stubs.readFileSyncValue = new Error("no state file");
@@ -75,16 +78,16 @@ setCompleteForTesting(async (...args: unknown[]) => {
 	return (once ?? { content: [] }) as never;
 });
 
-setExecFileForTesting((...args: unknown[]) => {
-	stubs.execFileCalls.push(args);
-	return stubs.execFileImpl!(...args);
+setExecFileForTesting((command, args, callback) => {
+	stubs.execFileCalls.push([command, args, callback]);
+	return stubs.execFileImpl!(command, args, callback);
 });
 
 setFsForTesting({
 	readFileSync: (...args: unknown[]) => {
 		stubs.readFileSyncCalls.push(args);
 		if (stubs.readFileSyncValue instanceof Error) throw stubs.readFileSyncValue;
-		return stubs.readFileSyncValue;
+		return stubs.readFileSyncValue as string;
 	},
 	promises: {
 		mkdir: (...args: unknown[]) => {
@@ -96,7 +99,7 @@ setFsForTesting({
 			return stubs.writeFileImpl!(...args);
 		},
 	},
-} as unknown as Parameters<typeof setFsForTesting>[0]);
+} satisfies FsSeam);
 
 // ─── Matcher subset (vitest expect → node:assert) ─────────────────────────
 
@@ -144,7 +147,7 @@ function matches(expected: unknown, actual: unknown): boolean {
 
 const jsonReplacer = (_k: string, v: unknown) => (typeof v === "function" ? "[fn]" : v);
 
-function describeCalls(calls: unknown[][]): string {
+function describeCalls(calls: readonly unknown[]): string {
 	return `calls=${JSON.stringify(calls.slice(-3), jsonReplacer)}`;
 }
 
@@ -164,7 +167,7 @@ function expectLastCalledWith(calls: unknown[][], name: string, ...args: unknown
 	assert.ok(found, `${name}: expected last call ${JSON.stringify(args, jsonReplacer)} but last was ${JSON.stringify(last, jsonReplacer)}`);
 }
 
-function expectCallCount(calls: unknown[][], name: string, n: number): void {
+function expectCallCount(calls: readonly unknown[], name: string, n: number): void {
 	assert.equal(calls.length, n, `${name}: expected ${n} call(s), got ${calls.length} — ${describeCalls(calls)}`);
 }
 
@@ -175,13 +178,18 @@ function expectCallCount(calls: unknown[][], name: string, n: number): void {
 type SpyFn = ((...args: unknown[]) => unknown) & {
 	calls: unknown[][];
 	queue: unknown[];
-	impl: ((...args: unknown[]) => unknown) | null;
+	impl: LooseFn | null;
 };
 
-function spy(initial?: (...args: unknown[]) => unknown): SpyFn {
+// Fakes declare only the parameters they actually read, so the spy accepts any
+// function shape and calls back through `unknown` (never[] params make the
+// assignment contravariance-safe under strictFunctionTypes).
+type LooseFn = (...args: never[]) => unknown;
+
+function spy(initial?: LooseFn): SpyFn {
 	const calls: unknown[][] = [];
 	const queue: unknown[] = [];
-	let impl: ((...args: unknown[]) => unknown) | null = initial ?? null;
+	let impl: LooseFn | null = initial ?? null;
 	const fn = ((...args: unknown[]) => {
 		calls.push(args);
 		if (queue.length > 0) {
@@ -190,7 +198,7 @@ function spy(initial?: (...args: unknown[]) => unknown): SpyFn {
 			if (next instanceof Error) throw next;
 			return next;
 		}
-		return impl ? impl(...args) : undefined;
+		return impl ? (impl as (...a: unknown[]) => unknown)(...args) : undefined;
 	}) as SpyFn;
 	fn.calls = calls;
 	fn.queue = queue;
@@ -401,6 +409,22 @@ afterEach(() => {
 });
 
 // ─── Tests ───────────────────────────────────────────────────────────────
+
+// Pi's loader injects virtual modules, so an extension's pi-ai specifier is not
+// resolved by package.json alone: the ROOT is served as pi-ai's compat
+// entrypoint, the only place complete() lives. generateName() swallows every
+// error, so if the specifier ever stops exporting complete() the naming feature
+// dies silently in production. This pins the exact specifier the source uses
+// against the real package (a missing named ESM export is also a hard load
+// error in bare-node tests, which is how the root specifier was caught).
+test("session-banner: imports complete() from a pi-ai specifier that exports it", async () => {
+	const source = readFileSync(new URL("./implementation.ts", import.meta.url), "utf-8");
+	const match = source.match(/import \{ complete \} from "(@earendil-works\/pi-ai[^"]*)";/);
+	assert.ok(match, "implementation.ts should import complete from a pi-ai specifier");
+	const specifier = match[1] as string;
+	const piAi = (await import(specifier)) as { complete?: unknown };
+	assert.equal(typeof piAi.complete, "function", `${specifier} does not export complete()`);
+});
 
 test("session-banner: registers /title and the lifecycle hooks", () => {
 	const pi = createMockPi();

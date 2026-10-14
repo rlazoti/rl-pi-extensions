@@ -393,7 +393,7 @@ test("buildAutoNameContext: skips entries without a message and entries with emp
 		{ type: "message" }, // missing message field after type-narrowing
 		userMsg("hello"),
 	];
-	assert.equal(buildAutoNameContext(branch as unknown[]), "User: hello");
+	assert.equal(buildAutoNameContext(branch), "User: hello");
 });
 
 test("buildAutoNameContext: includes all user messages when there are 5 or fewer", () => {
@@ -419,7 +419,7 @@ test("buildAutoNameContext: silently ignores messages with unknown roles", () =>
 		{ type: "message" as const, message: { role: "system" as const, content: "system content" } },
 		{ type: "message" as const, message: { role: "tool" as const, content: "tool output" } },
 	];
-	assert.equal(buildAutoNameContext(branch as unknown[]), "User: hi");
+	assert.equal(buildAutoNameContext(branch), "User: hi");
 });
 
 test("buildAutoNameContext: appends the most recent assistant reply, clipped to 1500 chars", () => {

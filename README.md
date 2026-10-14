@@ -50,19 +50,37 @@ ln -s /path/to/rl-pi-extensions/extensions/tmux-feedback ~/.pi/agent/extensions/
 rm ~/.pi/agent/extensions/tmux-feedback
 ```
 
+## Development
+
+```bash
+npm install        # dev dependency only (typescript); Pi itself is not installed
+npm test           # every *.test.ts / *.test.mjs under tests/ and extensions/
+npm run typecheck  # tsc --noEmit over extensions/ and tests/ (strict)
+```
+
+Pi loads extensions with jiti, which strips types without checking them, so a
+type error never reaches `npm test` — run both before committing. Test files
+import extension sources through `test-support/` resolve hooks, which load the
+real `.ts` files in bare `node --test`.
+
 ## Architecture
 
 ```
 rl-pi-extensions/
 ├── package.json                    # Only lists rl-extensions (manager)
+├── tsconfig.json                   # `npm run typecheck` gate (no emit)
+├── test-support/                   # Resolve hooks: bare node loads .ts sources
 ├── extensions/
 │   ├── symlink-manager.ts          # Symlink management logic
+│   ├── panel.ts                    # Shared picker panel layout
 │   ├── tmux-feedback/
 │   │   ├── index.ts                # Extension entry point
 │   │   └── implementation.ts       # Real extension code
 │   ├── session-banner/
 │   │   ├── index.ts                # Extension entry point
-│   │   └── implementation.ts       # Real extension code
+│   │   ├── implementation.ts       # Real extension code
+│   │   ├── helpers.ts              # Emoji/title/world-context helpers
+│   │   └── panes.ts                # Rich-editor pane registry (copied per extension)
 │   ├── session-attention/
 │   │   ├── index.ts                # Extension entry point
 │   │   └── implementation.ts       # Real extension code
@@ -72,11 +90,13 @@ rl-pi-extensions/
 │   ├── emacs-feedback/
 │   │   ├── index.ts                # Extension entry point
 │   │   ├── implementation.ts       # Real extension code (Pi side)
-│   │   ├── emacs/
-│   │   │   ├── pi-feedback.el      # Emacs client (source-region feedback)
-│   │   │   └── pi-feedback-test.el # Emacs ERT tests
+│   │   └── emacs/
+│   │       ├── pi-feedback.el      # Emacs client (source-region feedback)
+│   │       └── pi-feedback-test.el # Emacs ERT tests
 │   └── rl-extensions/
-│       └── index.ts                # TUI extension manager
+│       ├── index.ts                # TUI extension manager
+│       └── picker.ts               # Picker overlay
+└── tests/                          # Manager, picker, panel, symlink-manager, loading
 ```
 
 **Only `rl-extensions` is listed in `package.json`.** The manager creates symlinks in `~/.pi/agent/extensions/` which Pi discovers automatically. Disabled extensions are never loaded by Pi.

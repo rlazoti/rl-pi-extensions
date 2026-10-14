@@ -9,7 +9,7 @@ Sends a desktop notification when:
 - Pi calls the `ask` tool (shows the question)
 - A `session-attention:waiting` event is emitted
 
-Clicking the notification returns you to the Pi session (macOS only, requires iTerm2).
+Clicking the notification returns you to the Pi session (macOS only).
 
 ## Commands
 
@@ -30,8 +30,12 @@ Show whether session-attention is active or why it's inactive.
 ## Requirements
 
 - **macOS** — uses `terminal-notifier` or `osascript` for desktop notifications
-- **iTerm2** — clicking the notification returns to the Pi session (requires iTerm2 bundle ID)
-- **tmux** — Pi must be running inside a tmux session for activation to work
+- **Terminal focus** — clicking the notification focuses the terminal that launched
+  Pi, read from `__CFBundleIdentifier` (Ghostty, Terminal, iTerm2, …). iTerm2 is
+  assumed only when that variable is absent, so a non-iTerm user is never shown
+  an unrelated app
+- **tmux** — when Pi runs inside tmux, the notification also selects the window
+  and pane holding Pi; outside tmux it just focuses the terminal
 
 ## Enable/Disable
 

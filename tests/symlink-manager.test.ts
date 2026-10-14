@@ -4,12 +4,13 @@ import {
 	existsSync,
 	lstatSync,
 	mkdirSync,
+	readdirSync,
 	readlinkSync,
 	rmSync,
 	symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 import {
 	enableExtension,
@@ -20,16 +21,78 @@ import {
 	getExtensionsDir,
 	getMonorepoRoot,
 	isExtensionEnabled,
+	resolveHomeDir,
 	setExtensionsDirForTesting,
 	toggleExtension,
 } from "../extensions/symlink-manager.ts";
 
 // Run the real module against a temp extensions dir so the user's
 // ~/.pi/agent/extensions/ is never touched.
+test("catalog lists every loadable extension directory in the monorepo", () => {
+	const root = getMonorepoRoot();
+	const onDisk = readdirSync(join(root, "extensions"))
+		.filter((entry) => entry !== "rl-extensions") // the manager is loaded by package.json, never toggled
+		.filter((entry) => {
+			const dir = join(root, "extensions", entry);
+			return lstatSync(dir).isDirectory() && existsSync(join(dir, "index.ts"));
+		})
+		.sort();
+	const catalog = getAvailableExtensions(root)
+		.map((extension) => extension.name)
+		.sort();
+
+	// The picker only ever offers catalog entries, so an unlisted directory is
+	// silently un-manageable rather than an error.
+	assert.deepEqual(catalog, onDisk, "every extensions/<dir> with an index.ts must be in the catalog");
+
+	for (const extension of getAvailableExtensions(root)) {
+		assert.ok(existsSync(extension.path), `catalog entry ${extension.name} points at a missing directory: ${extension.path}`);
+		assert.ok(extension.description.length > 0, `catalog entry ${extension.name} has no description`);
+	}
+});
+
+test("resolveHomeDir never yields a relative base for the extensions directory", () => {
+	assert.equal(resolveHomeDir("/home/u", "/other"), "/home/u", "an absolute $HOME wins");
+	assert.equal(resolveHomeDir(undefined, "/home/u"), "/home/u", "unset $HOME falls back to os.homedir()");
+	assert.equal(resolveHomeDir("", "/home/u"), "/home/u", "empty $HOME falls back to os.homedir()");
+	assert.equal(resolveHomeDir(".pi", "/home/u"), "/home/u", "relative $HOME is not usable");
+	assert.throws(
+		() => resolveHomeDir("", ""),
+		/Cannot resolve an absolute home directory/,
+		"a relative extensions directory must be refused, not created under the cwd",
+	);
+});
+
+test("getExtensionsDir stays absolute when HOME is empty or unset", () => {
+	const savedHome = process.env.HOME;
+	setExtensionsDirForTesting(undefined);
+	try {
+		process.env.HOME = "";
+		const withEmptyHome = getExtensionsDir();
+		delete process.env.HOME;
+		const withNoHome = getExtensionsDir();
+
+		for (const [label, dir] of [
+			["empty", withEmptyHome],
+			["unset", withNoHome],
+		] as const) {
+			assert.ok(isAbsolute(dir), `HOME ${label} must not produce a relative extensions dir: ${dir}`);
+			assert.ok(
+				!dir.startsWith(process.cwd() + "/"),
+				`HOME ${label} must not resolve inside the project cwd: ${dir}`,
+			);
+			assert.ok(dir.endsWith(join(".pi", "agent", "extensions")), `unexpected extensions dir: ${dir}`);
+		}
+	} finally {
+		if (savedHome === undefined) delete process.env.HOME;
+		else process.env.HOME = savedHome;
+		setExtensionsDirForTesting(undefined);
+	}
+});
+
 function withExtensionsDir(fn: (ctx: { extensionsDir: string; srcDir: string }) => void): void {
-	const root = mkdirSync(join(tmpdir(), `rl-pi-symlink-test-${Date.now()}-${Math.random().toString(36).slice(2)}`), {
-		recursive: true,
-	});
+	const root = join(tmpdir(), `rl-pi-symlink-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+	mkdirSync(root, { recursive: true });
 	const extensionsDir = join(root, "agent", "extensions");
 	const srcDir = join(root, "src");
 	mkdirSync(extensionsDir, { recursive: true });

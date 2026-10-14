@@ -126,7 +126,7 @@ test("parsePlaceholderTemplate: throws on invalid placeholder names", () => {
 test("parsePlaceholderTemplate: render rejects non-string values", () => {
 	const template = parsePlaceholderTemplate("{{name}}");
 	assert.throws(
-		() => template.render(new Map([["name", 123]])),
+		() => template.render(new Map<string, unknown>([["name", 123]]) as ReadonlyMap<string, string>),
 		(error) => error instanceof PlaceholderError && error.code === "invalid-value",
 	);
 });
