@@ -115,18 +115,21 @@ function makeExt(srcDir: string, name: string): string {
 
 // --- Registry & path derivation ---
 
-test("getAvailableExtensions returns the 5 managed extensions under the given root", () => {
+test("getAvailableExtensions returns the 6 managed extensions under the given root", () => {
 	const exts = getAvailableExtensions("/fake/path");
-	assert.equal(exts.length, 5);
+	assert.equal(exts.length, 6);
 	assert.deepEqual(
 		exts.map((e) => e.name),
-		["tmux-feedback", "session-banner", "session-attention", "snippets", "emacs-feedback"],
+		["tmux-feedback", "session-banner", "session-attention", "snippets", "emacs-feedback", "memory"],
 	);
 	assert.equal(exts[0].description, "Inline feedback for tmux scrollback selection");
 	assert.equal(exts[1].description, "Colored banner + auto-naming for Pi sessions");
 	assert.equal(exts[2].description, "Desktop notifications when Pi needs your attention");
 	assert.equal(exts[3].description, "Insert predefined text snippets into the prompt");
 	assert.equal(exts[4].description, "Source-region and Magit diff-line feedback from Emacs");
+	// Phase 1 of the memory extension: listed so it stays manageable, but it
+	// registers nothing yet, so enabling it is a no-op rather than a hazard.
+	assert.match(exts[5].description, /in development/);
 	for (const ext of exts) {
 		assert.equal(resolve(ext.path), resolve("/fake/path", "extensions", ext.name));
 	}

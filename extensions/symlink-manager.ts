@@ -128,6 +128,12 @@ export function getAvailableExtensions(monorepoRoot: string): ExtensionDescripto
 			description: "Source-region and Magit diff-line feedback from Emacs",
 			path: join(monorepoRoot, "extensions", "emacs-feedback"),
 		},
+		{
+			name: "memory",
+			label: "memory",
+			description: "Entry-keyed memory bank with a conflict gate (in development: registers nothing)",
+			path: join(monorepoRoot, "extensions", "memory"),
+		},
 	];
 }
 

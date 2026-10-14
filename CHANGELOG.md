@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **memory (new component, Phase 1 of 6 — inert)**: the entry schema and topic-file parser for the memory extension that will replace the standalone `memory` bank. Knowledge is keyed by *assertion* (`## ui.background` with `kind`/`scope`/`asOf`/`source`/`status`), so identity is computable and a conflict becomes "two active claims on one key+scope" instead of a similarity tie nobody can break: three files disagreeing about a UI background color score `14.40 / 14.40 / 14.30` under the old index and all three get injected. `parseTopicFile` never throws — malformed scopes, statuses and dates are errors that make an entry non-injectable rather than silently defaulting (a bad `scope` never becomes `global`), and `compareAuthority` fixes a deterministic order (specificity → `asOf` desc → key/heading) that contains no similarity term at all. 31 tests plus a pin that the unfinished factory registers nothing, so it cannot compete with the live memory extension. Listed in the picker catalog to keep the catalog guard honest; not symlinked, so nothing is enabled
+
 ### Changed
 
 - **tests**: the `test-support` resolve hook maps `@earendil-works/*` to the live Pi install *before* normal resolution. `npm install` also drops a pinned copy in this repo's `node_modules` (that is what `npm run typecheck` resolves types from), and it used to win — so the suite was quietly testing the pinned copy instead of the code Pi runs. A stale copy now loses to the Pi install and is reported on stderr
