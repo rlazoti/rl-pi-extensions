@@ -16,11 +16,19 @@ export default function managerExtension(pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			const result = await openExtensionPicker(ctx.ui);
 			if (result.kind === "cancel") return;
-			const enabledCount = result.enabledCount;
-			if (enabledCount > 0) {
-				ctx.ui.notify(`${enabledCount} extension(s) enabled. Changes apply after /reload`, "info");
+			const { enabledCount, changedCount, errors } = result;
+			// enabledCount alone is not what the user just did: disabling one of five
+			// printed "4 extension(s) enabled", and pressing Enter without touching
+			// anything printed "5 extension(s) enabled".
+			if (changedCount === 0) {
+				ctx.ui.notify(`No changes — ${enabledCount} enabled`, "info");
+			} else if (enabledCount === 0) {
+				ctx.ui.notify("All extensions disabled. Changes apply after /reload", "info");
 			} else {
-				ctx.ui.notify("All extensions disabled", "info");
+				ctx.ui.notify(
+					`${changedCount} change(s) applied — ${enabledCount} enabled. Changes apply after /reload`,
+					"info",
+				);
 			}
 			// Surface per-extension failures (e.g. a non-symlink entry occupying
 			// the link path) instead of silently skipping them.

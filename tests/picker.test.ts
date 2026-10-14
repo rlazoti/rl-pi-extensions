@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { ExtensionPicker } from "../extensions/rl-extensions/picker.ts";
+import { ExtensionPicker, type ExtensionPickerResult } from "../extensions/rl-extensions/picker.ts";
 import { setExtensionsDirForTesting } from "../extensions/symlink-manager.ts";
 
 // Behavioral harness: a real ExtensionPicker rendered against a fake TUI/theme/
@@ -14,6 +14,7 @@ import { setExtensionsDirForTesting } from "../extensions/symlink-manager.ts";
 interface PickerHarness {
 	picker: ExtensionPicker;
 	readonly rows: string[];
+	readonly result?: ExtensionPickerResult;
 	close(): void;
 }
 
@@ -32,11 +33,17 @@ function createPickerHarness(terminalRows = 40, terminalCols = 80): PickerHarnes
 			(id === "tui.select.down" && data === "down") ||
 			(id === "tui.select.confirm" && data === "enter"),
 	} as never;
-	const picker = new ExtensionPicker(tui, theme, keybindings, () => {});
+	let result: ExtensionPickerResult | undefined;
+	const picker = new ExtensionPicker(tui, theme, keybindings, (value) => {
+		result = value;
+	});
 	return {
 		picker,
 		get rows() {
 			return picker.render(terminalCols).map((line) => line.replace(/\u001b\[[0-9;]*m/g, "").trimEnd());
+		},
+		get result() {
+			return result;
 		},
 		close() {
 			setExtensionsDirForTesting(undefined);
@@ -307,8 +314,8 @@ test("picker: reports per-extension apply errors to the caller", () => {
 		"apply result should carry per-extension errors",
 	);
 	assert.ok(
-		pickerSource.includes('kind: "apply", enabledCount: this.enabledCount(), errors'),
-		"apply should return collected errors",
+		pickerSource.includes('kind: "apply", enabledCount: this.enabledCount(), changedCount, errors'),
+		"apply should return collected errors plus the count of real changes",
 	);
 	assert.ok(
 		!pickerSource.includes("getEnabledExtensions"),
@@ -634,6 +641,45 @@ test("picker: the status line says when rows are hidden by a short panel", () =>
 		assert.ok(
 			status?.includes("4/5 shown"),
 			`a truncated list must announce how much it hid, got: ${JSON.stringify(status)}`,
+		);
+	} finally {
+		harness.close();
+	}
+});
+
+test("picker: Enter reports only the toggles that really change the disk", () => {
+	const harness = createPickerHarness();
+	try {
+		harness.picker.handleInput(" "); // tmux-feedback → queued enable
+		harness.picker.handleInput(" "); // ...and back to disabled: no net change
+		harness.picker.handleInput("enter");
+		assert.equal(harness.result?.kind, "apply");
+		assert.equal(
+			harness.result?.kind === "apply" ? harness.result.changedCount : undefined,
+			0,
+			"a toggle and its undo must not be reported as a change",
+		);
+	} finally {
+		harness.close();
+	}
+});
+
+test("picker: Enter reports each queued enable as a change", () => {
+	const harness = createPickerHarness();
+	try {
+		harness.picker.handleInput(" ");
+		harness.picker.handleInput("down");
+		harness.picker.handleInput(" ");
+		harness.picker.handleInput("enter");
+		assert.equal(
+			harness.result?.kind === "apply" ? harness.result.changedCount : undefined,
+			2,
+			"two queued enables are two changes",
+		);
+		assert.equal(
+			harness.result?.kind === "apply" ? harness.result.enabledCount : undefined,
+			2,
+			"enabledCount still reports the resulting state",
 		);
 	} finally {
 		harness.close();

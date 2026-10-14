@@ -20,7 +20,7 @@ export interface ExtensionPickerOptions {
 
 export type ExtensionPickerResult =
 	| Readonly<{ kind: "cancel" }>
-	| Readonly<{ kind: "apply"; enabledCount: number; errors: readonly string[] }>;
+	| Readonly<{ kind: "apply"; enabledCount: number; changedCount: number; errors: readonly string[] }>;
 
 const PICKER_HEIGHT_PERCENT = 60;
 
@@ -162,6 +162,13 @@ export class ExtensionPicker implements Component, Focusable {
 		} else if (this.keybindings.matches(data, "tui.select.confirm")) {
 			// Apply all pending changes, reporting per-extension failures
 			const errors: string[] = [];
+			// Count what really differs from the disk, before anything is written:
+			// toggling an enabled extension off and back on queues an entry but
+			// changes nothing, and the caller's message must not claim a change.
+			const changedCount = EXTENSIONS.filter((e) => {
+				const pending = this.pendingChanges.get(e.name);
+				return pending !== undefined && pending !== (getExtensionStatus(e.name) === "enabled");
+			}).length;
 			for (const [name, enabled] of this.pendingChanges) {
 				try {
 					if (enabled) {
@@ -179,7 +186,7 @@ export class ExtensionPicker implements Component, Focusable {
 				}
 			}
 			this.pendingChanges.clear();
-			this.complete({ kind: "apply", enabledCount: this.enabledCount(), errors });
+			this.complete({ kind: "apply", enabledCount: this.enabledCount(), changedCount, errors });
 			return;
 		} else if (matchesKey(data, Key.escape)) {
 			this.complete({ kind: "cancel" });
