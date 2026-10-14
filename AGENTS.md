@@ -19,6 +19,7 @@
 | Command | Description |
 |---|---|
 | `npm test` | Run all tests |
+| `npm run typecheck` | `tsc --noEmit` over `extensions/` and `tests/` (strict) |
 | `pi install ~/Projects/Terminal/rl-pi-extensions` | Install locally for testing |
 | `pi install git:github.com/rlazoti/rl-pi-extensions` | Install from git |
 
@@ -104,10 +105,10 @@ rm ~/.pi/agent/extensions/tmux-feedback
 
 ## 5. Testing Expectations
 
-- **Run `npm test`** before every commit. All tests must pass.
+- **Run `npm test` and `npm run typecheck`** before every commit. All tests must pass and the type-check must be clean. Pi loads extensions through jiti, which strips types without checking them, so a type error never reaches `npm test` — the tsc gate exists to catch exactly that (it found a pi-ai import that resolves in Pi's virtual-module loader but not in plain ESM, and a `Theme` type pi-tui does not export).
 - **Discovery:** `npm test` runs `node --test .` with recursive discovery — every `*.test.ts` / `*.test.mjs` under `tests/` and `extensions/` runs automatically. Never hardcode file lists.
 - **Pi packages in tests:** `test-support/register.mjs` (loaded via `--import`) registers a resolve hook that aliases `@earendil-works/*` and `@mariozechner/*` to the real packages in the local Pi install (`~/.pi/agent/install/releases/<version>`, override with `PI_CODING_AGENT_DIR`) and remaps jiti-style `.js` relative imports to `.ts` inside this repo. Test files import sibling sources with `.ts` extensions.
-- **Coverage map:** emacs-feedback (53, behavioral), session-attention (process roles, ask-body formatting, truncation), snippets (display-safe, placeholders, frontmatter helpers), tmux-feedback (state reconstruction, message formatting, command handlers via fake Pi), session-banner (helpers: names/titles/auto-naming/URL reduction; panes: RenderScheduler + paneRegistry via `mock.timers`; index: full extension behavior — lifecycle, host handoff, title re-asserts, auto-naming, Herdr/cmux rename, /title — via `mock.timers` + the null-gated test seams in `implementation.ts`), symlink-manager + picker + extension-loading (string/behavioral). All formerly-dead vitest suites are ported; `npm test` is the only gate.
+- **Coverage map:** emacs-feedback (53, behavioral), session-attention (process roles, ask-body formatting, truncation, notification activation: bundle id from `__CFBundleIdentifier`, iTerm fallback, shell-escaping), snippets (display-safe, placeholders, frontmatter helpers), tmux-feedback (state reconstruction, message formatting, command handlers via fake Pi), session-banner (helpers: names/titles/auto-naming/URL reduction; panes: RenderScheduler + paneRegistry via `mock.timers`; index: full extension behavior — lifecycle, host handoff, title re-asserts, auto-naming, Herdr/cmux rename, /title — via `mock.timers` + the null-gated test seams in `implementation.ts`, plus a pin that its pi-ai `complete()` import names a specifier that really exports it), rl-extensions picker (16 behavioral tests driving the real `PickerComponent` through a keyboard/theme harness in a temp extensions dir), symlink-manager (real filesystem, temp dirs — broken/stale symlinks, occupied paths, `getExtensionsDir()` absoluteness), panel + extension-loading. All formerly-dead vitest suites are ported; `npm test` is the only behavior gate, `npm run typecheck` the type gate.
 - **Strip-compatible TS:** bare-node tests load extension sources via type stripping, which rejects parameter properties and other transform-only syntax — keep extension code strip-compatible (plain `constructor(x) { this.x = x }`).
 - **No ESM module mocking (Node 26):** inject dependencies through null-gated seams exported by the module under test (see session-banner's `setCompleteForTesting` / `setExecFileForTesting` / `setFsForTesting`). For async scheduling use `mock.timers` (`apis: ["setTimeout", "setInterval", "setImmediate", "Date"]` whenever the code compares `Date.now()`). Two differences from vitest fake timers, verified on Node 26: a timer due exactly at a tick's end fires only if it was pending *before* the tick, and a timer scheduled inside a tick callback is due at `tickTarget + delay` — size tick windows to strictly exceed the due time rather than landing on it.
 - **Test isolation:** Each test creates its own temp directory. Clean up in the same test.
@@ -130,7 +131,8 @@ rm ~/.pi/agent/extensions/tmux-feedback
 Before reporting work complete, verify:
 
 1. **`npm test` passes** — all tests green
-2. **Manual testing** — install in Pi (`pi install ...`), reload (`/reload`), and verify the extension works
-3. **README updated** — each extension has its own `README.md` in its directory
-4. **No breaking changes** — existing extensions still load and function
-5. **Concise commit message** — follows conventional commit format (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`)
+2. **`npm run typecheck` is clean** — zero errors (needs `npm install`; the Pi packages arrive as auto-installed peer dependencies)
+3. **Manual testing** — install in Pi (`pi install ...`), reload (`/reload`), and verify the extension works
+4. **README updated** — each extension has its own `README.md` in its directory
+5. **No breaking changes** — existing extensions still load and function
+6. **Concise commit message** — follows conventional commit format (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`)

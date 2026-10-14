@@ -25,9 +25,10 @@
  * extension that participates in the registry — currently rich-editor,
  * pi-avatars, and session-banner — because each is loaded as a standalone
  * module with no shared import path (only the globalThis object is shared).
- * All copies MUST stay identical; `extensions/pane-registry-sync.test.ts`
- * enforces this. Any shape change (e.g. a new method like `hasHost()`) must
- * bump REGISTRY_VERSION so a stale object surviving `/reload` is rebuilt.
+ * The copies are kept in sync by hand: the other extensions live in their own
+ * repos, so nothing in this repo can diff them. Any shape change (e.g. a new
+ * method like `hasHost()`) must bump REGISTRY_VERSION so a stale object
+ * surviving `/reload` is rebuilt, and must be copied to every sibling.
  */
 
 /** Floor on the coalescing interval; guards against a pane asking for 0ms. */
