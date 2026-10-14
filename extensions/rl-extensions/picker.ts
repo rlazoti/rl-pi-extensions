@@ -81,8 +81,11 @@ export class ExtensionPicker implements Component, Focusable {
 	}
 
 	private getVisibleList(): ExtensionDescriptor[] {
-		const filtered = this.filteredExtensions();
-		return filtered.length > 0 ? filtered : EXTENSIONS;
+		// No fallback to the full catalog: when a search matched nothing, the old
+		// "filtered or everything" expression re-rendered every row next to
+		// "No matching extensions", and Space/Enter then toggled row 0 of a list
+		// the user could see was empty.
+		return this.filteredExtensions();
 	}
 
 	private clampIndex(index: number): number {
@@ -177,8 +180,7 @@ export class ExtensionPicker implements Component, Focusable {
 		const contentRows = availableRows - (framed ? 2 + 2 * paddingY : 0);
 		const lines: string[] = [];
 
-		const filtered = this.filteredExtensions();
-		const visible = filtered.length > 0 ? filtered : EXTENSIONS;
+		const visible = this.getVisibleList();
 
 		// Reserve rows: search + 2 separators + status + footer
 		const reservedRows = 5;
@@ -199,33 +201,35 @@ export class ExtensionPicker implements Component, Focusable {
 		// Separator
 		lines.push("");
 
-		// Extension list
-		for (let i = 0; i < Math.min(visible.length, listRows); i++) {
-			const ext = visible[i];
-			const isSelected = i === this.selectedIndex;
-			const pendingEnabled = this.pendingChanges.get(ext.name);
-			const effective: ExtensionStatus =
-				pendingEnabled !== undefined
-					? pendingEnabled
-						? "enabled"
-						: "disabled"
-					: getExtensionStatus(ext.name);
-			const marker =
-				effective === "enabled"
-					? this.theme.fg("success", "●")
-					: effective === "broken"
-						? this.theme.fg("warning", "✕")
-						: this.theme.fg("dim", "○");
-			const prefix = isSelected ? this.theme.fg("accent", "› ") : "  ";
-			const nameStyle = isSelected ? "accent" : effective === "enabled" ? "text" : effective === "broken" ? "warning" : "muted";
-			const name = this.theme.fg(nameStyle, ext.label);
-			const desc = this.theme.fg("muted", ext.description);
-			lines.push(fit(`${prefix}${marker} ${name} — ${desc}`, contentWidth));
-		}
-
-		// Empty state
-		if (filtered.length === 0 && this.searchQuery.length > 0) {
-			lines.push(fit(this.theme.fg("warning", "No matching extensions"), contentWidth));
+		// Extension list (or the empty state, which replaces the rows rather than
+		// being appended below them and pushing the footer out of the panel)
+		if (visible.length === 0) {
+			if (listRows > 0 && this.searchQuery.length > 0) {
+				lines.push(fit(this.theme.fg("warning", "No matching extensions"), contentWidth));
+			}
+		} else {
+			for (let i = 0; i < Math.min(visible.length, listRows); i++) {
+				const ext = visible[i];
+				const isSelected = i === this.selectedIndex;
+				const pendingEnabled = this.pendingChanges.get(ext.name);
+				const effective: ExtensionStatus =
+					pendingEnabled !== undefined
+						? pendingEnabled
+							? "enabled"
+							: "disabled"
+						: getExtensionStatus(ext.name);
+				const marker =
+					effective === "enabled"
+						? this.theme.fg("success", "●")
+						: effective === "broken"
+							? this.theme.fg("warning", "✕")
+							: this.theme.fg("dim", "○");
+				const prefix = isSelected ? this.theme.fg("accent", "› ") : "  ";
+				const nameStyle = isSelected ? "accent" : effective === "enabled" ? "text" : effective === "broken" ? "warning" : "muted";
+				const name = this.theme.fg(nameStyle, ext.label);
+				const desc = this.theme.fg("muted", ext.description);
+				lines.push(fit(`${prefix}${marker} ${name} — ${desc}`, contentWidth));
+			}
 		}
 
 		// Separator before status
@@ -263,7 +267,7 @@ export class ExtensionPicker implements Component, Focusable {
 	invalidate(): void {}
 
 	private filteredExtensions(): ExtensionDescriptor[] {
-		if (this.searchQuery.length === 0) return [];
+		if (this.searchQuery.length === 0) return EXTENSIONS;
 		const query = this.searchQuery.toLowerCase();
 		return EXTENSIONS.filter(
 			(ext) =>

@@ -172,7 +172,7 @@ test("picker: keyboard shortcuts match snippets picker", () => {
 	);
 });
 
-test("picker: getVisibleList returns filtered when searching, EXTENSIONS otherwise", () => {
+test("picker: getVisibleList never falls back to the full catalog", () => {
 	const pickerSource = readFileSync(
 		new URL("../extensions/rl-extensions/picker.ts", import.meta.url),
 		"utf-8",
@@ -183,8 +183,13 @@ test("picker: getVisibleList returns filtered when searching, EXTENSIONS otherwi
 		"picker should have getVisibleList helper",
 	);
 	assert.ok(
-		pickerSource.includes("filtered.length > 0 ? filtered : EXTENSIONS"),
-		"getVisibleList should return filtered list when searching, EXTENSIONS otherwise",
+		pickerSource.includes("return this.filteredExtensions();"),
+		"getVisibleList should delegate to the filtered list",
+	);
+	assert.ok(
+		!pickerSource.includes("filtered.length > 0 ? filtered : EXTENSIONS"),
+		"a search that matches nothing must not re-render the unfiltered catalog next to " +
+			"'No matching extensions' — Space then toggled row 0 of a list that looked empty",
 	);
 });
 
@@ -525,6 +530,50 @@ test("picker: an active search query stays visible after leaving the search box"
 			"the placeholder must not mask an active filter (users otherwise act on a list they\n" +
 				"believe is unfiltered — the bug that let Space toggle a row the search had filtered out)",
 		);
+	} finally {
+		harness.close();
+	}
+});
+
+test("picker: a search that matches nothing renders no rows and cannot be toggled", () => {
+	const harness = createPickerHarness();
+	try {
+		harness.picker.handleInput("/");
+		for (const char of "zzz") harness.picker.handleInput(char);
+
+		const rows = harness.rows;
+		assert.ok(
+			rows.some((row) => row.includes("No matching extensions")),
+			"the empty state should be shown",
+		);
+		assert.deepEqual(
+			listRows(rows),
+			[],
+			"no extension rows may be rendered when the search matches nothing: " +
+				"the old fallback listed all five rows and Space toggled the first one",
+		);
+
+		harness.picker.handleInput("\u001b"); // leave the search box
+		harness.picker.handleInput(" "); // Space with nothing on screen must do nothing
+		assert.ok(
+			harness.rows.some((row) => row.includes("0/5 enabled") && !row.includes("pending")),
+			`no toggle may be queued while the list is empty, got: ${JSON.stringify(
+				harness.rows.filter((row) => row.includes("enabled")),
+			)}`,
+		);
+	} finally {
+		harness.close();
+	}
+});
+
+test("picker: a matching search narrows the list to just the matches", () => {
+	const harness = createPickerHarness();
+	try {
+		harness.picker.handleInput("/");
+		for (const char of "emacs") harness.picker.handleInput(char);
+		const rows = listRows(harness.rows);
+		assert.equal(rows.length, 1, `expected only emacs-feedback, got: ${JSON.stringify(rows)}`);
+		assert.ok(rows[0]?.includes("emacs-feedback"));
 	} finally {
 		harness.close();
 	}
