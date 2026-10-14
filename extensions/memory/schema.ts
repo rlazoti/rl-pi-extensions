@@ -155,6 +155,17 @@ export function parseScope(raw: string): EntryScope {
 }
 
 /** Identity key for a scope. Distinct from `global` for every malformed scope. */
+/**
+ * An identity is a machine key (`key` + NUL + scope). Anything shown to a human
+ * or written into a report renders it with the separator visible instead: a NUL
+ * in a notification is invisible, and "two claims on ui.background\0global" is
+ * not a sentence anyone can act on.
+ */
+export function formatIdentity(identity: string): string {
+	const [key, scope] = identity.split("\u0000");
+	return scope ? `${key} in scope ${scope}` : key;
+}
+
 export function scopeKey(scope: EntryScope): string {
 	if (scope.level === "global") return "global";
 	if (scope.level === "invalid") return `invalid:${scope.raw}`;
