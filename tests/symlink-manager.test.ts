@@ -9,7 +9,7 @@ import {
 	symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 import {
 	enableExtension,
@@ -20,12 +20,52 @@ import {
 	getExtensionsDir,
 	getMonorepoRoot,
 	isExtensionEnabled,
+	resolveHomeDir,
 	setExtensionsDirForTesting,
 	toggleExtension,
 } from "../extensions/symlink-manager.ts";
 
 // Run the real module against a temp extensions dir so the user's
 // ~/.pi/agent/extensions/ is never touched.
+test("resolveHomeDir never yields a relative base for the extensions directory", () => {
+	assert.equal(resolveHomeDir("/home/u", "/other"), "/home/u", "an absolute $HOME wins");
+	assert.equal(resolveHomeDir(undefined, "/home/u"), "/home/u", "unset $HOME falls back to os.homedir()");
+	assert.equal(resolveHomeDir("", "/home/u"), "/home/u", "empty $HOME falls back to os.homedir()");
+	assert.equal(resolveHomeDir(".pi", "/home/u"), "/home/u", "relative $HOME is not usable");
+	assert.throws(
+		() => resolveHomeDir("", ""),
+		/Cannot resolve an absolute home directory/,
+		"a relative extensions directory must be refused, not created under the cwd",
+	);
+});
+
+test("getExtensionsDir stays absolute when HOME is empty or unset", () => {
+	const savedHome = process.env.HOME;
+	setExtensionsDirForTesting(undefined);
+	try {
+		process.env.HOME = "";
+		const withEmptyHome = getExtensionsDir();
+		delete process.env.HOME;
+		const withNoHome = getExtensionsDir();
+
+		for (const [label, dir] of [
+			["empty", withEmptyHome],
+			["unset", withNoHome],
+		] as const) {
+			assert.ok(isAbsolute(dir), `HOME ${label} must not produce a relative extensions dir: ${dir}`);
+			assert.ok(
+				!dir.startsWith(process.cwd() + "/"),
+				`HOME ${label} must not resolve inside the project cwd: ${dir}`,
+			);
+			assert.ok(dir.endsWith(join(".pi", "agent", "extensions")), `unexpected extensions dir: ${dir}`);
+		}
+	} finally {
+		if (savedHome === undefined) delete process.env.HOME;
+		else process.env.HOME = savedHome;
+		setExtensionsDirForTesting(undefined);
+	}
+});
+
 function withExtensionsDir(fn: (ctx: { extensionsDir: string; srcDir: string }) => void): void {
 	const root = mkdirSync(join(tmpdir(), `rl-pi-symlink-test-${Date.now()}-${Math.random().toString(36).slice(2)}`), {
 		recursive: true,
