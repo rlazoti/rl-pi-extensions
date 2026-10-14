@@ -579,6 +579,67 @@ test("picker: a matching search narrows the list to just the matches", () => {
 	}
 });
 
+test("picker: keeps the selected row on screen when the list is taller than the panel", () => {
+	const harness = createPickerHarness(18, 80);
+	try {
+		for (let step = 0; step < 4; step++) harness.picker.handleInput("down");
+
+		const rows = harness.rows;
+		const marked = rows.filter((row) => row.includes("›"));
+		assert.equal(
+			marked.length,
+			1,
+			`exactly one row must carry the selection marker, got: ${JSON.stringify(marked)}`,
+		);
+		assert.ok(
+			marked[0]?.includes("emacs-feedback"),
+			`the fifth row must be scrolled into view instead of leaving the panel, got: ${JSON.stringify(marked[0])}`,
+		);
+
+		harness.picker.handleInput(" ");
+		assert.ok(
+			harness.rows.some((row) => row.includes("emacs-feedback") && row.includes("●")),
+			"Space must toggle the row the marker is on, not an off-screen one",
+		);
+	} finally {
+		harness.close();
+	}
+});
+
+test("picker: short terminals keep list rows and the footer they can afford", () => {
+	for (const terminalRows of [10, 12, 14, 16, 18, 20, 22, 24, 26, 30, 40]) {
+		const harness = createPickerHarness(terminalRows, 80);
+		try {
+			const rendered = harness.rows;
+			const drawn = listRows(rendered).length;
+			const footer = rendered.some((row) => row.includes("↑↓ navigate"));
+
+			assert.ok(drawn > 0, `terminal height ${terminalRows} must render at least one extension row`);
+			if (terminalRows >= 19) {
+				assert.ok(footer, `terminal height ${terminalRows} must keep the key-hint footer`);
+			}
+			if (terminalRows >= 22) {
+				assert.equal(drawn, 5, `terminal height ${terminalRows} must draw every extension`);
+			}
+		} finally {
+			harness.close();
+		}
+	}
+});
+
+test("picker: the status line says when rows are hidden by a short panel", () => {
+	const harness = createPickerHarness(18, 80);
+	try {
+		const status = harness.rows.find((row) => row.includes("enabled"));
+		assert.ok(
+			status?.includes("4/5 shown"),
+			`a truncated list must announce how much it hid, got: ${JSON.stringify(status)}`,
+		);
+	} finally {
+		harness.close();
+	}
+});
+
 function frameCallHasTitle(source: string, title: string): boolean {
 	return source.includes(`frameLines(this.theme, content, safeWidth, paddingY, ${title})`);
 }
