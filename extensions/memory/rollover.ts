@@ -208,11 +208,12 @@ function collectOpen(node: Section, group?: string): Array<{ group?: string; hea
 }
 
 function renderCarried(entry: { group?: string; heading: string; text: string }, from: string, ageDays: number | null): string {
-	// The heading stays a canonical heading: an annotation inside it would stop the
-	// next rollover from recognising its own output. Provenance goes in the body, as
-	// prose rather than a bullet, so it is not mistaken for an item of work.
+	// Provenance is a body line, never part of the heading: an annotation in a heading
+	// stops the next rollover recognising its own output. `Open work` is not a heading
+	// the classifier knows, so a section that was already called that keeps its name.
 	const age = ageDays !== null && ageDays >= 2 ? ` — ${ageDays} days old` : "";
-	return [`### ${entry.heading}`, "", `_(carried from ${from}${age})_`, "", entry.text].join("\n");
+	const title = [entry.group, entry.heading].filter((part) => part !== undefined && part !== "" && !/^open work$/i.test(part)).join(" — ") || "Carried work";
+	return ["", `### ${title}`, "", `_(carried from ${from}${age})_`, "", entry.text].join("\n");
 }
 
 /**
@@ -289,23 +290,19 @@ export function planDailyRollover(file: DailyFile, today: string, options: { for
 	}
 
 	const carriedFrom = from.source === "missing" ? "an undated file (no date field, no modification time)" : from.source === "mtime" ? `${from.date} (recovered from the file's modification time: the file had no date field)` : from.date;
+	// The shape is a contract with whatever writes the file next — including the
+	// harness's own memory tools, which append under `## Completed` and friends. A
+	// fresh file that only the rollover can read is a private format: the day's work
+	// would come back unreadable to the thing that writes it. Open work goes under
+	// `## In Progress` (a heading the classifier also recognises), with project and
+	// origin grouping kept one level down.
 	const fresh: string[] = [`# Daily Context — ${today}`, "", `- date: ${today}`, `- carried from: ${carriedFrom}`, ""];
-	const grouped = carried.some((entry) => entry.group !== undefined);
 	if (carried.length === 0) {
-		fresh.push("## Open work", "", "_Nothing was carried forward. The previous day's file is archived, and the sections that were not carried are listed with their reasons in the rollover report._", "");
-	} else if (!grouped) {
-		fresh.push("## Open work", "", ...carried.map((entry) => renderCarried({ heading: entry.heading, text: entry.text }, entry.from, entry.ageDays)), "");
+		fresh.push("## In Progress", "", "_Nothing was carried forward. The previous day's file is archived, and the sections that were not carried are listed with their reasons in the rollover report._", "");
 	} else {
-		const byGroup = new Map<string, CarriedSection[]>();
-		for (const entry of carried) {
-			const key = entry.group ?? "General";
-			byGroup.set(key, [...(byGroup.get(key) ?? []), entry]);
-		}
-		for (const [group, entries] of byGroup) {
-			fresh.push(`## ${group}`, "", ...entries.map((entry) => renderCarried({ heading: entry.heading, text: entry.text }, entry.from, entry.ageDays)), "");
-		}
+		fresh.push("## In Progress", ...carried.map((entry) => renderCarried({ heading: entry.heading, group: entry.group, text: entry.text }, entry.from, entry.ageDays)));
 	}
-	fresh.push("## Settled today", "", "## Notes", "");
+	fresh.push("## Completed", "", "## Key Decisions", "", "## Notes", "");
 
 	// The month directory comes from the date, never from the stamp: slicing
 	// "undated-2026-10-14" gives a directory called "undated".

@@ -114,11 +114,18 @@ test("an unrecognised heading is not carried silently: it is named, with alterna
 test("project grouping survives the rollover, and only the open parts of it", () => {
 	const plan = planDailyRollover({ text: GROUPED, modified: "2026-10-12" }, TODAY)!;
 	assert.deepEqual(plan.carried.map((entry) => `${entry.group} / ${entry.heading}`), ["Money Manager / In Progress", "rl-pi-extensions / Handoff"]);
-	assert.match(plan.freshText, /## Money Manager/);
-	assert.match(plan.freshText, /## rl-pi-extensions/);
-	// The group is the section heading, so the carried heading does not repeat it.
-	assert.match(plan.freshText, /## rl-pi-extensions\n\n### Handoff\n\n_\(carried from 2026-10-12 — 2 days old\)_/);
+	assert.match(plan.freshText, /## In Progress/);
+	assert.match(plan.freshText, /### Money Manager — In Progress/);
+	// Grouping survives, one level down, so the open-work heading stays familiar.
+	assert.match(plan.freshText, /### rl-pi-extensions — Handoff\n\n_\(carried from 2026-10-12 — 2 days old\)_/);
 	assert.equal(plan.freshText.includes("Categories & Tags spec written"), false);
+});
+
+test("the fresh file keeps the section names other tools append to", () => {
+	const plan = planDailyRollover({ text: `- date: 2026-10-13\n\n## In Progress\n- a task\n` }, TODAY)!;
+	for (const heading of ["## In Progress", "## Completed", "## Key Decisions", "## Notes"]) {
+		assert.match(plan.freshText, new RegExp(heading.replace(/ /g, "\\s")), `${heading} is missing — a tool that appends under it would fail`);
+	}
 });
 
 test("a group with no open work is reported rather than dropped", () => {
@@ -144,7 +151,8 @@ test("an empty carry is stated, not left as a blank file that looks like nothing
 
 test("a file the rollover wrote is still understood by the rollover", () => {
 	const first = planDailyRollover({ text: `- date: 2026-10-13\n\n## Money Manager\n### In Progress\n- verify the simulator\n`, modified: "2026-10-13" }, TODAY)!;
-	assert.match(first.freshText, /## Money Manager/);
+	assert.match(first.freshText, /## In Progress/);
+	assert.match(first.freshText, /### Money Manager — In Progress/);
 	assert.match(first.freshText, /- \(2026-10-13\) verify the simulator/, "the carry dated the item with the day the file was about");
 
 	// Nothing left to stamp: carrying already did it, and the heading is still a
