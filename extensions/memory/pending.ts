@@ -16,7 +16,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import type { MemoryPaths } from "./fs-store.js";
-import type { GateResult, Resolution, WriteRequest } from "./gate.js";
+import type { ConflictRefusal, Resolution, WriteRequest } from "./gate.js";
 import { formatIdentity, type MemoryEntry } from "./schema.js";
 
 export const PENDING_VERSION = 1;
@@ -41,7 +41,7 @@ export interface PendingConflict {
 	explanation: string;
 }
 
-export type ConflictRefusal = Extract<GateResult, { kind: "conflict" }>;
+export type { ConflictRefusal };
 
 function conflictPath(paths: MemoryPaths, id: string): string | null {
 	if (!ID_PATTERN.test(id)) return null;

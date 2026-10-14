@@ -109,6 +109,9 @@ export type GateResult =
 	  }
 	| { kind: "reject"; reason: RejectReason; explanation: string; issues: ParseIssue[] };
 
+/** A refusal because a rival live claim exists — the queue stores these. */
+export type ConflictRefusal = Extract<GateResult, { kind: "conflict" }>;
+
 // ─── Decision ───────────────────────────────────────────────────────────────
 
 export function decide(store: MemoryStore, request: WriteRequest): GateResult {
@@ -136,7 +139,7 @@ export function decide(store: MemoryStore, request: WriteRequest): GateResult {
 			reason: "missing-asOf",
 			explanation:
 				"asOf is required on every write: authority between claims is decided by date, so the gate will not invent a date on your behalf.",
-			issues: [],
+			issues: incoming.issues,
 		};
 	}
 
