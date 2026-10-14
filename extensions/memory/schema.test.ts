@@ -304,6 +304,30 @@ Black.
 	for (const entry of flagged) assert.equal(isInjectable(entry), false);
 });
 
+test("a malformed sibling does not turn a clean active claim into a duplicate", () => {
+	const file = parse(`# UI
+
+## ui.background
+- scope: global
+- asOf: 2026-10-02
+- status: active
+Dark grey.
+
+## ui.background@2026-05-01
+- scope: global
+- asOf: 2026-05-01
+- status: current
+Black.
+`);
+	const clean = entryByHeading(file, "ui.background");
+	const broken = entryByHeading(file, "ui.background@2026-05-01");
+	assert.equal(broken.status, "active", "an unrecognised status falls back to active but is an error");
+	assert.deepEqual(issueCodes(broken.issues), ["missing-kind", "bad-status"]);
+	assert.deepEqual(issueCodes(clean.issues), ["missing-kind"], "the clean claim is not flagged as a duplicate of a typo");
+	assert.equal(isInjectable(clean), true);
+	assert.equal(isInjectable(broken), false);
+});
+
 test("active plus superseded, or two scopes, or two revisions in different scopes are fine", () => {
 	const chain = parse(CONFLICTING_TOPICS);
 	assert.deepEqual(chain.issues, []);

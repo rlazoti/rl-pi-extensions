@@ -61,6 +61,8 @@ export interface ParseIssue {
 }
 
 export interface MemoryEntry {
+	/** Topic file this entry was parsed from, for diagnostics and rendering. */
+	path: string;
 	/** Heading text exactly as written after `## `. */
 	heading: string;
 	/** Assertion key with any `@YYYY-MM-DD` revision suffix removed. */
@@ -273,13 +275,13 @@ export function parseTopicFile(text: string, filePath: string): TopicFile {
 		});
 	}
 
-	const entries = rawEntries.map((raw) => parseEntry(raw));
+	const entries = rawEntries.map((raw) => parseEntry(raw, filePath));
 	markDuplicateIdentities(entries);
 
 	return { path: filePath, title, entries, issues };
 }
 
-function parseEntry(raw: RawEntry): MemoryEntry {
+function parseEntry(raw: RawEntry, filePath: string): MemoryEntry {
 	const issues: ParseIssue[] = [];
 	const fields: Record<string, string> = {};
 
@@ -311,6 +313,7 @@ function parseEntry(raw: RawEntry): MemoryEntry {
 	const { key, revision } = splitRevision(raw.heading.trim());
 
 	const entry: MemoryEntry = {
+		path: filePath,
 		heading: raw.heading.trim(),
 		key,
 		kind: "fact",
@@ -418,7 +421,10 @@ function markDuplicateIdentities(entries: MemoryEntry[]): void {
 	}
 
 	for (const bucket of byIdentity.values()) {
-		const active = bucket.filter((entry) => entry.status === "active");
+		// Only structurally valid claims compete. A sibling with a typo is
+		// reported as its own error; it must not silence a clean claim by
+		// making it look duplicated.
+		const active = bucket.filter((entry) => entry.status === "active" && !hasError(entry.issues));
 		if (active.length < 2) continue;
 		for (const entry of active) {
 			entry.issues.push({
