@@ -73,12 +73,29 @@ export function formatAskBody(args: unknown): string {
 		: "Waiting for your input";
 }
 
-export function buildTmuxActivationCommand(target: TmuxTarget, tmuxBinary: string): string {
+// terminal-notifier's -activate (and /usr/bin/open -b) take the *terminal app's*
+// bundle id. Hardcoding iTerm activated an unrelated app for Ghostty / Terminal
+//.app / herdr / cmux users, so the id is read from the environment: launchd
+// exports __CFBundleIdentifier into every GUI-launched terminal.
+export const TERMINAL_BUNDLE_ENV = "__CFBundleIdentifier";
+
+export function terminalBundleId(env: NodeJS.ProcessEnv): string {
+	const id = env[TERMINAL_BUNDLE_ENV];
+	// The id is interpolated into a shell command line in the tmux path, so only
+	// a plausible bundle identifier is accepted; anything else falls back.
+	return typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$/.test(id) ? id : ITERM_BUNDLE_ID;
+}
+
+export function buildTmuxActivationCommand(
+	target: TmuxTarget,
+	tmuxBinary: string,
+	bundleId: string = ITERM_BUNDLE_ID,
+): string {
 	const tmux = shellEscape(tmuxBinary);
 	const socket = shellEscape(target.socket);
 	const pane = shellEscape(target.paneId);
 	return [
-		`/usr/bin/open -b ${shellEscape(ITERM_BUNDLE_ID)}`,
+		`/usr/bin/open -b ${shellEscape(bundleId)}`,
 		`${tmux} -S ${socket} select-window -t ${pane}`,
 		`${tmux} -S ${socket} select-pane -t ${pane}`,
 	].join(" && ");
@@ -88,6 +105,7 @@ export async function sendDesktopNotification(
 	pi: Pick<ExtensionAPI, "exec">,
 	notification: AttentionNotification,
 	target: TmuxTarget | null,
+	env: NodeJS.ProcessEnv = process.env,
 ): Promise<DeliveryBackend> {
 	const args = [
 		"-title", notification.title,
@@ -98,9 +116,9 @@ export async function sendDesktopNotification(
 
 	const tmuxBinary = target ? await resolveTmuxBinary(pi) : null;
 	if (target && tmuxBinary) {
-		args.push("-execute", buildTmuxActivationCommand(target, tmuxBinary));
+		args.push("-execute", buildTmuxActivationCommand(target, tmuxBinary, terminalBundleId(env)));
 	} else {
-		args.push("-activate", ITERM_BUNDLE_ID);
+		args.push("-activate", terminalBundleId(env));
 	}
 
 	const terminalNotifier = await safeExec(pi, "terminal-notifier", args);
@@ -136,7 +154,7 @@ export function registerSessionAttention(pi: ExtensionAPI, options: RegisterOpti
 			title: truncateText(title?.trim() || titleFor(ctx), MAX_TITLE_LENGTH),
 			body: truncateText(body, MAX_BODY_LENGTH),
 			group,
-		}, target);
+		}, target, env);
 	};
 
 	pi.on("session_start", (_event, ctx) => {

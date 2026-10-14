@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+	buildTmuxActivationCommand,
 	claimProcessRole,
-	tmuxTargetFromEnv,
 	formatAskBody,
-	truncateText,
 	inactiveReason,
+	terminalBundleId,
+	truncateText,
+	tmuxTargetFromEnv,
 } from "./implementation.ts";
 
 // --- claimProcessRole tests ---
@@ -57,6 +59,37 @@ test("tmuxTargetFromEnv: returns null when TMUX_PANE is missing", () => {
 	const env: NodeJS.ProcessEnv = { TMUX: "/tmp/tmux-1000/default,0,0" };
 	const target = tmuxTargetFromEnv(env);
 	assert.equal(target, null);
+});
+
+// --- terminalBundleId / activation command tests ---
+
+test("terminalBundleId: uses the launching terminal's bundle id", () => {
+	assert.equal(
+		terminalBundleId({ __CFBundleIdentifier: "com.mitchellh.ghostty" }),
+		"com.mitchellh.ghostty",
+		"a Ghostty user must be shown Ghostty, not iTerm",
+	);
+	assert.equal(terminalBundleId({ __CFBundleIdentifier: "com.apple.Terminal" }), "com.apple.Terminal");
+});
+
+test("terminalBundleId: falls back to iTerm when unset or unusable", () => {
+	assert.equal(terminalBundleId({}), "com.googlecode.iterm2");
+	// The id is interpolated into a shell command line, so anything that is not a
+	// plausible bundle identifier is rejected rather than passed through.
+	for (const bad of ["", " ", "com.foo; rm -rf /", "$(whoami)", "a".repeat(200)]) {
+		assert.equal(terminalBundleId({ __CFBundleIdentifier: bad }), "com.googlecode.iterm2", `accepted ${bad}`);
+	}
+});
+
+test("buildTmuxActivationCommand: focuses the caller's terminal, not iTerm", () => {
+	const command = buildTmuxActivationCommand(
+		{ socket: "/tmp/tmux-501/default", paneId: "%3" },
+		"/opt/homebrew/bin/tmux",
+		"com.mitchellh.ghostty",
+	);
+	assert.match(command, /open -b 'com\.mitchellh\.ghostty'/);
+	assert.doesNotMatch(command, /iterm/i);
+	assert.match(command, /'\/opt\/homebrew\/bin\/tmux' -S '\/tmp\/tmux-501\/default' select-window -t '%3'/);
 });
 
 // --- formatAskBody tests ---
