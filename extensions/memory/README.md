@@ -308,6 +308,15 @@ dismissal, a timeout or no UI at all parks the refusal in the pending queue.
 | `applyEdits(paths, edits)` | Write the gate's rendered bytes, temp-file + rename, refusing anything outside the bank. |
 | `foreignMemoryExtension(paths)` | The single-instance guard's check. |
 
+### `migrate.ts`
+
+| Export | Purpose |
+|---|---|
+| `proposeMigration(sources)` | Read prose `SourceFile[]`, return proposals + every skip with its reason. Deterministic, so a reviewed plan can be re-run and stays line-for-line the same. |
+| `migrationRequests(report, accept?)` | Proposals expressed as gate `WriteRequest`s, tagged `migratedFrom: <file>#<heading>`. |
+| `simulateMigration(store, requests)` | Fold them through `decide`; returns accepted / unchanged / refused / rejected / collided, the would-be file contents, and violations split by cause. |
+| `renderMigrationReport(report)` | The human-facing plan: flags, skips, provenance folding, per-proposal "why". |
+
 ### `pending.ts` / `service.ts`
 
 | Export | Purpose |
@@ -361,6 +370,66 @@ distinguishable). This factory then registers nothing and says why at
 unreproducible and the tool names ambiguous. Observed in a real Pi session — the
 guard fired exactly as designed against the live standalone extension.
 
+## Migration (Phase 5b): prose to entries
+
+The old bank is prose, and its `##` headings are section titles rather than
+assertions — so migration is a judgement call, and the job of this code is to
+*propose* with every inference labelled. Nothing in `migrate.ts` writes.
+
+Three rules:
+
+1. **Nothing is dropped silently.** Skipped files and skipped sections are
+   reported with the reason, so "why isn't my note in the store?" has an answer.
+2. **Inferred provenance says it is inferred.** A date taken from a file's mtime
+   is not a claim about when the claim became true; it is the best evidence
+   available and the report prints it that way — because an `asOf` that looks
+   authoritative decides authority.
+3. **Every inference carries its cue**: `kind=rule from modal obligation: "Never"`,
+   `the text says "this repo" but the repo is not named — set project:<name> by hand`.
+
+What does **not** become an entry: paths outside `knowledge/` (core/ and history/
+are working state and dated history); files that read as status snapshots (phases,
+`COMPLETE`, branch names — that belongs in `core/activeProjects.md`, where
+staleness is expected); headings that organise a document rather than assert
+something, matched against the **whole** heading so `## Notes` is scaffolding while
+`## Background colour` is a claim (a prefix match ate the latter in the first
+draft); sections with no body; and `## Source`, which is folded into the entries'
+`source:` field instead of becoming a claim about attribution.
+
+**Keys** are `<file-topic>.<slug(heading)>`. Apostrophes are not word boundaries
+(`Don't push` → `dont-push`, not `don-t-push`). Two headings slugging to one key are
+reported as a collision for a human to name — never auto-renamed, because a
+generated `-2` is a key nobody chose.
+
+**The batch guard.** `simulateMigration` stops two proposals claiming one identity
+*within one batch* before the gate sees them. The gate deliberately allows a write
+to amend an entry it already owns — rewording your own claim is authoring, not a
+rival claim — and that allowance is wrong for migration: two prose sections that
+slugify to one key have no continuous authorship between them, so the second would
+silently rewrite the first. That is the exact failure this component exists to
+prevent, arriving from an unexpected direction.
+
+**The dry run is the gate, not a preview of it.** `simulateMigration` folds the
+proposals through `decide` against a store that grows as each write is accepted, so
+the report answers the only question that matters — *would these writes be
+admitted?* — and the rendered bytes come from the store's own renderer rather than
+a serializer invented for migration day. Re-running a migration is a no-op
+(`unchanged`), which is what makes it safe to re-run after a correction.
+
+`scripts/migrate-report.mjs [--bank <dir>] [--out <file>]` prints the plan for a
+real bank. It has no `--apply` flag on purpose: a report script that can also
+overwrite your bank is a tool you will eventually run by habit.
+
+**Open decisions from the dry run of the live bank** (2026-10-14, 8 files read, 10
+proposals, 0 conflicts, 0 key collisions, no new violations): six sections flagged
+`needs-split` (a bullet list of four claims is not one entry); two that say "this
+repo" without naming it, so the scope is left `global` rather than inventing
+`project:this-repo`; `git-standards.md` dated 2026-05-02 by mtime when the rule
+inside it is older; `knowledge/implementation-plan.md` recommended out of
+`knowledge/` altogether; and whether entries replace the prose **in place** (the
+default here, since cutover replaces the bank) or stage into new files first so
+rollback is a rename.
+
 ## Cutover hazards (Phase 5)
 
 - `~/.pi/agent/extensions/memory` is a **real directory**, not a symlink, so the
@@ -382,12 +451,13 @@ guard fired exactly as designed against the live standalone extension.
 | 3b | TUI ask + pending queue (dialog on top of the gate's refusal) | ⬜ |
 | 4 | recall + budget + deterministic prompt text | ✅ `inject.ts` |
 | 5a | tools, `/memory`, injection hook, pending queue, single-instance guard | ✅ `implementation.ts` `service.ts` `pending.ts` `fs-store.ts` |
-| 5b | migration + cutover of the live standalone extension | ⬜ |
+| 5b-1 | migration tooling + dry run of the live bank | ✅ `migrate.ts` `scripts/migrate-report.mjs` |
+| 5b-2 | apply the migration + cutover of the live extension | ⬜ (needs the human decisions below) |
 | 6 | daily-rollover fixes (archive never fires, `Carried Forward` vs `Context for Tomorrow`) | ⬜ |
 
 ## Testing map
 
-163 tests in `extensions/memory/`:
+180 tests in `extensions/memory/`:
 
 - `schema.test.ts` (31): grammar and scope parsing; metadata vs body boundaries;
   fenced `##` is body; CRLF; unclosed fence; legacy prose headings flagged
