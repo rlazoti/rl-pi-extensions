@@ -140,5 +140,7 @@ test("inactiveReason: returns platform message", () => {
 });
 
 test("inactiveReason: returns mode message", () => {
-	assert.equal(inactiveReason("main", false, "darwin", "headless"), "disabled in headless mode");
+	// ExtensionMode is "tui" | "rpc" | "json" | "print" — a non-TUI mode is what
+	// gates delivery, and the reason string names it.
+	assert.equal(inactiveReason("main", false, "darwin", "print"), "disabled in print mode");
 });

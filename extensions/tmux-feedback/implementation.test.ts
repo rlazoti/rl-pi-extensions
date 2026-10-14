@@ -150,7 +150,9 @@ test("reconstructFeedbackState: filters invalid note entries and duplicate ids",
 				{ id: 1.5, quote: "frac", feedback: "bad", createdAt: "x" },
 				{ id: 2, quote: "ok", feedback: "ok", createdAt: "x" },
 				"not-a-note",
-			],
+				// The point of the fixture is that a snapshot can carry junk; the
+				// reader has to survive it, so the cast is intentional.
+			] as unknown as FeedbackNote[],
 			5,
 		),
 	];

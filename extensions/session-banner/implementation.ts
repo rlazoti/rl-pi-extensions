@@ -56,22 +56,39 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { complete } from "@earendil-works/pi-ai";
+// Pi's extension loader also serves the ROOT specifier as this entrypoint
+// (virtual-modules.js), but naming the subpath is what resolves identically in
+// Pi, in bare-node tests, and under tsc — the root has no `complete` export in
+// pi-ai's own package.json, and a missing named ESM export is a hard load error.
+import { complete } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 
-import { paneRegistry, type BannerOutput } from "./panes.js";
+import type { BannerOutput } from "./panes.js";
+import { paneRegistry } from "./panes.js";
 
 // ─── Test seams ───────────────────────────────────────────────────────────
 // Node's test runner cannot mock ESM modules, so the LLM + I/O dependencies
 // are injectable. Each setter is null-gated: production runs keep the real
 // implementation untouched.
-let execFileFn: typeof execFile = execFile;
-export function setExecFileForTesting(fn: typeof execFile | null): void {
+// The seam is deliberately narrower than node's execFile overloads: the banner
+// only ever uses the (command, args, callback) form.
+export type ExecFileCallback = (error: Error | null, stdout: string, stderr: string) => void;
+export type ExecFileFn = (command: string, args: readonly string[], callback: ExecFileCallback) => unknown;
+let execFileFn: ExecFileFn = execFile as unknown as ExecFileFn;
+export function setExecFileForTesting(fn: ExecFileFn | null): void {
 	if (fn) execFileFn = fn;
 }
-let fsLike: typeof fs = fs;
-export function setFsForTesting(impl: typeof fs | null): void {
+// Narrower than node:fs — only the three members the banner uses.
+export interface FsSeam {
+	readFileSync(file: string, encoding: "utf-8"): string;
+	promises: {
+		mkdir(dir: string, options?: unknown): Promise<unknown>;
+		writeFile(file: string, data: string, options?: unknown): Promise<unknown>;
+	};
+}
+let fsLike: FsSeam = fs as unknown as FsSeam;
+export function setFsForTesting(impl: FsSeam | null): void {
 	if (impl) fsLike = impl;
 }
 let completeFn: typeof complete = complete;
@@ -756,7 +773,18 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("session_switch", async (_event, ctx) => {
+	// Pi 1.1.0 and 1.2.0 emit none of session_switch / session_fork /
+	// session_branch — their names are absent from the typed event union, which is
+	// what the cast below documents. They fire only under OMP, the user's runtime;
+	// Pi's own replacement flows arrive as session_shutdown (reason new/resume/
+	// fork) + session_start, handled above. The runtime handler map is keyed by
+	// string, so registering OMP-only names is safe in both runtimes.
+	const onUnmodelledEvent = pi.on as unknown as (
+		event: string,
+		handler: (event: unknown, ctx: ExtensionContext) => void | Promise<void>,
+	) => void;
+
+	onUnmodelledEvent("session_switch", async (_event, ctx) => {
 		if (!rememberActiveCtx(ctx)) return;
 		// Invalidate callbacks from the previous session immediately. The state
 		// restore stays deferred because Pi loads the new session name async.
@@ -776,6 +804,7 @@ export default function (pi: ExtensionAPI) {
 		}, 50);
 	});
 
+	// OMP-compatibility block: see onUnmodelledEvent above.
 	const initBranchedSession = async (_event: unknown, ctx: ExtensionContext): Promise<void> => {
 		if (!rememberActiveCtx(ctx)) return;
 		initSessionState(ctx);
@@ -787,11 +816,8 @@ export default function (pi: ExtensionAPI) {
 	// arrive as session_shutdown (reason new/resume/fork) + session_start,
 	// which are handled separately above. The handler map is keyed by string,
 	// so registering OMP-only names is safe in both runtimes.
-	pi.on("session_fork", initBranchedSession);
-	const ompApi = pi as unknown as {
-		on(event: "session_branch", handler: typeof initBranchedSession): void;
-	};
-	ompApi.on("session_branch", initBranchedSession);
+	onUnmodelledEvent("session_fork", initBranchedSession);
+	onUnmodelledEvent("session_branch", initBranchedSession);
 
 	/**
 	 * Try to auto-name the session. Shared by the early (before_agent_start)
@@ -860,7 +886,13 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", (event, ctx) => {
 		if (!rememberActiveCtx(ctx)) return;
 		turnCount++;
-		const rendered = tryAutoName(ctx, { pendingUserMessage: event.prompt });
+		// before_agent_start fires for a submitted prompt (messageType "user", with
+		// raw prompt text) and for an idle pi.sendMessage(...) with triggerTurn
+		// (messageType "custom", which carries a structured message and no prompt).
+		// Narrow structurally rather than on messageType so a prompt is picked up
+		// whenever Pi actually puts one on the event.
+		const prompt = "prompt" in event ? event.prompt : undefined;
+		const rendered = tryAutoName(ctx, { pendingUserMessage: prompt });
 		// Keep the title asserted over core's paints (skip if already rendered).
 		if (!rendered) paintBanner(ctx);
 	});

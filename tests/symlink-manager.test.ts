@@ -91,9 +91,8 @@ test("getExtensionsDir stays absolute when HOME is empty or unset", () => {
 });
 
 function withExtensionsDir(fn: (ctx: { extensionsDir: string; srcDir: string }) => void): void {
-	const root = mkdirSync(join(tmpdir(), `rl-pi-symlink-test-${Date.now()}-${Math.random().toString(36).slice(2)}`), {
-		recursive: true,
-	});
+	const root = join(tmpdir(), `rl-pi-symlink-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+	mkdirSync(root, { recursive: true });
 	const extensionsDir = join(root, "agent", "extensions");
 	const srcDir = join(root, "src");
 	mkdirSync(extensionsDir, { recursive: true });
