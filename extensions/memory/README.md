@@ -1,14 +1,14 @@
 # memory — entry-keyed memory bank with a conflict gate
 
-**Status: Phases 1-5a of 6.** Schema, resolver, admission gate, injector,
-filesystem layer, pending queue, service layer and the Pi adapter are done: four
-tools (`memory_write`, `memory_show`, `memory_search`, `memory_doctor`), the
-`/memory` command, the per-turn injection hook and a single-instance guard.
-**Still not enabled**: the directory is in the picker catalog but not symlinked
-into `~/.pi/agent/extensions`, so the bank actually in use is the standalone
-`memory` extension at `~/.pi/agent/extensions/memory` (a real directory, not a
-symlink — see § Cutover). Enabling this one before that directory is moved aside
-is safe but pointless: the guard detects the collision and stands down.
+**Status: Phases 1-5c of 6 — enabled and live.** Schema, resolver, admission gate,
+injector, filesystem layer, pending queue, service layer and the Pi adapter are
+done: four tools (`memory_write`, `memory_show`, `memory_search`, `memory_doctor`),
+the `/memory` command, the per-turn injection hook and a single-instance guard.
+Cutover happened on 2026-10-14: this directory is symlinked into
+`~/.pi/agent/extensions/memory`, and the standalone extension it replaces is parked
+at `~/.pi/agent/extensions-disabled/memory` (rename it back to roll back). The live
+bank's `knowledge/` is an entry store — 23 claims, 0 violations, backup in
+`~/.pi/backups`. Remaining: Phase 6, the daily-rollover fixes.
 
 ## Why this exists
 
@@ -368,8 +368,9 @@ conflict with the human, and `/memory pending` shows it on demand.
 directory is another memory extension (ours is enabled by symlink, so the two are
 distinguishable). This factory then registers nothing and says why at
 `session_start`: two injectors and two `memory_*` tool sets make the prompt
-unreproducible and the tool names ambiguous. Observed in a real Pi session — the
-guard fired exactly as designed against the live standalone extension.
+unreproducible and the tool names ambiguous. Observed in a real Pi session before
+cutover, standing down correctly against the live standalone extension; the tools
+work now that only one of them is loaded.
 
 ## Migration (Phase 5b): prose to entries
 
@@ -501,16 +502,29 @@ migration is idempotent rather than merely finished. The live standalone extensi
 was left enabled and still reads the migrated bank — verified by real searches that
 find migrated content by title — so the migration did not depend on the cutover.
 
-## Cutover hazards (Phase 5)
+## Cutover (Phase 5c) — performed 2026-10-14
 
-- `~/.pi/agent/extensions/memory` is a **real directory**, not a symlink, so the
-  picker cannot disable it, and `enableExtension` correctly refuses to clobber
-  it. Cutover is a manual move-aside, with a backup.
-- Two memory extensions loaded at once means two injectors and duplicate tool
-  names. The new extension carries a single-instance guard: detect another memory
-  extension in the extensions dir, notify loudly, and stand down.
-- Development never touches the live bank: nothing is symlinked while building,
-  and validation runs under `PI_CODING_AGENT_DIR` + `PI_MEMORY_DIR` overrides.
+- `~/.pi/agent/extensions/memory` was a **real directory**, not a symlink, so the
+  picker cannot disable it and `enableExtension` correctly refuses to clobber it.
+  Cutover was a manual move-aside, out of the scanned directory entirely:
+  `mv ~/.pi/agent/extensions/memory ~/.pi/agent/extensions-disabled/memory`, then
+  `enableExtension("memory", "extensions/memory")` — the picker's own code path, so
+  the link is the one the manager would have made.
+- **Rollback** is the reverse: `rm ~/.pi/agent/extensions/memory` (the symlink only)
+  then `mv ~/.pi/agent/extensions-disabled/memory ~/.pi/agent/extensions/memory`.
+  Nothing else has to be undone: the extension holds no state outside the bank, and
+  the bank migration has its own backup.
+- **Verified in a real session after cutover**: `memory_show` resolved a migrated
+  claim with its authority (`rule · global · 2026-05-02`); `memory_doctor` reported 5
+  stores, 23 entries, no structural problems, no pending conflicts; the injection
+  block was in the prompt (the model quoted it, with `kind · scope · asOf`, without
+  calling a tool). `pi -p` load failures: 0.
+- Two memory extensions loaded at once means two injectors and duplicate tool names,
+  which is what the guard is for. It stood down correctly while they coexisted, and
+  passes now.
+- Development never touches the live bank: validation runs under `PI_MEMORY_DIR` +
+  `PI_CODING_AGENT_DIR` overrides. Migration and cutover were separate approved
+  steps, and the migration was rehearsed on a copy of the bank first.
 
 ## Build order
 
