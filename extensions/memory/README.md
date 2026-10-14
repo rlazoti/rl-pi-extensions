@@ -1,6 +1,7 @@
 # memory — entry-keyed memory bank with a conflict gate
 
-**Status: Phase 2 of 6. Not enabled, registers nothing.** The directory is listed
+**Status: Phase 3 of 6 — schema, resolver and admission gate are done. Not
+enabled, registers nothing.** The directory is listed
 in the picker catalog so it stays manageable, but `implementation.ts` registers
 no tools, commands, or hooks, and it is not symlinked into
 `~/.pi/agent/extensions`. The memory bank you are actually using is still the
@@ -40,8 +41,8 @@ gate alone is not enough:
    current context rather than a global rule plus an override the model has to
    referee. Non-applicable scopes are reported `out-of-scope`, never dropped.
 
-`schema.ts` (Phase 1) makes identity computable; `resolver.ts` (Phase 2) makes it
-enforceable.
+`schema.ts` makes identity computable; `resolver.ts` makes it enforceable on the
+read path; `gate.ts` makes a rival unenterable on the write path.
 
 ## Store layout and entry schema
 
@@ -67,12 +68,29 @@ Use dark grey for the UI background.
 - asOf: 2026-06-14
 - source: Slack
 - status: superseded
-- supersedes: ui.background@2026-05-01
+- supersededBy: knowledge/ui.md#ui.background
+- supersedes: knowledge/palette.md#ui.background@2026-05-01
 Use navy for the UI background.
 ```
 
 Identity = **key + scope**, revision suffix ignored. One topic file holding an
 active entry plus its supersede chain is the normal, healthy shape.
+
+`supersedes:` / `supersededBy:` references are qualified `path#heading`, because
+two topic files can hold the same heading — that collision is part of what broke
+the appearance store, so an unqualified reference is only resolvable when it is
+unique (otherwise the resolver reports `ambiguous-supersedes`).
+
+**Provenance fields, written by the gate and never remembered by anyone:**
+
+| Field | Written when |
+|---|---|
+| `supersedes` | an accepted claim replaced other claims |
+| `supersededBy` | a claim was replaced; points at what took over |
+| `amendedFrom` | an entry's text was rewritten and its `asOf` moved |
+| `withdrawnOn` | a contest ended with nobody asserting anything |
+| `resolution` | how a conflict was settled, plus the one-line "why" |
+| `contestedWith` | `keep-both-flagged`: what it is contested with |
 
 **Validation rule: identity- and authority-bearing fields are never silently
 normalized.**
@@ -120,40 +138,124 @@ Candidates in (any retrieval order) → plan out:
   outside the context. Recorded, never silently discarded.
 - `conflicts` — identities needing a human, each carrying its `bestCandidate`.
 
-Scope matching is an anchored, segment-wise glob (`globMatches`): `**` spans any
-number of path segments, `*` and `?` stay inside one, and there is no implicit
-leading double-star.
+Scope matching is **minimatch** with the options pinned so a scope behaves as a
+matcher and not an ignore file: `dot: true` (paths under `.github/` must not fail
+silently), `nonegate`, `nocomment`, case-sensitive. Worth knowing: `src/ui/**`
+matches paths *under* `src/ui/` but not the bare `src/ui`; `src/**/x.ts` matches
+at any depth including zero; there is no implicit leading `**` (`*.ts` does not
+match `src/a.ts`).
 
-## Conflict protocol (Phase 3)
+## Dependencies
 
-The write tool is the admission gate, and it is two-phase so it works in every
-Pi mode:
+Justified against AGENTS.md §6:
 
-- `memory_write(file, key, body, meta)` → **clean:** writes, reindexes, returns
-  the entry.
-- → **conflict:** writes **nothing**, returns `CONFLICT key=… scope=…`, the
-  existing body + `asOf` + `source`, the incoming body, and a `conflictId`.
-- Re-invoke with `resolve:` `supersede` | `merge` | `withdraw` | `keep-both-flagged`.
-  `keep-both-flagged` is the only escape hatch and leaves a permanent `doctor`
-  violation.
-- **In TUI mode the human is asked immediately**, while the context is fresh
-  (`ctx.ui.select` for the resolution, `ctx.ui.input` for a one-line "why" that
-  becomes the `source:` line). Dialogs support `{ signal, timeout }`; on
-  dismiss/timeout/abort, or in `print`/`json`/`rpc`, the full diff is persisted
-  to `~/.pi/memory/.pending/<conflictId>.md`.
-- The queue is surfaced every turn (so the agent can act on it too), notified at
-  `session_start`, and walked by `/memory resolve`.
-- The human's choice is echoed in the tool result, so the transcript never
-  disagrees with the store.
+- **`minimatch`** (runtime, used today) — path-scope matching. Glob edge cases
+  (dotfile paths, `**` crossing segments, `!`/`#` characters) misclassify a
+  scope *silently*, which is the exact failure class this component exists to
+  remove; a hand-rolled matcher would be surface to defend rather than a
+  smaller one. The option choices are pinned by tests, not just the happy path.
+- A BM25 index for candidate recall is still an open Phase 4 decision — retrieval
+  no longer arbitrates anything here, so its quality bar is "good candidate
+  recall" and that call belongs to that phase.
 
-## Injection contract (Phase 4)
+## Write path: the admission gate
 
-Candidate recall (MiniSearch BM25, kept as the one runtime dependency) → drop
-`superseded`/`withdrawn` and error-flagged entries → resolve to one authority per
-identity → inject **entries, not files**, under a per-kind token budget. Output
-is byte-identical for a given store + prompt. The old `(score: 2176)` labels are
-gone: they read as authority and measure nothing of the kind. Replaced by
-`kind` / `scope` / `asOf`, which are what actually decides.
+`decide(store, request)` is the only way an entry gets into the store. It is pure
+— it takes parsed topic files and returns rendered file contents; it never writes
+and never reads a clock, because a hidden clock makes every write test
+unreproducible and invents provenance. It returns one of:
+
+| Result | Meaning |
+|---|---|
+| `plan` | The file contents to write. Nothing is written before this exists. |
+| `unchanged` | Same heading, same text: no write, no churn. |
+| `conflict` | A rival live claim exists. **Nothing was written.** |
+| `discarded` | `resolve: "discard"`: nothing written, the rival stands. |
+| `reject` | The request itself is malformed: bad path, no `asOf`, unknown `resolve`, stale `conflictId`. |
+
+**What counts as a rival.** If the incoming heading matches an entry in the
+target file, the write **amends it in place** — ordinary authoring, never gated.
+If it differs while `key` + `scope` match and a live claim already exists — in
+this file **or any other** — it is a **conflict** and is refused. Rewording what
+you own is authoring; adding a second claim on one assertion is the act that
+broke the appearance store, and that is what gets gated. The check is across the
+whole store, not per file: three files each holding `ui.background` is one
+identity with three claims. An incoming entry whose own `status` is not `active`
+(a tombstone, a migration record) asserts nothing and cannot contest anything.
+
+**Resolving is a second, explicit call.** The refusal carries a `conflictId`
+derived from the identity, the live claims and the incoming text, and the second
+call must carry it. If the store moved on in between, the id no longer matches and
+the write is refused again rather than applied to a state nobody reviewed. A
+resolution never executes inside a write.
+
+```
+resolve: "supersede"          incoming wins; rivals become status: superseded
+resolve: "merge"              needs mergedBody; rivals become superseded
+resolve: "withdraw"           both sides stop asserting; status: withdrawn, nothing new
+resolve: "keep-both-flagged"  both stay live: the identity goes dark (the read path
+                              returns nothing for it) and the doctor reports it
+resolve: "discard"            incoming is dropped; nothing changes on disk
++ conflictId                  required, and must match the state you were shown
++ note                        one line of "why", recorded as `resolution:` provenance
+```
+
+`supersede` rewrites **every file holding a rival**, so tombstones stay where the
+claims they retire live — one write per affected file, applied together.
+
+**TUI interaction is Phase 5, on top of this.** The refusal already carries
+everything a dialog needs (incoming vs candidate, `asOf`, `source`, and a
+suggestion: `supersede` when the incoming claim is the newest dated, `merge`
+otherwise). Phase 5 puts `ctx.ui.select` in front of that result, records the
+chosen `resolve` + `note` exactly as the second call, falls back to the persisted
+pending queue on dismiss/timeout/abort, and in `print`/`json`/`rpc` answers only
+when the agent supplied a resolution. The gate's contract does not change between
+modes — only who answers it.
+
+## Component API
+
+### `schema.ts`
+
+| Export | Purpose |
+|---|---|
+| `parseTopicFile(text, path)` | Text → `TopicFile`: title, entries, parse issues. Never throws. |
+| `renderTopicFile(file)` / `renderEntry(entry)` | Canonical rendering: fixed field order, unknown fields preserved verbatim, malformed scopes re-emitted unchanged (a report must not launder the field under investigation). |
+| `parseScope(raw)` / `scopeKey(scope)` / `scopeRank(scope)` | Scope grammar (`global` \| `project:<name>` \| `path:<glob>`), comparable identity key, specificity rank. Invalid scopes never fall back to `global`. |
+| `compareAuthority(a, b)` | Total order: specificity → recency → key → heading. No similarity term. |
+| `identityOf(entry)` | `key + NUL + scopeKey` — the identity every gate compares. |
+| `isEntryStatus` / `isEntryKind` / `isAssertionKey` / `splitRevision` | Schema predicates — the same ones the write gate uses, so accept/reject cannot drift from the parser. |
+| `parseRefs(value)` / `isSupersedeRef(ref)` | Split and validate `supersedes:` references (`heading`, `heading@date`, `path#heading`). |
+
+### `resolver.ts`
+
+| Export | Purpose |
+|---|---|
+| `buildStore(files)` | Parse results → indexed store: entries by identity and by key, parsed files **by path** (the gate needs to rewrite a rival's home file), plus violations. |
+| `resolveIdentity(store, identity)` | Gate 1: one authority per identity, or `ambiguous` with `bestCandidate`. |
+| `resolveKey(store, key, context)` | Gate 2: the authority for a key in a context, with `shadowed` and `outOfScope` traces. |
+| `rankAuthorities(entries, context)` | Gate 2 without store knowledge — for callers holding ad-hoc candidates. |
+| `planInjection(store, candidates, context)` | The injection contract: injectable entries, redirects, suppressions, conflicts. |
+| `globMatches(glob, path)` | Glob matcher with `**` support (posix semantics; no deps). |
+
+### `gate.ts`
+
+| Export | Purpose |
+|---|---|
+| `decide(store, request)` | The admission gate: `plan` \| `unchanged` \| `conflict` \| `discarded` \| `reject`. |
+| `WriteRequest` | `file, key, scope, kind, body, asOf` (required), `source, revision, status, fields, resolve, conflictId, mergedBody, note`. |
+| `EditPlan` | `files[{path, content, changes[]}], summary, warnings[]`. The caller writes these contents verbatim. |
+| `RESOLUTIONS` | `supersede, merge, withdraw, keep-both-flagged, discard`. |
+
+## Injection wiring (Phase 4, open)
+
+The pure core is done (`planInjection`). What is still open is **candidate
+recall**: the index that decides which entries to ask about. Retrieval no longer
+arbitrates anything here, so its quality bar is only "good recall" — and that is
+also why no index was bought early. Whatever produces the candidates, the
+resolver owns authority: entries are injected, never files, and output is
+byte-identical for a given store + prompt. The old `(score: 2176)` labels are
+gone; `kind` / `scope` / `asOf` are what actually decide, and they are shown
+instead.
 
 ## Cutover hazards (Phase 5)
 
@@ -172,30 +274,43 @@ gone: they read as authority and measure nothing of the kind. Replaced by
 |---|---|---|
 | 1 | entry schema + tolerant topic-file parser + authority order | ✅ `schema.ts` |
 | 2 | resolver: two gates, one authority per key per context, conflict reporting | ✅ `resolver.ts` |
-| 3 | admission gate + conflict protocol + pending queue | ⬜ |
+| 3 | admission gate: refuse rivals, pure resolutions, provenance | ✅ `gate.ts` |
+| 3b | TUI ask + pending queue (dialog on top of the gate's refusal) | ⬜ |
 | 4 | injector (entry-level, deterministic, budgeted) | ⬜ |
 | 5 | tools, `/memory` + `doctor` + `migrate`, single-instance guard | ⬜ |
 | 6 | daily-rollover fixes (archive never fires, `Carried Forward` vs `Context for Tomorrow`) | ⬜ |
 
 ## Testing map
 
-67 tests in `extensions/memory/`:
+89 tests in `extensions/memory/`:
 
 - `schema.test.ts` (31): grammar and scope parsing; metadata vs body boundaries;
   fenced `##` is body; CRLF; unclosed fence; legacy prose headings flagged
   `bad-key`; defaults vs errors; unknown-field preservation; duplicate-identity
-  in all three directions (chain OK, two-actives flagged, a malformed sibling
+  in all three directions (chain OK, two actives flagged, a malformed sibling
   does not trigger it); `compareAuthority` specificity/recency/tie-break
-  totality; render↔parse byte-idempotence.
-- `resolver.test.ts` (35): store construction and every violation code
-  (duplicate-identity, invalid-entry, unkeyed-entry, dangling and cyclic
-  supersedes); Gate 1 fail-closed behaviour with `bestCandidate`; a malformed
-  sibling not poisoning an identity; glob and scope applicability; Gate 2
-  shadowing across scopes with the trace kept; redirect-on-stale-hit;
-  suppression reasons; and three invariant sweeps over 200 generated stores —
-  at most one injectable authority per identity, every entry accounted for
-  exactly once, injection never contains a non-authority or two entries for one
-  key, and the injected set never depends on candidate order.
+  totality; render↔parse byte-idempotence with nothing dropped.
+- `resolver.test.ts` (36): store construction and every violation code
+  (duplicate-identity, invalid-entry, unkeyed-entry, dangling, ambiguous and
+  cyclic supersedes); Gate 1 fail-closed behaviour with `bestCandidate`; a
+  malformed sibling not poisoning an identity; glob and scope applicability;
+  Gate 2 shadowing across scopes with the trace kept; redirect-on-stale-hit;
+  suppression reasons; and four invariant sweeps over 200 generated stores — at
+  most one injectable authority per identity, every entry accounted for exactly
+  once, injection never containing a non-authority or two entries for one key,
+  and the injected set never depending on candidate order.
+- `gate.test.ts` (21): uncontested add and file creation; refusal of a rival in
+  the same file **and in a different file** (the three-file bug), with no plan
+  attached; suggestion direction from dates; `conflictId` stability, sensitivity
+  and staleness; every resolution applied, re-parsed and re-resolved — supersede
+  across three files leaves exactly one authority and zero violations,
+  keep-both-flagged leaves a `duplicate-identity` violation and makes the read
+  path go dark, withdraw asserts nothing new, merge needs `mergedBody`, discard
+  writes nothing; amend-vs-rival boundary (same heading amends, a new revision is
+  gated); backwards `asOf` allowed with a warning; required `asOf`; malformed
+  incoming refused with the parser's own issue codes; path allowlist; and the
+  gate/resolver agreement check — a rival the gate accepts never reaches the read
+  path.
 - `index.test.ts` (1): the unfinished extension registers **nothing**, so it
   cannot compete with the live memory extension.
 - Catalog pins in `tests/symlink-manager.test.ts` and count pins in

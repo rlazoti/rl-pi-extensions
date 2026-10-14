@@ -247,17 +247,21 @@ test("resolveIdentity: unknown identity is null, and resolveAll is scan-order in
 
 // ─── Glob and scope applicability ───────────────────────────────────────────
 
-test("globMatches: ** spans segments, * and ? stay inside one, and matching is anchored", () => {
-	assert.equal(globMatches("src/ui/**", "src/ui"), true, "a directory prefix matches");
-	assert.equal(globMatches("src/ui/**", "src/ui/widgets/button.ts"), true);
+test("globMatches: ** spans segments, * and ? stay inside one, no implicit leading **", () => {
+	assert.equal(globMatches("src/ui/**", "src/ui/button.ts"), true);
+	assert.equal(globMatches("src/ui/**", "src/ui/widgets/button.ts"), true, "** spans segments");
 	assert.equal(globMatches("src/ui/**", "src/api/router.ts"), false);
-	assert.equal(globMatches("**/*.test.ts", "a.test.ts"), true, "** may match zero segments");
+	assert.equal(globMatches("src/**/x.ts", "src/x.ts"), true, "** may match zero segments");
+	assert.equal(globMatches("src/ui/**", "src/ui"), false, "a bare directory is not under itself");
+	assert.equal(globMatches("src/ui/**", "src/ui/"), true, "a trailing-slash directory is");
+	assert.equal(globMatches("**/*.test.ts", "a.test.ts"), true);
 	assert.equal(globMatches("**/*.test.ts", "src/deep/nested/x.test.ts"), true);
 	assert.equal(globMatches("**/*.test.ts", "src/deep/x.ts"), false);
 	assert.equal(globMatches("*.ts", "a.ts"), true);
 	assert.equal(globMatches("*.ts", "src/a.ts"), false, "no implicit leading **");
 	assert.equal(globMatches("ui-?.ts", "ui-a.ts"), true);
 	assert.equal(globMatches("ui-?.ts", "ui-ab.ts"), false);
+	assert.equal(globMatches("src/ui/*.ts", "src/ui/a/b.ts"), false, "* does not cross a segment");
 });
 
 test("globMatches treats regex punctuation as literal", () => {
@@ -265,6 +269,16 @@ test("globMatches treats regex punctuation as literal", () => {
 	assert.equal(globMatches("a+b.ts", "aab.ts"), false);
 	assert.equal(globMatches("v1.2/*.ts", "v1x2/x.ts"), false, "dots are literal");
 	assert.equal(globMatches("v1.2/*.ts", "v1.2/x.ts"), true);
+});
+
+test("glob options are pinned so a scope is a matcher, not an ignore file", () => {
+	assert.equal(globMatches(".github/**", ".github/workflows/ci.yml"), true, "dot:true — dotfile paths must not fail silently");
+	assert.equal(globMatches("**", ".hidden/x.ts"), true);
+	assert.equal(globMatches("src/ui/*", "src/ui/.eslintrc"), true);
+	assert.equal(globMatches("!src/**", "src/ui/button.ts"), false, "nonegate — a leading bang is not a negation");
+	assert.equal(globMatches("#notes/**", "src/ui/button.ts"), false, "nocomment — a leading hash is not a comment");
+	assert.equal(globMatches("src/{ui,api}/**", "src/ui/button.ts"), true, "brace expansion, the familiar semantics we chose minimatch for");
+	assert.equal(globMatches("src/**/button.ts", "src/a/b/button.ts"), true);
 });
 
 test("scopeApplies: global always, project only when named, path only when a path matches", () => {

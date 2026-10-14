@@ -21,9 +21,12 @@
  * input order cannot change the result, and nothing here reads a clock.
  */
 
+import { minimatch } from "minimatch";
 import {
 	compareAuthority,
 	identityOf,
+	parseRefs,
+	isSupersedeRef,
 	scopeKey,
 	type EntryScope,
 	type MemoryEntry,
@@ -78,6 +81,7 @@ export type ViolationCode =
 	| "invalid-entry"
 	| "unkeyed-entry"
 	| "dangling-supersedes"
+	| "ambiguous-supersedes"
 	| "supersede-cycle";
 
 export interface Violation {
@@ -91,6 +95,8 @@ export interface Violation {
 
 export interface MemoryStore {
 	entries: MemoryEntry[];
+	/** Parsed topic files, keyed by their memory-bank-relative path. */
+	byPath: Map<string, TopicFile>;
 	byIdentity: Map<string, MemoryEntry[]>;
 	/** assertion key → the identities that claim it. */
 	byKey: Map<string, string[]>;
@@ -155,12 +161,14 @@ export function isWellFormed(entry: MemoryEntry): boolean {
 /** Build a queryable store from parsed topic files. Never throws. */
 export function buildStore(files: TopicFile[]): MemoryStore {
 	const entries: MemoryEntry[] = [];
+	const byPath = new Map<string, TopicFile>();
 	const byIdentity = new Map<string, MemoryEntry[]>();
 	const byKey = new Map<string, string[]>();
 	const unkeyed: MemoryEntry[] = [];
 	const violations: Violation[] = [];
 
 	for (const file of files) {
+		byPath.set(file.path, file);
 		for (const entry of file.entries) {
 			entries.push(entry);
 			const identity = identityOf(entry);
@@ -189,7 +197,7 @@ export function buildStore(files: TopicFile[]): MemoryStore {
 		violations.push(...auditSupersedeChain(group));
 	}
 
-	return { entries, byIdentity, byKey, unkeyed, violations };
+	return { entries, byPath, byIdentity, byKey, unkeyed, violations };
 }
 
 /** Duplicate active claims and error-flagged entries, reported per entry. */
@@ -229,49 +237,94 @@ function auditIdentityGroup(group: MemoryEntry[]): Violation[] {
 	return violations;
 }
 
-/** `supersedes:` must name another heading of the same identity, and must not loop. */
+/**
+ * A `supersedes:` reference must name a sibling claim of the same identity, and
+ * the chain must not loop. References may be qualified `path#heading`, which is
+ * what the gate writes — two topic files can hold the same heading (the exact
+ * shape of the bug this component removes), so an unqualified reference is only
+ * usable when it is unique.
+ */
 function auditSupersedeChain(group: MemoryEntry[]): Violation[] {
 	const violations: Violation[] = [];
-	const byHeading = new Map<string, MemoryEntry>();
-	for (const entry of group) byHeading.set(entry.heading, entry);
+	const byHeading = new Map<string, MemoryEntry[]>();
+	for (const entry of group) {
+		const bucket = byHeading.get(entry.heading);
+		if (bucket) bucket.push(entry);
+		else byHeading.set(entry.heading, [entry]);
+	}
+
+	const resolveRef = (ref: string): { entries: MemoryEntry[]; ambiguous: boolean } => {
+		if (!isSupersedeRef(ref)) return { entries: [], ambiguous: false };
+		const hash = ref.lastIndexOf("#");
+		if (hash >= 0) {
+			const path = ref.slice(0, hash);
+			const heading = ref.slice(hash + 1);
+			return { entries: (byHeading.get(heading) ?? []).filter((entry) => entry.path === path), ambiguous: false };
+		}
+		const found = byHeading.get(ref) ?? [];
+		return { entries: found, ambiguous: found.length > 1 };
+	};
 
 	for (const entry of group) {
-		if (!entry.supersedes) continue;
-		const ref = entry.supersedes;
-		const target = byHeading.get(ref);
-		if (!target) {
-			violations.push({
-				code: "dangling-supersedes",
-				message: `${entry.heading} claims to supersede \`${ref}\`, which is not a heading of any entry sharing its identity.`,
-				path: entry.path,
-				key: entry.key,
-				scope: scopeKey(entry.scope),
-				line: entry.range.start,
-			});
-			continue;
-		}
-
-		const seen = new Set<string>([entry.heading]);
-		let cursor: MemoryEntry | undefined = entry;
-		for (let step = 0; step <= group.length; step++) {
-			const next: MemoryEntry | undefined = cursor?.supersedes ? byHeading.get(cursor.supersedes) : undefined;
-			if (!next) break;
-			if (seen.has(next.heading)) {
+		for (const ref of parseRefs(entry.supersedes ?? "")) {
+			const target = resolveRef(ref);
+			if (target.entries.length === 0) {
 				violations.push({
-					code: "supersede-cycle",
-					message: `The supersede chain from ${entry.heading} loops back through ${next.heading} and cannot be followed.`,
+					code: "dangling-supersedes",
+					message: `${entry.heading} claims to supersede \`${ref}\`, which is not a claim sharing its identity.`,
 					path: entry.path,
 					key: entry.key,
 					scope: scopeKey(entry.scope),
 					line: entry.range.start,
 				});
-				break;
+			} else if (target.ambiguous) {
+				violations.push({
+					code: "ambiguous-supersedes",
+					message: `${entry.heading} supersedes \`${ref}\`, but ${target.entries.length} claims share that heading across files; write the reference as \`path#heading\`.`,
+					path: entry.path,
+					key: entry.key,
+					scope: scopeKey(entry.scope),
+					line: entry.range.start,
+				});
 			}
-			seen.add(next.heading);
-			cursor = next;
+		}
+
+		const cycle = findSupersedeCycle(entry, resolveRef, new Set<string>(), new Set<string>());
+		if (cycle) {
+			violations.push({
+				code: "supersede-cycle",
+				message: `The supersede chain from ${entry.heading} loops back through ${cycle.heading} and cannot be followed.`,
+				path: entry.path,
+				key: entry.key,
+				scope: scopeKey(entry.scope),
+				line: entry.range.start,
+			});
 		}
 	}
 	return violations;
+}
+
+/** Depth-first search for a back-edge: a claim that (transitively) supersedes itself. */
+function findSupersedeCycle(
+	entry: MemoryEntry,
+	resolveRef: (ref: string) => { entries: MemoryEntry[] },
+	inStack: Set<string>,
+	done: Set<string>,
+): MemoryEntry | null {
+	const id = `${entry.path}#${entry.heading}`;
+	if (inStack.has(id)) return entry;
+	if (done.has(id)) return null;
+
+	inStack.add(id);
+	for (const ref of parseRefs(entry.supersedes ?? "")) {
+		for (const next of resolveRef(ref).entries) {
+			const found = findSupersedeCycle(next, resolveRef, inStack, done);
+			if (found) return found;
+		}
+	}
+	inStack.delete(id);
+	done.add(id);
+	return null;
 }
 
 // ─── Gate 1: one authority per identity ─────────────────────────────────────
@@ -324,39 +377,17 @@ export function resolveAll(store: MemoryStore): AuthorityResolution[] {
 // ─── Gate 2: one authority per assertion key in a context ───────────────────
 
 /**
- * Anchored, segment-wise glob: `**` spans any number of segments (including
- * zero), `*` and `?` stay inside one segment. Prefix the pattern with a
- * double-star segment to match anywhere below the root.
+ * Match a project-relative path against a `scope: path:<glob>` pattern.
+ *
+ * Standard minimatch semantics, on purpose: glob edge cases are exactly the kind
+ * of bug that misclassifies a scope silently for weeks. Options are pinned so a
+ * scope pattern behaves as a *matcher* and not as an ignore file — `dot: true`
+ * (paths under `.github/` or `.vscode/` must match `**` rather than quietly
+ * fail), `nonegate` and `nocomment` (a leading `!` or `#` is literal), and
+ * case-sensitive.
  */
 export function globMatches(pattern: string, path: string): boolean {
-	const pat = pattern.split("/").filter((segment) => segment.length > 0 && segment !== ".");
-	const seg = path.split("/").filter((segment) => segment.length > 0 && segment !== ".");
-	return matchSegments(pat, 0, seg, 0);
-}
-
-function matchSegments(pattern: string[], pi: number, path: string[], si: number): boolean {
-	if (pi === pattern.length) return si === path.length;
-	const token = pattern[pi]!;
-	if (token === "**") {
-		for (let skip = si; skip <= path.length; skip++) {
-			if (matchSegments(pattern, pi + 1, path, skip)) return true;
-		}
-		return false;
-	}
-	if (si === path.length) return false;
-	if (!segmentMatches(token, path[si]!)) return false;
-	return matchSegments(pattern, pi + 1, path, si + 1);
-}
-
-function segmentMatches(token: string, segment: string): boolean {
-	let source = "";
-	for (let i = token.length - 1; i >= 0; i--) {
-		const char = token[i]!;
-		if (char === "*") source = "[^/]*" + source;
-		else if (char === "?") source = "[^/]" + source;
-		else source = char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + source;
-	}
-	return new RegExp(`^${source}$`).test(segment);
+	return minimatch(path, pattern, { dot: true, nonegate: true, nocomment: true, nocase: false });
 }
 
 /** Is a scope applicable in this context? Malformed scopes never are. */

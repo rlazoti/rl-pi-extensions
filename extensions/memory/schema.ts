@@ -74,8 +74,12 @@ export interface MemoryEntry {
 	scope: EntryScope;
 	asOf?: string;
 	source?: string;
-	/** Raw `supersedes:` reference (key, optionally @revision). */
+	/** Raw `supersedes:` references: heading, heading@revision, or path#heading,
+	 *  comma-separated when several claims are replaced at once. */
 	supersedes?: string;
+	/** Set on a claim that another claim replaced (`path#heading`), so the
+	 *  tombstone points back at what took over — including across files. */
+	supersededBy?: string;
 	/** Entry text after the metadata block, trimmed. */
 	body: string;
 	/** Fields this schema does not know about, preserved verbatim. */
@@ -101,8 +105,25 @@ const META_PATTERN = /^-\s*([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*)$/;
 const HEADING_PATTERN = /^ {0,3}(#{1,6})\s+(.*\S)\s*$/;
 const FENCE_PATTERN = /^ {0,3}(```|~~~)/;
 
-const KNOWN_FIELDS = ["kind", "scope", "asOf", "source", "supersedes", "status"] as const;
+/** Fields with a named property on {@link MemoryEntry}. */
+const MODELED_FIELDS = ["kind", "scope", "asOf", "source", "supersedes", "supersededBy", "status"] as const;
+/** Fields this schema understands but keeps as free-form provenance. */
+const PROVENANCE_FIELDS = ["amendedFrom", "withdrawnOn", "contestedWith", "resolution"] as const;
+const KNOWN_FIELDS = [...MODELED_FIELDS, ...PROVENANCE_FIELDS];
+
+/** `heading`, `key@revision`, or `path/to/topic.md#heading` for cross-file claims. */
+const REF_PATTERN = /^(?:[a-z0-9][a-z0-9._/-]*\.md#)?[a-z0-9][a-z0-9._-]*(?:@\d{4}-\d{2}-\d{2})?$/;
+
+/** Split a `supersedes:` / `supersededBy:` value into individual references. */
+export function parseRefs(value: string): string[] {
+	return value.split(",").map((ref) => ref.trim()).filter((ref) => ref.length > 0);
+}
+
+export function isSupersedeRef(ref: string): boolean {
+	return REF_PATTERN.test(ref);
+}
 const KNOWN_FIELD_SET = new Set<string>(KNOWN_FIELDS);
+const MODELED_FIELD_SET = new Set<string>(MODELED_FIELDS);
 
 export function isAssertionKey(text: string): boolean {
 	return KEY_PATTERN.test(text);
@@ -390,11 +411,13 @@ function parseEntry(raw: RawEntry, filePath: string): MemoryEntry {
 
 	if (fields.supersedes !== undefined) {
 		entry.supersedes = fields.supersedes;
-		const ref = splitRevision(fields.supersedes);
-		if (!isAssertionKey(ref.key)) {
-			issues.push({ severity: "warning", code: "bad-supersedes", message: `\`supersedes: ${fields.supersedes}\` is not an assertion key.`, key: entry.key, line: raw.startLine });
+		for (const ref of parseRefs(fields.supersedes)) {
+			if (!isSupersedeRef(ref)) {
+				issues.push({ severity: "warning", code: "bad-supersedes", message: `\`supersedes: ${ref}\` must be a heading, a heading with an @revision, or a path#heading reference.`, key: entry.key, line: raw.startLine });
+			}
 		}
 	}
+	if (fields.supersededBy !== undefined) entry.supersededBy = fields.supersededBy;
 
 	for (const name of Object.keys(fields)) {
 		if (!KNOWN_FIELD_SET.has(name)) {
@@ -461,9 +484,13 @@ export function renderEntry(entry: MemoryEntry): string {
 	if (entry.asOf) lines.push(`- asOf: ${entry.asOf}`);
 	if (entry.source) lines.push(`- source: ${entry.source}`);
 	if (entry.supersedes) lines.push(`- supersedes: ${entry.supersedes}`);
+	if (entry.supersededBy) lines.push(`- supersededBy: ${entry.supersededBy}`);
 	lines.push(`- status: ${entry.status}`);
+	// Provenance and anything else this schema does not model, in the order it was
+	// written: the store loses no information it did not decide to lose. Fields
+	// with a named property are excluded here because they were written above.
 	for (const [name, value] of Object.entries(entry.fields)) {
-		if (KNOWN_FIELD_SET.has(name)) continue;
+		if (MODELED_FIELD_SET.has(name)) continue;
 		lines.push(`- ${name}: ${value}`);
 	}
 	if (entry.body) {
