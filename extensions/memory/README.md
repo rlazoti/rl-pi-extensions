@@ -471,6 +471,36 @@ folded into `source:`). **Still judgement calls**: nine `fact`-by-default kinds,
 sections that say "this repo" without naming it, and `git-standards.md` dated
 2026-05-02 by mtime when the rule inside it is older.
 
+## Applying (Phase 5b-2)
+
+`scripts/migrate-apply.mjs --yes [--bank <dir>] [--move "a => b"] [--no-split]`.
+Guardrails, in the order that matters:
+
+- **No `--yes`, no write.** The report script is the review tool; this one is the
+  write tool, and they are separate files so a review cannot become a write by
+  adding a flag from memory.
+- **A dirty plan is not applied at all.** Any collision, refusal or schema
+  rejection aborts before the first byte: half-applying a migration is how a bank
+  ends up with two accounts of itself.
+- **The backup exists before the first write**, and the rollback command is printed
+  before anything changes. If the backup fails, nothing is written.
+- **Verification re-reads the bank from disk**, not the in-memory plan: entries,
+  parse errors, store violations.
+- **Moves are contained but not entry-shaped** (`resolveAnyInBank`): the entry-path
+  rule (markdown, directly under `knowledge/`) guards writes to claims, while a
+  decided file move crosses directories on purpose. Both refuse to leave the bank,
+  and a move refuses an existing target rather than overwriting it.
+
+Applied to the live bank on 2026-10-14: 23 claims from 10 sections across 5 files,
+0 conflicts, 0 collisions, 0 rejected; `knowledge/implementation-plan.md` moved to
+`core/`. Result: 23 entries in 5 stores, 0 parse errors, 0 store violations.
+Backup `~/.pi/backups/memory-2026-10-14T19-14-41.tar.gz`; rollback is
+`tar xzf <that file> -C ~/.pi/memory`. Re-running the dry run on the migrated bank
+proposes **0** entries (everything is already an entry), which is the proof that the
+migration is idempotent rather than merely finished. The live standalone extension
+was left enabled and still reads the migrated bank — verified by real searches that
+find migrated content by title — so the migration did not depend on the cutover.
+
 ## Cutover hazards (Phase 5)
 
 - `~/.pi/agent/extensions/memory` is a **real directory**, not a symlink, so the

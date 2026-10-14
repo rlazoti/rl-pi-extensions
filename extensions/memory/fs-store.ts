@@ -59,6 +59,17 @@ export function resolveInBank(paths: MemoryPaths, file: string): string | null {
 	return absolute;
 }
 
+/**
+ * Resolve any path inside the bank — not only an entry store. Entry-path rules
+ * (markdown, directly under `knowledge/`) guard *writes to claims*; a decided file
+ * move crosses directories on purpose, so it needs containment without the
+ * entry-shape rule. Both still refuse to leave the bank.
+ */
+export function resolveAnyInBank(paths: MemoryPaths, file: string): string | null {
+	if (!file || file.startsWith("/") || file.includes("..")) return null;
+	return path.resolve(paths.root, file);
+}
+
 /** Entry stores are the markdown files directly under `knowledge/`. */
 export function listKnowledgeFiles(paths: MemoryPaths): string[] {
 	let names: string[];
