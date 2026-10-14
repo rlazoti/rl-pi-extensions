@@ -112,7 +112,7 @@ export type GateResult =
 // ─── Decision ───────────────────────────────────────────────────────────────
 
 export function decide(store: MemoryStore, request: WriteRequest): GateResult {
-	const pathProblem = validatePath(request.file);
+	const pathProblem = validateEntryPath(request.file);
 	if (pathProblem) {
 		return { kind: "reject", reason: "bad-file-path", explanation: pathProblem, issues: [] };
 	}
@@ -432,8 +432,12 @@ function buildEntry(request: WriteRequest): MemoryEntry {
 	return entry;
 }
 
-/** The gate writes entry stores; prose files (core/, history/) are not its business. */
-function validatePath(file: string): string | null {
+/**
+ * The gate writes entry stores; prose files (core/, history/) are not its
+ * business. Exported so the filesystem layer applies the *same* rule as the
+ * gate instead of a second copy that can drift.
+ */
+export function validateEntryPath(file: string): string | null {
 	if (!file || file.startsWith("/") || file.includes("..") || file.includes("\\")) {
 		return `file must be a memory-bank-relative path with no ".." (got "${file}")`;
 	}
