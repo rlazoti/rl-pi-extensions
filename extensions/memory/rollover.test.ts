@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { dailyDate, dailyFreshness, isOpenHeading, isSettledHeading, planDailyRollover, renderRolloverNotice } from "./rollover.ts";
+import { dailyDate, dailyFreshness, isSettledHeading, isOpenHeading, planDailyRollover, renderRolloverNotice } from "./rollover.ts";
+import { stampDailyFile } from "./dailyItems.ts";
 
 const TODAY = "2026-10-14";
 
@@ -116,7 +117,7 @@ test("project grouping survives the rollover, and only the open parts of it", ()
 	assert.match(plan.freshText, /## Money Manager/);
 	assert.match(plan.freshText, /## rl-pi-extensions/);
 	// The group is the section heading, so the carried heading does not repeat it.
-	assert.match(plan.freshText, /## rl-pi-extensions\n\n### Handoff \(from 2026-10-12, 2 days old\)/);
+	assert.match(plan.freshText, /## rl-pi-extensions\n\n### Handoff\n\n_\(carried from 2026-10-12 — 2 days old\)_/);
 	assert.equal(plan.freshText.includes("Categories & Tags spec written"), false);
 });
 
@@ -129,16 +130,35 @@ test("a group with no open work is reported rather than dropped", () => {
 test("carried work shows its age, so a stale intention does not read as current", () => {
 	const plan = planDailyRollover({ text: `- date: 2026-10-03\n\n## In Progress\n- verify the simulator\n`, }, TODAY)!;
 	assert.equal(plan.carried[0]!.ageDays, 11);
-	assert.match(plan.freshText, /### In Progress \(from 2026-10-03, 11 days old\)/);
+	assert.match(plan.freshText, /### In Progress\n\n_\(carried from 2026-10-03 — 11 days old\)_/);
 
 	const yesterday = planDailyRollover({ text: `- date: 2026-10-13\n\n## In Progress\n- verify the simulator\n`, }, TODAY)!;
-	assert.match(yesterday.freshText, /### In Progress \(from 2026-10-13\)/);
+	assert.match(yesterday.freshText, /### In Progress\n\n_\(carried from 2026-10-13\)_/);
 });
 
 test("an empty carry is stated, not left as a blank file that looks like nothing happened", () => {
 	const plan = planDailyRollover({ text: `- date: 2026-10-13\n\n## Completed\n- all shipped\n`, }, TODAY)!;
 	assert.match(plan.freshText, /Nothing was carried forward/);
 	assert.match(plan.freshText, /archived/);
+});
+
+test("a file the rollover wrote is still understood by the rollover", () => {
+	const first = planDailyRollover({ text: `- date: 2026-10-13\n\n## Money Manager\n### In Progress\n- verify the simulator\n`, modified: "2026-10-13" }, TODAY)!;
+	assert.match(first.freshText, /## Money Manager/);
+	assert.match(first.freshText, /- \(2026-10-13\) verify the simulator/, "the carry dated the item with the day the file was about");
+
+	// Nothing left to stamp: carrying already did it, and the heading is still a
+	// heading the next pass recognises (the annotation lives in the body).
+	const stamped = stampDailyFile(first.freshText, TODAY, isOpenHeading);
+	assert.equal(stamped.stamped, 0);
+
+	const later = planDailyRollover({ text: first.freshText }, "2026-11-20")!;
+	assert.deepEqual(later.carried, [], "38 days on, the intention ages out of the working file");
+	assert.equal(later.retiredItems.length, 1);
+	assert.match(later.freshText, /Nothing was carried forward/);
+	// No empty shell left behind, and no stack of provenance notes.
+	assert.equal(later.freshText.includes("### In Progress"), false);
+	assert.equal((later.freshText.match(/carried from/g) ?? []).length, 1, "one provenance line, not one per rollover");
 });
 
 test("fenced code inside a section survives the carry intact", () => {

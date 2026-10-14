@@ -23,7 +23,7 @@
  */
 
 import { parseMarkdown, sectionText, type Section } from "./markdown.js";
-import { pruneDailyBody, type DailyItem } from "./dailyItems.js";
+import { isItem, parseDailyItems, pruneDailyBody, type DailyItem } from "./dailyItems.js";
 
 export interface DailyFile {
 	text: string;
@@ -126,7 +126,17 @@ const SETTLED_HEADINGS = new Set([
 ]);
 
 function normalise(heading: string): string {
-	return heading.toLowerCase().replace(/[*`_]/g, "").replace(/\s+/g, " ").replace(/[:–—-]+$/, "").trim();
+	return heading
+		.toLowerCase()
+		.replace(/[*`_]/g, "")
+		// A heading the rollover itself wrote — `Next Steps (from 2026-10-13, 11 days
+		// old)` — must still read as open work on the next pass. Annotation goes in the
+		// body, and tolerance here also covers hand-edited headings.
+		.replace(/\s*\((from|carried|aged)[^)]*\)/g, " ")
+		.replace(/\d{4}-\d{2}-\d{2}/g, " ")
+		.replace(/\s+/g, " ")
+		.replace(/[:–—,\-\s]+$/, "")
+		.trim();
 }
 
 export function isOpenHeading(heading: string): boolean {
@@ -163,6 +173,14 @@ export function dailyFreshness(file: DailyFile, today: string): Freshness {
 	return { date, ageDays, stale: date === null || date.date !== today, needsDate };
 }
 
+/** The provenance line a previous rollover wrote. Stripped before re-rendering, or
+it stacks up one per rollover and the file becomes a game of telephone. */
+const CARRIED_NOTE = /^\s*_?\(carried from .*?\)_?\s*$/;
+
+function stripCarriedNote(body: string): string {
+	return body.split(/\r?\n/).filter((line) => !CARRIED_NOTE.test(line)).join("\n").trim();
+}
+
 interface Classified {
 	node: Section;
 	kind: "open" | "settled" | "group" | "unknown";
@@ -190,9 +208,11 @@ function collectOpen(node: Section, group?: string): Array<{ group?: string; hea
 }
 
 function renderCarried(entry: { group?: string; heading: string; text: string }, from: string, ageDays: number | null): string {
-	const age = ageDays !== null && ageDays >= 2 ? `, ${ageDays} days old` : "";
-	const lines = [entry.group ? `### ${entry.heading} — ${entry.group} (from ${from}${age})` : `### ${entry.heading} (from ${from}${age})`, "", entry.text];
-	return lines.join("\n");
+	// The heading stays a canonical heading: an annotation inside it would stop the
+	// next rollover from recognising its own output. Provenance goes in the body, as
+	// prose rather than a bullet, so it is not mistaken for an item of work.
+	const age = ageDays !== null && ageDays >= 2 ? ` — ${ageDays} days old` : "";
+	return [`### ${entry.heading}`, "", `_(carried from ${from}${age})_`, "", entry.text].join("\n");
 }
 
 /**
@@ -223,7 +243,7 @@ export function planDailyRollover(file: DailyFile, today: string, options: { for
 	const walk = (node: Section, group?: string) => {
 		const classified = classify(node);
 		if (classified.kind === "open") {
-			const body = sectionText(node);
+			const body = stripCarriedNote(sectionText(node));
 			if (body !== "") {
 				// Carried item by item: stamped with the day the file was about (never
 				// today — that would launder old intentions into fresh work), then aged
@@ -231,12 +251,25 @@ export function planDailyRollover(file: DailyFile, today: string, options: { for
 				const pruned = pruneDailyBody(body, today, { retireAfterDays: options.retireAfterDays, maxItems: options.maxItems, stampWith: from.source === "missing" ? today : from.date });
 				for (const item of pruned.retired) retiredItems.push({ section: node.title, item });
 				for (const item of pruned.capped) cappedItems.push({ section: node.title, item });
-				if (pruned.text !== "") carried.push({ group, heading: node.title, text: pruned.text, from: from.source === "missing" ? "undated" : from.date, ageDays: daysBetween(from.date, today), stamped: pruned.stamped });
+				// Prose under an open heading is still open work: a section that says
+				// "run the gate:" with a command block carries even with no bullets.
+				const hadItems = parseDailyItems(body).some(isItem);
+				const keptItems = parseDailyItems(pruned.text).some(isItem);
+				if (keptItems || (pruned.text !== "" && !hadItems)) {
+					carried.push({ group, heading: node.title, text: pruned.text, from: from.source === "missing" ? "undated" : from.date, ageDays: daysBetween(from.date, today), stamped: pruned.stamped });
+				}
+				if (hadItems && !keptItems) {
+					notCarried.push({ heading: node.title, reason: `every open item aged out or went past the carry cap (${pruned.retired.length} aged, ${pruned.capped.length} capped) — they are in the archive, not gone` });
+				}
 			}
 			return;
 		}
 		if (classified.kind === "settled") {
 			notCarried.push({ heading: node.title, reason: "settled work — archived; anything durable belongs in the entry store (memory_write)" });
+			return;
+		}
+		if (classified.kind === "unknown" && node.children.length === 0 && sectionText(node) === "") {
+			notCarried.push({ heading: node.title, reason: "empty section — nothing under it to carry or archive" });
 			return;
 		}
 		if (classified.kind === "unknown" && node.children.length === 0) {
