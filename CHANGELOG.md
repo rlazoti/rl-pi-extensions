@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **tests**: the `test-support` resolve hook maps `@earendil-works/*` to the live Pi install *before* normal resolution. `npm install` also drops a pinned copy in this repo's `node_modules` (that is what `npm run typecheck` resolves types from), and it used to win — so the suite was quietly testing the pinned copy instead of the code Pi runs. A stale copy now loses to the Pi install and is reported on stderr
+- **tests**: `tests/test-harness.test.ts` (6 tests) pins the harness itself: Pi packages resolve to the Pi install, the pi-ai root maps to the compat entrypoint (the resolution rule this repo once got silently wrong), subpaths stay inside the same install, the pinned copy's version must equal the runtime's, a mismatch is reported instead of used, and jiti-style `.js` → `.ts` remapping still works
+- **build**: the three Pi packages are declared as pinned devDependencies (1.2.0) alongside the `*` peer dependencies, so the version the type-check sees is explicit and bumping it is a deliberate act when Pi upgrades
+
 ## [1.3.0] - 2026-10-13
 
 ### Fixed

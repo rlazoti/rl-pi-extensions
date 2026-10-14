@@ -63,6 +63,12 @@ type error never reaches `npm test` — run both before committing. Test files
 import extension sources through `test-support/` resolve hooks, which load the
 real `.ts` files in bare `node --test`.
 
+The three `@earendil-works/*` packages are pinned as devDependencies purely so
+the type-check can resolve them. Tests resolve them from the *live Pi install*
+(`~/.pi/agent/install/releases/<version>`), i.e. the code the extensions
+actually run; `tests/test-harness.test.ts` fails if the pinned copy's version
+drifts from that, so bump the pins whenever Pi upgrades.
+
 ## Architecture
 
 ```
