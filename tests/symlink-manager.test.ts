@@ -4,6 +4,7 @@ import {
 	existsSync,
 	lstatSync,
 	mkdirSync,
+	readdirSync,
 	readlinkSync,
 	rmSync,
 	symlinkSync,
@@ -27,6 +28,29 @@ import {
 
 // Run the real module against a temp extensions dir so the user's
 // ~/.pi/agent/extensions/ is never touched.
+test("catalog lists every loadable extension directory in the monorepo", () => {
+	const root = getMonorepoRoot();
+	const onDisk = readdirSync(join(root, "extensions"))
+		.filter((entry) => entry !== "rl-extensions") // the manager is loaded by package.json, never toggled
+		.filter((entry) => {
+			const dir = join(root, "extensions", entry);
+			return lstatSync(dir).isDirectory() && existsSync(join(dir, "index.ts"));
+		})
+		.sort();
+	const catalog = getAvailableExtensions(root)
+		.map((extension) => extension.name)
+		.sort();
+
+	// The picker only ever offers catalog entries, so an unlisted directory is
+	// silently un-manageable rather than an error.
+	assert.deepEqual(catalog, onDisk, "every extensions/<dir> with an index.ts must be in the catalog");
+
+	for (const extension of getAvailableExtensions(root)) {
+		assert.ok(existsSync(extension.path), `catalog entry ${extension.name} points at a missing directory: ${extension.path}`);
+		assert.ok(extension.description.length > 0, `catalog entry ${extension.name} has no description`);
+	}
+});
+
 test("resolveHomeDir never yields a relative base for the extensions directory", () => {
 	assert.equal(resolveHomeDir("/home/u", "/other"), "/home/u", "an absolute $HOME wins");
 	assert.equal(resolveHomeDir(undefined, "/home/u"), "/home/u", "unset $HOME falls back to os.homedir()");
