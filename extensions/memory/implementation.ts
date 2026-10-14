@@ -19,7 +19,7 @@ import type { ScopeContext } from "./resolver.js";
 import { memoryPaths } from "./fs-store.js";
 import { collisionReport, createService, RESOLUTIONS, type AskFn, type ResolutionChoice, type WriteOutcome } from "./service.js";
 import type { WriteRequest } from "./gate.js";
-import type { Candidate, DoctorReport, KeyReport } from "./service.js";
+import type { Candidate, DailyStatus, DoctorReport, KeyReport } from "./service.js";
 import type { PendingConflict, PendingList } from "./pending.js";
 
 const RESOLUTION_LABELS: Record<string, string> = {
@@ -57,6 +57,24 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 
 	const scopeContext = (ctx: ExtensionContext): ScopeContext => ({ project: basename(ctx.cwd) || undefined });
 
+	// The day changes without asking. A stale daily file is archived and today's is
+	// started with the open work carried forward — and the carry is reported, because
+	// the version of this behaviour that shipped before silently dropped every
+	// heading it did not recognise.
+	pi.on("session_start", (_event, ctx) => {
+		const service = createService(paths);
+		const rollover = service.rollDaily();
+		if (rollover.performed) {
+			ctx.ui.notify(rollover.notice, "info");
+			if (rollover.notCarried > 0) ctx.ui.notify(`memory: ${rollover.notCarried} section(s) were archived without being carried — run /memory daily to see them.`, "info");
+			return;
+		}
+		if (rollover.reason.startsWith("archive ")) ctx.ui.notify(`memory: ${rollover.reason}`, "warning");
+		else if (rollover.status.freshness.needsDate && rollover.status.exists) {
+			ctx.ui.notify(`memory: core/dailyContext.md has no \`- date:\` field; assumed ${rollover.status.freshness.date?.date ?? "today"} from its modification time. Add the field so rollover is exact.`, "warning");
+		}
+	});
+
 	const askFactory = (ctx: ExtensionToolContext | ExtensionContext): AskFn => async (refusal, request) => {
 		if (!ctx.hasUI) return null;
 
@@ -85,7 +103,8 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 		const service = createService(paths);
 		const injection = service.injection(event.prompt, scopeContext(ctx));
 		const queue = service.pending();
-		if (injection.text === "" && queue.conflicts.length === 0 && queue.corrupt.length === 0) return;
+		const daily = service.daily();
+		if (injection.text === "" && queue.conflicts.length === 0 && queue.corrupt.length === 0 && !daily.freshness.stale) return;
 
 		const parts = [injection.text];
 		if (queue.conflicts.length > 0) {
@@ -97,6 +116,10 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 		}
 		if (queue.corrupt.length > 0) {
 			parts.push(`## Memory queue damage\n${queue.corrupt.map((problem) => `- ${problem.file}: ${problem.error}`).join("\n")}`);
+		}
+		if (daily.freshness.stale) {
+			const age = daily.freshness.ageDays ?? "unknown";
+			parts.push(`## Daily context freshness\ncore/dailyContext.md is dated ${daily.freshness.date?.date ?? "unknown"} (${age} day(s) old${daily.freshness.date?.source === "mtime" ? ", dated by file mtime because the file has no date field" : ""}). Unfinished items in it may no longer be true; say so rather than repeating them.`);
 		}
 
 		return { message: { customType: "memory", content: parts.filter((part) => part !== "").join("\n\n"), display: false } };
@@ -196,14 +219,15 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 			const report = service.doctor();
 			const queue = service.pending();
 			const unhealthy = report.violations.length + report.contested.length + report.unreadable.length + report.corruptQueue.length + report.unkeyed.length > 0;
-			return toolResult(`${formatDoctor(report)}\n\n${formatQueue(queue)}`, { report, queue }, unhealthy);
+			const daily = service.daily();
+			return toolResult(`${formatDoctor(report)}\n\n${formatDaily(daily)}\n\n${formatQueue(queue)}`, { report, queue, daily }, unhealthy || daily.freshness.stale);
 		},
 	});
 
 	// ── Command ──────────────────────────────────────────────────────────────
 
 	pi.registerCommand("memory", {
-		description: "Memory store: doctor | pending | resolve <id> | show <key> | files",
+		description: "Memory store: doctor | pending | resolve <id> | show <key> | files | daily",
 		handler: async (args, ctx) => {
 			const service = createService(paths, ctx.hasUI ? { ask: askFactory(ctx) } : {});
 			const [subcommand, ...rest] = args.trim().split(/\s+/);
@@ -211,13 +235,19 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 			switch (subcommand) {
 				case undefined:
 				case "help":
-					return ctx.ui.notify("memory doctor | pending | resolve <id> | show <key> | files", "info");
+					return ctx.ui.notify("memory doctor | pending | resolve <id> | show <key> | files | daily", "info");
 				case "doctor": {
 					const report = service.doctor();
 					return ctx.ui.notify(`${formatDoctor(report)}\n\n${formatQueue(service.pending())}`, report.violations.length > 0 ? "warning" : "info");
 				}
 				case "pending":
 					return ctx.ui.notify(formatQueue(service.pending()), "info");
+				case "daily": {
+					const status = service.daily();
+					const rollover = service.rollDaily();
+					const extra = rollover.performed ? `\n\n${rollover.notice}` : rollover.reason === "the daily file is already current" ? "" : `\n\nNot rolled over: ${rollover.reason}`;
+					return ctx.ui.notify(`${formatDaily(service.daily())}${extra}`, rollover.performed ? "info" : "warning");
+				}
 				case "files":
 					return ctx.ui.notify(service.doctor().files.join("\n") || "no entry stores yet", "info");
 				case "show": {
@@ -235,7 +265,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 					return ctx.ui.notify(formatOutcome(outcome), outcome.kind === "rejected" ? "error" : "info");
 				}
 				default:
-					return ctx.ui.notify(`Unknown subcommand "${subcommand}". Try: doctor | pending | resolve <id> | show <key> | files`, "error");
+					return ctx.ui.notify(`Unknown subcommand "${subcommand}". Try: doctor | pending | resolve <id> | show <key> | files | daily`, "error");
 			}
 		},
 	});
@@ -333,6 +363,14 @@ function formatDoctor(report: DoctorReport): string {
 	if (report.emptyFiles.length > 0) lines.push("", "Stores with no entries:", ...report.emptyFiles.map((file) => `- ${file}`));
 	if (report.contested.length === 0 && report.violations.length === 0 && report.unkeyed.length === 0 && report.unreadable.length === 0) lines.push("", "No structural problems found.");
 	return lines.join("\n");
+}
+
+function formatDaily(status: DailyStatus): string {
+	if (!status.exists) return "Daily context: no core/dailyContext.md yet.";
+	const { date, ageDays, stale, needsDate } = status.freshness;
+	const when = date === null ? "undated" : `${date.date}${date.source === "mtime" ? " (dated by file mtime)" : ""}`;
+	const age = ageDays === null ? "" : ageDays === 0 ? " (today)" : ` (${ageDays} day(s) old)`;
+	return `Daily context: ${when}${age}${stale ? " — stale; it will be archived and carried at the next session start" : ""}${needsDate ? " — add a `- date: YYYY-MM-DD` line so rollover does not have to guess" : ""}.`;
 }
 
 function formatQueue(queue: PendingList): string {

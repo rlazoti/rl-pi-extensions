@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import type { AgentToolResult, ExtensionAPI, ExtensionCommandContext, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import factory from "./index.ts";
@@ -83,8 +83,12 @@ interface Bank {
 	knowledge: string;
 	cleanup: () => void;
 	seed: (files: Record<string, string>) => void;
+	seedAt: (relative: string, content: string) => void;
 	read: (name: string) => string;
+	readAt: (relative: string) => string;
+	existsAt: (relative: string) => boolean;
 	exists: (name: string) => boolean;
+	listAt: (relativeDir: string) => string[];
 	queue: () => string[];
 }
 
@@ -115,6 +119,20 @@ async function withBank<T>(run: (bank: Bank) => T | Promise<T>, options: { colli
 		},
 		seed: (files) => {
 			for (const [name, content] of Object.entries(files)) writeFileSync(join(knowledge, name), content, "utf8");
+		},
+		seedAt: (relative, content) => {
+			const target = join(root, relative);
+			mkdirSync(dirname(target), { recursive: true });
+			writeFileSync(target, content, "utf8");
+		},
+		readAt: (relative) => readFileSync(join(root, relative), "utf8"),
+		existsAt: (relative) => existsSync(join(root, relative)),
+		listAt: (relativeDir) => {
+			try {
+				return readdirSync(join(root, relativeDir));
+			} catch {
+				return [];
+			}
 		},
 		read: (name) => readFileSync(join(knowledge, name), "utf8"),
 		exists: (name) => {
@@ -180,7 +198,7 @@ test("the extension registers its tools, its command and the injection hook", as
 		factory(pi);
 		assert.deepEqual([...harness.tools.keys()].sort(), ["memory_doctor", "memory_search", "memory_show", "memory_write"]);
 		assert.deepEqual([...harness.commands.keys()], ["memory"]);
-		assert.deepEqual([...harness.hooks.keys()], ["before_agent_start"]);
+		assert.deepEqual([...harness.hooks.keys()], ["session_start", "before_agent_start"], "session_start owns the daily rollover");
 	}));
 
 test("it stands down when another memory extension is loaded, and says why", async () =>
@@ -199,6 +217,86 @@ test("it stands down when another memory extension is loaded, and says why", asy
 		assert.equal(notices[0]!.level, "warning");
 		assert.match(notices[0]!.message, /standing down — another memory extension is loaded at .*extensions\/memory/);
 	}, { collision: true }));
+
+// ─── daily rollover ─────────────────────────────────────────────────────────
+
+const TODAY_ISO = new Date().toISOString().slice(0, 10);
+const STALE_DAILY = `- date: 2026-10-03
+
+## In Progress
+- verify the simulator build
+
+## Completed
+- wrote the spec
+`;
+
+function notifyingContext(): { ctx: ExtensionToolContext; notices: Array<{ message: string; level?: string }> } {
+	const notices: Array<{ message: string; level?: string }> = [];
+	const ctx = { hasUI: true, mode: "tui", cwd: "/repo/rl-pi-extensions", ui: { notify: (message: string, level?: string) => notices.push({ message, level }) } } as unknown as ExtensionToolContext;
+	return { ctx, notices };
+}
+
+test("session_start archives a stale daily file and carries open work into today", async () =>
+	withBank((bank) => {
+		bank.seedAt("core/dailyContext.md", STALE_DAILY);
+		const { pi, harness } = fakePi();
+		factory(pi);
+
+		const { ctx, notices } = notifyingContext();
+		harness.hooks.get("session_start")!({ type: "session_start" }, ctx);
+
+		assert.ok(bank.existsAt("history/daily/2026-10/2026-10-03-dailyContext.md"), "yesterday's file is kept as a record");
+		assert.equal(bank.readAt("history/daily/2026-10/2026-10-03-dailyContext.md"), STALE_DAILY, "archived verbatim");
+		const fresh = bank.readAt("core/dailyContext.md");
+		assert.match(fresh, /^- date: /m);
+		assert.match(fresh, new RegExp(`# Daily Context — ${TODAY_ISO}`));
+		assert.match(fresh, /verify the simulator build/);
+		assert.equal(fresh.includes("wrote the spec"), false, "settled work is archived, not carried");
+		assert.match(notices[0]!.message, /Rolled over daily context from 2026-10-03/);
+		assert.match(notices.map((notice) => notice.message).join(" "), /archived without being carried/);
+	}));
+
+test("an undated daily file is reported rather than assumed current forever", async () =>
+	withBank((bank) => {
+		bank.seedAt("core/dailyContext.md", "# Daily Context - Some Project\n\n## Completed\n- old work\n");
+		const { pi, harness } = fakePi();
+		factory(pi);
+		const { ctx, notices } = notifyingContext();
+		harness.hooks.get("session_start")!({ type: "session_start" }, ctx);
+
+		// A file with no date field that was *just* touched is almost certainly
+		// today's, so it is not archived — it is reported, with the fix spelled out.
+		assert.deepEqual(bank.listAt("history/daily"), []);
+		assert.equal(notices.length, 1);
+		assert.equal(notices[0]!.level, "warning");
+		assert.match(notices[0]!.message, /has no `- date:` field/);
+		assert.match(notices[0]!.message, /assumed .* from its modification time/);
+	}));
+
+test("a stale daily file is surfaced in the prompt even when the store has nothing to say", async () =>
+	withBank(async (bank) => {
+		bank.seedAt("core/dailyContext.md", STALE_DAILY);
+		const { pi, harness } = fakePi();
+		factory(pi);
+
+		const result = (await harness.hooks.get("before_agent_start")!({ type: "before_agent_start", prompt: "what should I work on?" }, fakeContext().ctx as never)) as { message: { content: string } };
+		assert.match(result.message.content, /Daily context freshness/);
+		assert.match(result.message.content, /2026-10-03/);
+	}));
+
+test("/memory daily reports the daily file and rolls it over on demand", async () =>
+	withBank(async (bank) => {
+		bank.seedAt("core/dailyContext.md", STALE_DAILY);
+		const { pi, harness } = fakePi();
+		factory(pi);
+
+		const { ctx, notices } = notifyingContext();
+		await harness.commands.get("memory")!.handler("daily", ctx as never);
+		const messages = notices.map((notice) => notice.message).join(" ");
+		assert.match(messages, new RegExp(`Daily context: ${TODAY_ISO}`), "after the rollover the file is current");
+		assert.match(messages, /Rolled over daily context from 2026-10-03/);
+		assert.ok(bank.existsAt("history/daily/2026-10/2026-10-03-dailyContext.md"));
+	}));
 
 // ─── memory_write ───────────────────────────────────────────────────────────
 

@@ -308,6 +308,22 @@ dismissal, a timeout or no UI at all parks the refusal in the pending queue.
 | `applyEdits(paths, edits)` | Write the gate's rendered bytes, temp-file + rename, refusing anything outside the bank. |
 | `foreignMemoryExtension(paths)` | The single-instance guard's check. |
 
+### `markdown.ts`
+
+One section parser for the whole component — the migration and the rollover read the
+same structure, and a second parser is how one format grows two meanings. Fenced
+blocks are content, never structure; `sectionText` re-renders a section with
+everything nested under it.
+
+### `rollover.ts`
+
+| Export | Purpose |
+|---|---|
+| `dailyDate` / `dailyFreshness` | What day a daily file claims to be (`- date:` field, then a heading date, then file mtime as labelled evidence), how old it is, and whether it needs a date field. |
+| `planDailyRollover(file, today, { force })` | The archive path, the archive text (byte-identical), the fresh file, what was carried and with what age, and everything not carried with a reason. `force` is for a file whose mtime is today while its content is not — a human says so, the code never infers it. |
+| `isOpenHeading` / `isSettledHeading` | Normalised alias sets, so carrying depends on meaning rather than on one exact heading. |
+| `renderRolloverNotice` | The one-paragraph notice a session prints, including what did not make it. |
+
 ### `migrate.ts`
 
 | Export | Purpose |
@@ -502,6 +518,48 @@ migration is idempotent rather than merely finished. The live standalone extensi
 was left enabled and still reads the migrated bank — verified by real searches that
 find migrated content by title — so the migration did not depend on the cutover.
 
+## Daily rollover (Phase 6)
+
+The daily working file (`core/dailyContext.md`) is the part of the bank that ages
+fastest, and the shipped rollover was quietly broken in three ways, all silent:
+
+1. **The archive never fired.** It read the date from an optional heading matching
+   `YYYY-MM-DD`; the real file had none, so the code concluded it was current forever.
+   Measured on the live bank: `history/daily/` held **zero archives since May**, while
+   one daily file accumulated weeks of two projects under a title naming only one.
+2. **Carry-forward was an exact heading match** (`Context for Tomorrow`). Every
+   heading an agent actually writes — `Next Steps`, `In Progress`, `Handoff` — was
+   dropped with no report.
+3. **It wrote a shape agents do not use** (`## <date>` + `### Current Session`), so
+   scaffolding and content drifted apart immediately.
+
+The rules now: a **missing date is a defect to report**, never a reason to do nothing
+(an undated file is normalised in one pass and gets a real `- date:` field); open work
+is carried **by meaning** across a normalised set of aliases, with no prefix matching
+(`Carried away from home` is not `Carried Forward`); settled work is **not** carried,
+and the reason is stated — anything durable belongs in the entry store, which is what
+the gate and authority machinery are for; an **unrecognised heading is named**, with
+the alternatives offered, rather than dropped; **project grouping survives**, with
+only the open parts of each project carried, which is what stops one project's title
+from speaking for another; carried work shows **the day it came from** (`from
+2026-10-03, 11 days old`), because an intention that is eleven days old should look
+eleven days old; and an archive is written **byte for byte, never overwritten** — a
+collision stops the rollover instead of rewriting a record.
+
+It runs at `session_start` (with the notice surfaced in the UI), on demand via
+`/memory daily`, and as an operator command via `scripts/daily-rollover.mjs`
+(`--force` for the case no date check can see: content from earlier days, touched
+today). A stale daily file is also injected as a standing caveat, so a model reading
+a three-day-old intention is told it is three days old instead of being handed it as
+current fact.
+
+**Open, and honestly open:** carrying is at *section* level, so a `Next Steps` list
+whose items are individually stale survives as a block. Rehearsing on the live bank
+carried 13 intentions, most of them already finished — better than dropping them, not
+yet right. The fix is item-level provenance: stamp the day on each open item, then age
+and retire per item (and cap what gets carried). That is a change to how daily items
+are written, not just how they are carried, so it is a decision rather than a patch.
+
 ## Cutover (Phase 5c) — performed 2026-10-14
 
 - `~/.pi/agent/extensions/memory` was a **real directory**, not a symlink, so the
@@ -538,11 +596,11 @@ find migrated content by title — so the migration did not depend on the cutove
 | 5a | tools, `/memory`, injection hook, pending queue, single-instance guard | ✅ `implementation.ts` `service.ts` `pending.ts` `fs-store.ts` |
 | 5b-1 | migration tooling + dry run of the live bank | ✅ `migrate.ts` `scripts/migrate-report.mjs` |
 | 5b-2 | apply the migration + cutover of the live extension | ⬜ (decisions taken; needs the go-ahead) |
-| 6 | daily-rollover fixes (archive never fires, `Carried Forward` vs `Context for Tomorrow`) | ⬜ |
+| 6 | daily rollover: archive, reported carry, dated header, staleness | ✅ `rollover.ts` `markdown.ts` — open: per-item ageing (see § Daily rollover) |
 
 ## Testing map
 
-197 tests in `extensions/memory/`:
+222 tests in `extensions/memory/`:
 
 - `schema.test.ts` (31): grammar and scope parsing; metadata vs body boundaries;
   fenced `##` is body; CRLF; unclosed fence; legacy prose headings flagged
@@ -593,6 +651,7 @@ find migrated content by title — so the migration did not depend on the cutove
   the gate; re-refusing one contest updates one record; unreadable queue files are
   reported rather than guessed at; ids are validated before reaching the
   filesystem; the queue is oldest-first.
+- `rollover.test.ts` (16): rollover happens exactly when the day changed and not when it did not; date-field precedence; mtime recovery labelled as such; an undated file normalised instead of sitting undated forever; alias recognition for open work (`Next Steps` / `Handoff` / `Blocked` / `Todo` …) with no prefix matching; settled work reported rather than carried; unrecognised headings named with the alternatives offered; project groups preserved with only their open parts; a group with nothing open reported; age markers so a carried intention looks as old as it is; nothing-carried stated out loud; fenced code preserved; archives byte-identical; no churn on a second pass; undated archive naming.
 - `migrate.test.ts` (27): proposals and their cues; what is skipped and why (structural headings matched whole, status snapshots, non-`knowledge/` paths, bodyless sections, `## Source` folded into provenance); split families, qualifier merging, fence attachment, per-claim `kind`, placeholder-degrading keys, `similar-claim`; already-entry skip and the broken-entry report; prose consumption with hand-written claims preserved and a colliding proposal stopped; batch collisions; determinism and re-application idempotence; the report's own text.
 - `service.test.ts` (19): write / resolveQueued / show / search / injection /
   doctor against a scratch bank — a parked refusal leaves the bank byte-identical;

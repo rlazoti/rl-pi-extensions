@@ -21,6 +21,7 @@
 import { isAssertionKey, parseTopicFile, renderTopicFile, type EntryKind, type EntryScope, type ParseIssue, type TopicFile } from "./schema.js";
 import { decide, type FileEdit, type WriteRequest } from "./gate.js";
 import { buildStore, type MemoryStore } from "./resolver.js";
+import { parseMarkdown, sectionText } from "./markdown.js";
 
 export interface SourceFile {
 	/** Memory-bank-relative path, e.g. "knowledge/git-standards.md". */
@@ -146,48 +147,6 @@ function slug(value: string, max = 48): string {
 function topicOf(sourceFile: string): string {
 	const match = TOPIC.exec(sourceFile);
 	return match ? slug(match[1]!) : slug(sourceFile.replace(/[^a-z0-9]+/g, "-"));
-}
-
-/** Parse `## heading` sections; fenced blocks are body text, not structure. */
-interface Section {
-	heading: string;
-	level: number;
-	body: string;
-	lines: string[];
-}
-
-function sections(text: string): { preamble: string[]; sections: Section[] } {
-	const lines = text.split(/\r?\n/);
-	const preamble: string[] = [];
-	const found: Section[] = [];
-	let current: Section | null = null;
-	let fence: string | null = null;
-
-	for (const line of lines) {
-		const fenceMatch = /^\s{0,3}(```|~~~)/.exec(line);
-		if (fenceMatch) {
-			const marker = fenceMatch[1]!;
-			if (fence === null) fence = marker;
-			else if (fence === marker) fence = null;
-			if (current) current.lines.push(line);
-			else preamble.push(line);
-			continue;
-		}
-		const heading = fence === null ? /^\s{0,3}(#{1,6})\s+(.*\S)\s*$/.exec(line) : null;
-		if (heading) {
-			const level = heading[1]!.length;
-			const title = heading[2]!.trim();
-			if (level === 1) continue;
-			current = { heading: title, level, body: "", lines: [] };
-			found.push(current);
-			continue;
-		}
-		if (current) current.lines.push(line);
-		else preamble.push(line);
-	}
-
-	for (const section of found) section.body = section.lines.join("\n").trim();
-	return { preamble, sections: found };
 }
 
 /**
@@ -359,12 +318,15 @@ export function proposeMigration(sources: readonly SourceFile[], options: Migrat
 			continue;
 		}
 
-		const parsed = sections(file.text);
+		const parsed = parseMarkdown(file.text);
+		// One shared markdown parser for the component; a section's body includes
+		// anything nested under it, as it did before.
+		const flat: Array<{ heading: string; level: number; body: string }> = parsed.nodes.map((node) => ({ heading: node.title, level: node.level, body: sectionText(node) }));
 		if (parsed.preamble.join("\n").trim() !== "") preambles.push({ sourceFile: file.path, lines: parsed.preamble.filter((line) => line.trim() !== "").length });
 
 		// A `## Source` section is provenance, not an assertion: fold it into the
 		// entries' source: field instead of creating a claim about it.
-		const attributionSection = parsed.sections.find((section) => ATTRIBUTION_HEADINGS.test(section.heading));
+		const attributionSection = flat.find((section) => ATTRIBUTION_HEADINGS.test(section.heading));
 		if (attributionSection) {
 			attribution.push({ sourceFile: file.path, text: attributionSection.body.replace(/\s+/g, " ").trim() });
 			skippedSections.push({ sourceFile: file.path, heading: attributionSection.heading, reason: "provenance — folded into the entries' source: field rather than becoming a claim about attribution" });
@@ -375,7 +337,7 @@ export function proposeMigration(sources: readonly SourceFile[], options: Migrat
 		const targetFile = `knowledge/${topic}.md`;
 		const asOf = file.modified ?? "unknown";
 
-		for (const section of parsed.sections) {
+		for (const section of flat) {
 			if (ATTRIBUTION_HEADINGS.test(section.heading)) continue;
 
 			// A heading that is already an assertion key is a migrated claim, not

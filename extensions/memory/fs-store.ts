@@ -120,6 +120,56 @@ export function loadKnowledgeStore(paths: MemoryPaths): LoadedStore {
 	return { store: buildStore(files), raw, unreadable };
 }
 
+export interface BankFile {
+	text: string;
+	/** Day the file last changed (YYYY-MM-DD). Used only when the file does not say
+	 * what day it is about — and only as evidence, labelled as such. */
+	modified?: string;
+}
+
+/** Read any file inside the bank, not only an entry store. */
+export function readBankFile(paths: MemoryPaths, file: string): BankFile | null {
+	const absolute = resolveAnyInBank(paths, file);
+	if (absolute === null) return null;
+	try {
+		const text = fs.readFileSync(absolute, "utf8");
+		let modified: string | undefined;
+		try {
+			modified = fs.statSync(absolute).mtime.toISOString().slice(0, 10);
+		} catch {
+			modified = undefined;
+		}
+		return { text, modified };
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Write any file inside the bank (archives, daily context). Same discipline as
+ * applyEdits: write beside, then rename, and never leave a temp file behind.
+ * `noOverwrite` is for archives, which are records: a record is never rewritten.
+ */
+export function writeBankFile(paths: MemoryPaths, file: string, content: string, options: { noOverwrite?: boolean } = {}): string | null {
+	const absolute = resolveAnyInBank(paths, file);
+	if (absolute === null) return null;
+	if (options.noOverwrite === true && fs.existsSync(absolute)) return null;
+	fs.mkdirSync(path.dirname(absolute), { recursive: true });
+	const temporary = `${absolute}.tmp-${process.pid}-${Date.now()}`;
+	try {
+		fs.writeFileSync(temporary, content, "utf8");
+		fs.renameSync(temporary, absolute);
+	} catch (error) {
+		try {
+			fs.rmSync(temporary, { force: true });
+		} catch {
+			/* the temp file may not exist */
+		}
+		throw error;
+	}
+	return file;
+}
+
 /**
  * Write exactly what the gate rendered — byte for byte. This function does not
  * re-render, re-order or re-validate entries: the rendered text *is* the

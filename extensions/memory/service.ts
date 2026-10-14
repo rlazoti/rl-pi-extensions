@@ -11,7 +11,8 @@
  * so the write goes through.
  */
 
-import { applyEdits, foreignMemoryExtension, listKnowledgeFiles, loadKnowledgeStore, type LoadedStore, type MemoryPaths } from "./fs-store.js";
+import { applyEdits, foreignMemoryExtension, listKnowledgeFiles, loadKnowledgeStore, readBankFile, writeBankFile, type LoadedStore, type MemoryPaths } from "./fs-store.js";
+import { dailyFreshness, planDailyRollover, renderRolloverNotice, type Freshness } from "./rollover.js";
 import { decide, RESOLUTIONS, type ConflictRefusal, type GateResult, type Resolution, type WriteRequest } from "./gate.js";
 import { inject, recall, type Candidate, type Injection } from "./inject.js";
 import { deleteConflict, listConflicts, loadConflict, renderConflict, saveConflict, type PendingConflict, type PendingList } from "./pending.js";
@@ -73,7 +74,23 @@ export interface MemoryService {
 	injection(prompt: string, context: ScopeContext): Injection;
 	doctor(): DoctorReport;
 	pending(): PendingList;
+	/** The daily working file: what day it claims to be, and whether that is today. */
+	daily(): DailyStatus;
+	/** Archive a stale daily file, start today's, and carry open work forward. */
+	rollDaily(options?: { force?: boolean }): DailyRolloverOutcome;
 }
+
+export interface DailyStatus {
+	path: string;
+	exists: boolean;
+	freshness: Freshness;
+}
+
+export type DailyRolloverOutcome =
+	| { performed: false; reason: string; status: DailyStatus }
+	| { performed: true; notice: string; archivePath: string; carried: number; notCarried: number; status: DailyStatus };
+
+const DAILY_FILE = "core/dailyContext.md";
 
 export interface ServiceOptions {
 	/** Absent in print/json/rpc: nothing can be asked, so refusals are parked. */
@@ -84,6 +101,12 @@ export interface ServiceOptions {
 
 export function createService(paths: MemoryPaths, options: ServiceOptions = {}): MemoryService {
 	const now = options.now ?? (() => new Date().toISOString());
+
+	const dailyStatus = (): DailyStatus => {
+		const file = readBankFile(paths, DAILY_FILE);
+		if (file === null || file.text.trim() === "") return { path: DAILY_FILE, exists: false, freshness: { date: null, ageDays: null, stale: false, needsDate: false } };
+		return { path: DAILY_FILE, exists: true, freshness: dailyFreshness(file, now().slice(0, 10)) };
+	};
 
 	const writePlan = (result: Extract<GateResult, { kind: "plan" }>): WriteOutcome => {
 		const files = applyEdits(paths, result.plan.files);
@@ -209,7 +232,26 @@ export function createService(paths: MemoryPaths, options: ServiceOptions = {}):
 			return inject(loadKnowledgeStore(paths).store, { query: prompt, context });
 		},
 
-		doctor() {
+		daily() {
+		return dailyStatus();
+	},
+
+	rollDaily(options: { force?: boolean } = {}) {
+		const status = dailyStatus();
+		const file = readBankFile(paths, DAILY_FILE);
+		if (file === null || file.text.trim() === "") return { performed: false, reason: "no daily context file yet", status };
+		const plan = planDailyRollover(file, now().slice(0, 10), options);
+		if (plan === null) return { performed: false, reason: "the daily file is already current", status };
+		// An archive is a record, never a draft: a collision means a rollover for that
+		// day already happened, so stop and say so instead of overwriting history.
+		if (writeBankFile(paths, plan.archivePath, plan.archiveText, { noOverwrite: true }) === null) {
+			return { performed: false, reason: `archive ${plan.archivePath} already exists — refusing to overwrite a record`, status };
+		}
+		writeBankFile(paths, DAILY_FILE, plan.freshText);
+		return { performed: true, notice: renderRolloverNotice(plan), archivePath: plan.archivePath, carried: plan.carried.length, notCarried: plan.notCarried.length, status: dailyStatus() };
+	},
+
+	doctor() {
 			const loaded = loadKnowledgeStore(paths);
 			const queue = listConflicts(paths);
 			const byStatus: Record<EntryStatus, number> = { active: 0, superseded: 0, withdrawn: 0 };

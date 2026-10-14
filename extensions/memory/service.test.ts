@@ -356,6 +356,59 @@ test("injection says nothing when there is nothing to say", async () => {
 	}
 });
 
+test("rollDaily archives a stale daily file, carries open work, and never overwrites a record", () => {
+	const paths = scratch();
+	const root = paths.root;
+	const service = createService(paths, { now: () => "2026-10-14T09:00:00.000Z" });
+	mkdirSync(join(root, "core"), { recursive: true });
+	try {
+	writeFileSync(join(root, "core", "dailyContext.md"), `- date: 2026-10-11\n\n## Next Steps\n- push when approved\n\n## Completed\n- shipped it\n`, "utf8");
+	const outcome = service.rollDaily();
+	assert.equal(outcome.performed, true);
+	if (outcome.performed) {
+		assert.equal(outcome.carried, 1);
+		assert.equal(outcome.notCarried, 1);
+		assert.match(outcome.notice, /archived to history\/daily\/2026-10\/2026-10-11-dailyContext\.md/);
+	}
+	assert.match(readFileSync(join(root, "core", "dailyContext.md"), "utf8"), /push when approved/);
+	assert.equal(readFileSync(join(root, "history", "daily", "2026-10", "2026-10-11-dailyContext.md"), "utf8").includes("shipped it"), true, "the settled work stays in the record");
+
+	// Same day again: nothing to do, and the archive is not rewritten.
+	const again = service.rollDaily();
+	assert.equal(again.performed, false);
+	if (!again.performed) assert.equal(again.reason, "the daily file is already current");
+
+	// A forced rollover of a same-day file is allowed, because the date check cannot
+	// see a file whose content is old while its mtime is new — but only when a human
+	// says so.
+	const forced = service.rollDaily({ force: true });
+	assert.equal(forced.performed, true);
+	if (forced.performed) assert.match(forced.archivePath, /2026-10-14-dailyContext\.md$/);
+	const attemptedTwice = service.rollDaily({ force: true });
+	assert.equal(attemptedTwice.performed, false);
+	if (!attemptedTwice.performed) assert.match(attemptedTwice.reason, /refusing to overwrite a record/);
+	} finally {
+		paths.cleanup();
+	}
+});
+
+test("daily() reports an undated file as dated by mtime and needing a date field", () => {
+	const paths = scratch();
+	const root = paths.root;
+	const service = createService(paths, { now: () => "2026-10-14T09:00:00.000Z" });
+	mkdirSync(join(root, "core"), { recursive: true });
+	try {
+	writeFileSync(join(root, "core", "dailyContext.md"), "# Daily Context\n\n## In Progress\n- still going\n", "utf8");
+
+	const status = service.daily();
+	assert.equal(status.exists, true);
+	assert.equal(status.freshness.needsDate, true);
+	assert.equal(status.freshness.stale, false, "touched today, so treated as current — but reported");
+	} finally {
+		paths.cleanup();
+	}
+});
+
 test("doctor reports the bank as it actually is", async () => {
 	const paths = scratch();
 	try {
