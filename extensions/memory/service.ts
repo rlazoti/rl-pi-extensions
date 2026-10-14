@@ -12,7 +12,8 @@
  */
 
 import { applyEdits, foreignMemoryExtension, listKnowledgeFiles, loadKnowledgeStore, readBankFile, writeBankFile, type LoadedStore, type MemoryPaths } from "./fs-store.js";
-import { dailyFreshness, planDailyRollover, renderRolloverNotice, type Freshness } from "./rollover.js";
+import { dailyDate, dailyFreshness, isOpenHeading, planDailyRollover, renderRolloverNotice, type Freshness } from "./rollover.js";
+import { stampDailyFile } from "./dailyItems.js";
 import { decide, RESOLUTIONS, type ConflictRefusal, type GateResult, type Resolution, type WriteRequest } from "./gate.js";
 import { inject, recall, type Candidate, type Injection } from "./inject.js";
 import { deleteConflict, listConflicts, loadConflict, renderConflict, saveConflict, type PendingConflict, type PendingList } from "./pending.js";
@@ -77,7 +78,9 @@ export interface MemoryService {
 	/** The daily working file: what day it claims to be, and whether that is today. */
 	daily(): DailyStatus;
 	/** Archive a stale daily file, start today's, and carry open work forward. */
-	rollDaily(options?: { force?: boolean }): DailyRolloverOutcome;
+	/** Give undated open items the day the file is about, so they can age later. */
+	stampDaily(): { stamped: number; date: string };
+	rollDaily(options?: { force?: boolean; retireAfterDays?: number; maxItems?: number }): DailyRolloverOutcome;
 }
 
 export interface DailyStatus {
@@ -236,7 +239,18 @@ export function createService(paths: MemoryPaths, options: ServiceOptions = {}):
 		return dailyStatus();
 	},
 
-	rollDaily(options: { force?: boolean } = {}) {
+	stampDaily() {
+		const file = readBankFile(paths, DAILY_FILE);
+		const today = now().slice(0, 10);
+		if (file === null || file.text.trim() === "") return { stamped: 0, date: today };
+		const date = dailyDate(file)?.date ?? file.modified ?? today;
+		const stampedFile = stampDailyFile(file.text, date, isOpenHeading);
+		if (stampedFile.stamped === 0) return { stamped: 0, date };
+		writeBankFile(paths, DAILY_FILE, stampedFile.text);
+		return { stamped: stampedFile.stamped, date };
+	},
+
+	rollDaily(options: { force?: boolean; retireAfterDays?: number; maxItems?: number } = {}) {
 		const status = dailyStatus();
 		const file = readBankFile(paths, DAILY_FILE);
 		if (file === null || file.text.trim() === "") return { performed: false, reason: "no daily context file yet", status };

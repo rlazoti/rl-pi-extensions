@@ -63,7 +63,15 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 	// heading it did not recognise.
 	pi.on("session_start", (_event, ctx) => {
 		const service = createService(paths);
+		// Rollover first, so the archive records the file as it was written. Carrying
+		// already dates the items it carries. Stamping the live file is only for the
+		// case where nothing rolled over: an undated item can never be aged, so it
+		// would be carried forever.
 		const rollover = service.rollDaily();
+		if (!rollover.performed) {
+			const stamped = service.stampDaily();
+			if (stamped.stamped > 0) ctx.ui.notify(`memory: dated ${stamped.stamped} open item(s) in core/dailyContext.md (${stamped.date}) so they can age in a later rollover.`, "info");
+		}
 		if (rollover.performed) {
 			ctx.ui.notify(rollover.notice, "info");
 			if (rollover.notCarried > 0) ctx.ui.notify(`memory: ${rollover.notCarried} section(s) were archived without being carried — run /memory daily to see them.`, "info");

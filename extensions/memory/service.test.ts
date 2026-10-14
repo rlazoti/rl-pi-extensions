@@ -392,6 +392,25 @@ test("rollDaily archives a stale daily file, carries open work, and never overwr
 	}
 });
 
+test("stampDaily dates undated open items and leaves settled work alone", () => {
+	const paths = scratch();
+	const root = paths.root;
+	const service = createService(paths, { now: () => "2026-10-14T09:00:00.000Z" });
+	mkdirSync(join(root, "core"), { recursive: true });
+	try {
+		writeFileSync(join(root, "core", "dailyContext.md"), `- date: 2026-10-14\n\n## Next Steps\n- verify the simulator\n\n## Completed\n- shipped it\n`, "utf8");
+		const stamped = service.stampDaily();
+		assert.deepEqual(stamped, { stamped: 1, date: "2026-10-14" });
+		const text = readFileSync(join(root, "core", "dailyContext.md"), "utf8");
+		assert.match(text, /- \(2026-10-14\) verify the simulator/);
+		assert.match(text, /## Completed\n- shipped it/, "settled work is not turned into a dated task");
+		// Idempotent: a second pass has nothing to do.
+		assert.deepEqual(service.stampDaily(), { stamped: 0, date: "2026-10-14" });
+	} finally {
+		paths.cleanup();
+	}
+});
+
 test("daily() reports an undated file as dated by mtime and needing a date field", () => {
 	const paths = scratch();
 	const root = paths.root;

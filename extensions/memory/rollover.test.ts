@@ -149,6 +149,34 @@ test("fenced code inside a section survives the carry intact", () => {
 	assert.match(plan.freshText, /npm run typecheck/);
 });
 
+test("items past the retirement window stop being carried, and the notice counts them", () => {
+	const text = `- date: 2026-10-13\n\n## Next Steps\n- (2025-01-01) an intention from last year\n- (2026-10-12) a current one\n`;
+	const plan = planDailyRollover({ text }, TODAY, { retireAfterDays: 21 })!;
+	assert.match(plan.freshText, /a current one/);
+	assert.equal(plan.freshText.includes("an intention from last year"), false);
+	assert.equal(plan.retiredItems.length, 1);
+	assert.match(renderRolloverNotice(plan), /1 item\(s\) aged out and 0 beyond the carry cap — all still in the archive/);
+});
+
+test("the carry cap is per section, and the overflow is named rather than lost", () => {
+	const many = Array.from({ length: 5 }, (_, index) => `- (2026-10-1${index}) item ${index + 1}`).join("\n");
+	const plan = planDailyRollover({ text: `- date: 2026-10-13\n\n## Next Steps\n${many}\n` }, TODAY, { maxItems: 2 })!;
+	assert.equal(plan.cappedItems.length, 3);
+	assert.match(plan.freshText, /item 5/);
+	assert.equal(plan.freshText.includes("item 1"), false);
+});
+
+test("carried items are dated by the day the file was about, so the next rollover can age them", () => {
+	const first = planDailyRollover({ text: `- date: 2026-10-13\n\n## In Progress\n- verify the simulator\n` }, TODAY)!;
+	assert.equal(first.stamped, 1);
+	assert.match(first.freshText, /- \(2026-10-13\) verify the simulator/);
+
+	// A month later the same item, still undated when it was written, is now aged.
+	const later = planDailyRollover({ text: first.freshText }, "2026-12-01", { retireAfterDays: 30 })!;
+	assert.equal(later.retiredItems.length, 1);
+	assert.equal(later.freshText.includes("verify the simulator"), false);
+});
+
 test("the notice says where the archive went and what did not make it", () => {
 	const plan = planDailyRollover({ text: MIXED, modified: "2026-10-03" }, TODAY)!;
 	const notice = renderRolloverNotice(plan);

@@ -23,6 +23,7 @@
  */
 
 import { parseMarkdown, sectionText, type Section } from "./markdown.js";
+import { pruneDailyBody, type DailyItem } from "./dailyItems.js";
 
 export interface DailyFile {
 	text: string;
@@ -46,6 +47,8 @@ export interface Freshness {
 }
 
 export interface CarriedSection {
+	/** How many of this section's items had no date and were given the file's. */
+	stamped?: number;
 	/** Project/group heading this came from, when the file grouped by project. */
 	group?: string;
 	heading: string;
@@ -56,6 +59,9 @@ export interface CarriedSection {
 
 export interface RolloverPlan {
 	from: DailyDate;
+	/** Open items too old to keep carrying, and items beyond the per-section cap. */
+	retiredItems: Array<{ section: string; item: DailyItem }>;
+	cappedItems: Array<{ section: string; item: DailyItem }>;
 	today: string;
 	archivePath: string;
 	/** The old file, byte for byte: an archive is a record, not a draft. */
@@ -63,6 +69,8 @@ export interface RolloverPlan {
 	freshText: string;
 	carried: CarriedSection[];
 	notCarried: Array<{ heading: string; reason: string }>;
+	/** Items that had no date and were given the file's date while carrying. */
+	stamped: number;
 }
 
 export type RolloverDecision =
@@ -193,7 +201,7 @@ function renderCarried(entry: { group?: string; heading: string; text: string },
  * it is almost certainly today's file with a missing date field — but it is
  * reported, because that missing field is what made archiving never run for weeks.
  */
-export function planDailyRollover(file: DailyFile, today: string, options: { force?: boolean } = {}): RolloverPlan | null {
+export function planDailyRollover(file: DailyFile, today: string, options: { force?: boolean; retireAfterDays?: number; maxItems?: number } = {}): RolloverPlan | null {
 	const freshness = dailyFreshness(file, today);
 	// Dated today: nothing to do. Undated: roll it over anyway — "unknown date" must
 	// not mean "current forever", which is exactly how one file sat undated for
@@ -209,11 +217,22 @@ export function planDailyRollover(file: DailyFile, today: string, options: { for
 	const carried: CarriedSection[] = [];
 	const notCarried: Array<{ heading: string; reason: string }> = [];
 
+	const retiredItems: RolloverPlan["retiredItems"] = [];
+	const cappedItems: RolloverPlan["cappedItems"] = [];
+
 	const walk = (node: Section, group?: string) => {
 		const classified = classify(node);
 		if (classified.kind === "open") {
 			const body = sectionText(node);
-			if (body !== "") carried.push({ group, heading: node.title, text: body, from: from.date, ageDays: daysBetween(from.date, today) });
+			if (body !== "") {
+				// Carried item by item: stamped with the day the file was about (never
+				// today — that would launder old intentions into fresh work), then aged
+				// and capped per section. Everything dropped is returned, not hidden.
+				const pruned = pruneDailyBody(body, today, { retireAfterDays: options.retireAfterDays, maxItems: options.maxItems, stampWith: from.source === "missing" ? today : from.date });
+				for (const item of pruned.retired) retiredItems.push({ section: node.title, item });
+				for (const item of pruned.capped) cappedItems.push({ section: node.title, item });
+				if (pruned.text !== "") carried.push({ group, heading: node.title, text: pruned.text, from: from.source === "missing" ? "undated" : from.date, ageDays: daysBetween(from.date, today), stamped: pruned.stamped });
+			}
 			return;
 		}
 		if (classified.kind === "settled") {
@@ -267,6 +286,9 @@ export function planDailyRollover(file: DailyFile, today: string, options: { for
 		freshText: `${fresh.join("\n").trimEnd()}\n`,
 		carried,
 		notCarried,
+		retiredItems,
+		cappedItems,
+		stamped: carried.reduce((total, entry) => total + (entry.stamped ?? 0), 0),
 	};
 }
 
@@ -275,5 +297,7 @@ export function renderRolloverNotice(plan: RolloverPlan): string {
 	const carried = plan.carried.length === 0 ? "nothing" : `${plan.carried.length} open-work section(s)`;
 	const dropped = plan.notCarried.length === 0 ? "" : `; ${plan.notCarried.length} not carried (${plan.notCarried.map((item) => item.heading).join(", ")})`;
 	const where = plan.from.source === "missing" ? "an undated file" : `${plan.from.date}${plan.from.source === "mtime" ? " (dated by file mtime)" : ""}`;
-	return `Rolled over daily context from ${where}: archived to ${plan.archivePath}, carried ${carried}${dropped}.`;
+	const items = plan.retiredItems.length + plan.cappedItems.length === 0 ? "" : `; ${plan.retiredItems.length} item(s) aged out and ${plan.cappedItems.length} beyond the carry cap — all still in the archive`;
+	const stamped = plan.stamped === 0 ? "" : `; dated ${plan.stamped} item(s) that had none`;
+	return `Rolled over daily context from ${where}: archived to ${plan.archivePath}, carried ${carried}${dropped}${items}${stamped}.`;
 }

@@ -273,6 +273,19 @@ test("an undated daily file is reported rather than assumed current forever", as
 		assert.match(notices[0]!.message, /assumed .* from its modification time/);
 	}));
 
+test("an undated open item is dated so it can age, without touching the archive path", async () =>
+	withBank((bank) => {
+		bank.seedAt("core/dailyContext.md", `- date: ${TODAY_ISO}\n\n## Next Steps\n- verify the simulator build\n`);
+		const { pi, harness } = fakePi();
+		factory(pi);
+
+		const { ctx, notices } = notifyingContext();
+		harness.hooks.get("session_start")!({ type: "session_start" }, ctx);
+
+		assert.match(bank.readAt("core/dailyContext.md"), /- \(2026-10-14\)|- \(\d{4}-\d{2}-\d{2}\) verify the simulator build/);
+		assert.match(notices.map((notice) => notice.message).join(" "), /dated 1 open item/);
+	}));
+
 test("a stale daily file is surfaced in the prompt even when the store has nothing to say", async () =>
 	withBank(async (bank) => {
 		bank.seedAt("core/dailyContext.md", STALE_DAILY);

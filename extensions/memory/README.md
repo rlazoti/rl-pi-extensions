@@ -315,6 +315,15 @@ same structure, and a second parser is how one format grows two meanings. Fenced
 blocks are content, never structure; `sectionText` re-renders a section with
 everything nested under it.
 
+### `dailyItems.ts`
+
+| Export | Purpose |
+|---|---|
+| `parseDailyItems` | Items and prose in a section body. An item is an unindented bullet; a deeper bullet belongs to the item above it. |
+| `stampDailyItems` / `stampDailyFile` | Give undated items the day **the file** claims, never today — a rollover must not launder yesterday's intention into fresh work. `stampDailyFile` edits open sections in place and leaves everything else byte for byte. |
+| `ageItems` | Retirement by age (default 21 days) and a per-section carry cap (default 30, newest survive). Undated items are never retired. |
+| `pruneDailyBody` | Stamp + age + cap in one pass, returning the rewritten body **and** everything dropped, so the caller reports every loss. |
+
 ### `rollover.ts`
 
 | Export | Purpose |
@@ -553,12 +562,37 @@ today). A stale daily file is also injected as a standing caveat, so a model rea
 a three-day-old intention is told it is three days old instead of being handed it as
 current fact.
 
-**Open, and honestly open:** carrying is at *section* level, so a `Next Steps` list
-whose items are individually stale survives as a block. Rehearsing on the live bank
-carried 13 intentions, most of them already finished — better than dropping them, not
-yet right. The fix is item-level provenance: stamp the day on each open item, then age
-and retire per item (and cap what gets carried). That is a change to how daily items
-are written, not just how they are carried, so it is a decision rather than a patch.
+**Items carry their own day.** Carrying whole sections proved inadequate on the first
+rehearsal: a `Next Steps` list is intentions written on different days, and a rollover
+that cannot tell them apart either keeps all of them forever or drops all of them. Re-
+running on the live bank carried 13 intentions, most already finished. So an open item
+is written as:
+
+```markdown
+- (2026-10-11) verify the simulator build
+```
+
+An undated item is stamped with **the day the file claims, never today** — a rollover
+running on Tuesday must not turn Monday's intention into fresh work by dating it
+Tuesday. Stamping happens either while carrying or, when nothing rolled over, as a
+separate pass over the open sections; it leaves settled work and prose byte for byte.
+Ageing then applies per item: past `retireAfterDays` (default 21) an item stops being
+carried, and a per-section cap (default 30, newest survive) bounds a runaway list.
+**Undated items are never retired** — an unknown age is not an excuse to drop work.
+Everything dropped is counted in the rollover notice and stays in the archive.
+
+The two defaults are conservative on purpose: retiring too early loses real work, so
+the safe failure is keeping too much for one more cycle and saying so. They are
+parameters on `planDailyRollover` / `ageItems`, not constants in behaviour.
+
+**Still open, stated plainly:** items written by *other* tools — including the harness's
+own memory tools — arrive undated, and get their date at the next session start rather
+than at writing time, which makes their age one day coarse. Fixing that means either
+owning the daily append path or agreeing the item grammar with whatever writes it. The
+fresh file's shape is fixed and documented: `# Daily Context — <date>`, a `- date:`
+field, a `- carried from:` line naming where the carry came from and how that day was
+recovered, then `## Open work` (or one section per project) with `### <heading> (from
+<date>, N days old)`, then `## Settled today` and `## Notes`.
 
 ## Cutover (Phase 5c) — performed 2026-10-14
 
@@ -596,11 +630,11 @@ are written, not just how they are carried, so it is a decision rather than a pa
 | 5a | tools, `/memory`, injection hook, pending queue, single-instance guard | ✅ `implementation.ts` `service.ts` `pending.ts` `fs-store.ts` |
 | 5b-1 | migration tooling + dry run of the live bank | ✅ `migrate.ts` `scripts/migrate-report.mjs` |
 | 5b-2 | apply the migration + cutover of the live extension | ⬜ (decisions taken; needs the go-ahead) |
-| 6 | daily rollover: archive, reported carry, dated header, staleness | ✅ `rollover.ts` `markdown.ts` — open: per-item ageing (see § Daily rollover) |
+| 6 | daily rollover: archive, reported carry, item dates, ageing, cap, staleness surfacing | ✅ `rollover.ts` `dailyItems.ts` `markdown.ts` |
 
 ## Testing map
 
-222 tests in `extensions/memory/`:
+237 tests in `extensions/memory/`:
 
 - `schema.test.ts` (31): grammar and scope parsing; metadata vs body boundaries;
   fenced `##` is body; CRLF; unclosed fence; legacy prose headings flagged
@@ -651,7 +685,8 @@ are written, not just how they are carried, so it is a decision rather than a pa
   the gate; re-refusing one contest updates one record; unreadable queue files are
   reported rather than guessed at; ids are validated before reaching the
   filesystem; the queue is oldest-first.
-- `rollover.test.ts` (16): rollover happens exactly when the day changed and not when it did not; date-field precedence; mtime recovery labelled as such; an undated file normalised instead of sitting undated forever; alias recognition for open work (`Next Steps` / `Handoff` / `Blocked` / `Todo` …) with no prefix matching; settled work reported rather than carried; unrecognised headings named with the alternatives offered; project groups preserved with only their open parts; a group with nothing open reported; age markers so a carried intention looks as old as it is; nothing-carried stated out loud; fenced code preserved; archives byte-identical; no churn on a second pass; undated archive naming.
+- `dailyItems.test.ts` (10): the item grammar (`- (YYYY-MM-DD) …`), sub-bullets belonging to their parent item, fence awareness; stamping from the file's date rather than today; already-dated items untouched; `stampDailyFile` touching only open sections and leaving everything else byte for byte; retirement by age; **undated items never retired** (unknown age is not an excuse to drop work); the per-section cap keeping the newest and naming the overflow; every drop reported.
+- `rollover.test.ts` (19): rollover happens exactly when the day changed and not when it did not; date-field precedence; mtime recovery labelled as such; an undated file normalised instead of sitting undated forever; alias recognition for open work (`Next Steps` / `Handoff` / `Blocked` / `Todo` …) with no prefix matching; settled work reported rather than carried; unrecognised headings named with the alternatives offered; project groups preserved with only their open parts; a group with nothing open reported; age markers so a carried intention looks as old as it is; nothing-carried stated out loud; fenced code preserved; archives byte-identical; no churn on a second pass; undated archive naming.
 - `migrate.test.ts` (27): proposals and their cues; what is skipped and why (structural headings matched whole, status snapshots, non-`knowledge/` paths, bodyless sections, `## Source` folded into provenance); split families, qualifier merging, fence attachment, per-claim `kind`, placeholder-degrading keys, `similar-claim`; already-entry skip and the broken-entry report; prose consumption with hand-written claims preserved and a colliding proposal stopped; batch collisions; determinism and re-application idempotence; the report's own text.
 - `service.test.ts` (19): write / resolveQueued / show / search / injection /
   doctor against a scratch bank — a parked refusal leaves the bank byte-identical;
