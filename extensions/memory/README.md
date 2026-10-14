@@ -577,13 +577,26 @@ running on Tuesday must not turn Monday's intention into fresh work by dating it
 Tuesday. Stamping happens either while carrying or, when nothing rolled over, as a
 separate pass over the open sections; it leaves settled work and prose byte for byte.
 Ageing then applies per item: past `retireAfterDays` (default 21) an item stops being
-carried, and a per-section cap (default 30, newest survive) bounds a runaway list.
+carried, and a per-section cap (default 30, newest survive) bounds a runaway list. A
+section whose items have all aged out is **not carried as an empty shell** — it is
+dropped and reported with the counts — and prose under an open heading is carried even
+without bullets, because "run the gate:" plus a command block is open work.
 **Undated items are never retired** — an unknown age is not an excuse to drop work.
 Everything dropped is counted in the rollover notice and stays in the archive.
 
 The two defaults are conservative on purpose: retiring too early loses real work, so
 the safe failure is keeping too much for one more cycle and saying so. They are
 parameters on `planDailyRollover` / `ageItems`, not constants in behaviour.
+
+**The rollover has to read its own output.** An early version wrote the annotation
+*inside the heading* (`### Next Steps (from 2026-10-13, 11 days old)`), and the next
+pass no longer recognised that as open work — the file went unreadable to the tool that
+wrote it, and the stamp pass silently did nothing. Annotations now live in the body as
+one line, stripped and rewritten each rollover (otherwise provenance stacks up one line
+per day like a game of telephone), and heading normalisation also tolerates the old
+format and hand-edited variants. Verified on the live bank: the session after cutover
+dated **17 open items** in a single pass, including under a heading the earlier format
+had written.
 
 **Still open, stated plainly:** items written by *other* tools — including the harness's
 own memory tools — arrive undated, and get their date at the next session start rather
@@ -686,7 +699,7 @@ recovered, then `## Open work` (or one section per project) with `### <heading> 
   reported rather than guessed at; ids are validated before reaching the
   filesystem; the queue is oldest-first.
 - `dailyItems.test.ts` (10): the item grammar (`- (YYYY-MM-DD) …`), sub-bullets belonging to their parent item, fence awareness; stamping from the file's date rather than today; already-dated items untouched; `stampDailyFile` touching only open sections and leaving everything else byte for byte; retirement by age; **undated items never retired** (unknown age is not an excuse to drop work); the per-section cap keeping the newest and naming the overflow; every drop reported.
-- `rollover.test.ts` (19): rollover happens exactly when the day changed and not when it did not; date-field precedence; mtime recovery labelled as such; an undated file normalised instead of sitting undated forever; alias recognition for open work (`Next Steps` / `Handoff` / `Blocked` / `Todo` …) with no prefix matching; settled work reported rather than carried; unrecognised headings named with the alternatives offered; project groups preserved with only their open parts; a group with nothing open reported; age markers so a carried intention looks as old as it is; nothing-carried stated out loud; fenced code preserved; archives byte-identical; no churn on a second pass; undated archive naming.
+- `rollover.test.ts` (20): rollover happens exactly when the day changed and not when it did not; date-field precedence; mtime recovery labelled as such; an undated file normalised instead of sitting undated forever; alias recognition for open work (`Next Steps` / `Handoff` / `Blocked` / `Todo` …) with no prefix matching; settled work reported rather than carried; unrecognised headings named with the alternatives offered; project groups preserved with only their open parts; a group with nothing open reported; age markers so a carried intention looks as old as it is; nothing-carried stated out loud; fenced code preserved; archives byte-identical; no churn on a second pass; undated archive naming; **round trip** — a file the rollover wrote is understood by the next rollover: annotation in the body, item dates kept, aged items retired without leaving an empty section or a stack of provenance notes.
 - `migrate.test.ts` (27): proposals and their cues; what is skipped and why (structural headings matched whole, status snapshots, non-`knowledge/` paths, bodyless sections, `## Source` folded into provenance); split families, qualifier merging, fence attachment, per-claim `kind`, placeholder-degrading keys, `similar-claim`; already-entry skip and the broken-entry report; prose consumption with hand-written claims preserved and a colliding proposal stopped; batch collisions; determinism and re-application idempotence; the report's own text.
 - `service.test.ts` (19): write / resolveQueued / show / search / injection /
   doctor against a scratch bank — a parked refusal leaves the bank byte-identical;
