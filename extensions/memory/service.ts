@@ -133,7 +133,9 @@ export function createService(paths: MemoryPaths, options: ServiceOptions = {}):
 
 	const writeWithAsk = async (loaded: LoadedStore, request: WriteRequest): Promise<WriteOutcome> => {
 		const first = decide(loaded.store, request);
-		if (first.kind !== "conflict" || !options.ask) return fromGate(first, request, loaded.store);
+		// The request already carries a resolution (the agent is answering a
+		// refusal it was given): no dialog, but the queue entry must still clear.
+		if (first.kind !== "conflict" || !options.ask) return settle(fromGate(first, request, loaded.store), request.conflictId);
 
 		const choice = await options.ask(first, request);
 		if (choice === null || choice === undefined) return park(first, request);

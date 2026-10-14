@@ -1,12 +1,14 @@
 # memory — entry-keyed memory bank with a conflict gate
 
-**Status: Phase 3 of 6 — schema, resolver and admission gate are done. Not
-enabled, registers nothing.** The directory is listed
-in the picker catalog so it stays manageable, but `implementation.ts` registers
-no tools, commands, or hooks, and it is not symlinked into
-`~/.pi/agent/extensions`. The memory bank you are actually using is still the
-standalone `memory` extension at `~/.pi/agent/extensions/memory` (a plain
-directory, not a symlink — see § Cutover).
+**Status: Phases 1-5a of 6.** Schema, resolver, admission gate, injector,
+filesystem layer, pending queue, service layer and the Pi adapter are done: four
+tools (`memory_write`, `memory_show`, `memory_search`, `memory_doctor`), the
+`/memory` command, the per-turn injection hook and a single-instance guard.
+**Still not enabled**: the directory is in the picker catalog but not symlinked
+into `~/.pi/agent/extensions`, so the bank actually in use is the standalone
+`memory` extension at `~/.pi/agent/extensions/memory` (a real directory, not a
+symlink — see § Cutover). Enabling this one before that directory is moved aside
+is safe but pointless: the guard detects the collision and stands down.
 
 ## Why this exists
 
@@ -147,7 +149,7 @@ match `src/a.ts`).
 
 ## Injection (Phase 4): recall, budget, text
 
-`inject(store, { query, context, budget })` → `{ text, injected, redirected, conflicts, dropped, outOfScope, entryTokens, tokens }`. Still pure: no fs, no clock, no pi. Phase 5 puts a hook in front of it.
+`inject(store, { query, context, budget })` → `{ text, injected, redirected, conflicts, dropped, outOfScope, entryTokens, tokens }`. Still pure: no fs, no clock, no pi — `implementation.ts` is the hook that calls it.
 
 **Retrieval picks candidates; the resolver picks truth.** Recall never decides
 what is correct, and it deliberately keeps stale claims as candidates — a hit on
@@ -256,14 +258,12 @@ resolve: "discard"            incoming is dropped; nothing changes on disk
 `supersede` rewrites **every file holding a rival**, so tombstones stay where the
 claims they retire live — one write per affected file, applied together.
 
-**TUI interaction is Phase 5, on top of this.** The refusal already carries
-everything a dialog needs (incoming vs candidate, `asOf`, `source`, and a
-suggestion: `supersede` when the incoming claim is the newest dated, `merge`
-otherwise). Phase 5 puts `ctx.ui.select` in front of that result, records the
-chosen `resolve` + `note` exactly as the second call, falls back to the persisted
-pending queue on dismiss/timeout/abort, and in `print`/`json`/`rpc` answers only
-when the agent supplied a resolution. The gate's contract does not change between
-modes — only who answers it.
+**The dialog sits on top of this, not inside it** (implemented in
+`implementation.ts`). The refusal already carries everything a dialog needs —
+incoming versus candidate bodies, `asOf`, `source`, and a suggestion — so the ask
+is a UI over the refusal, and the gate's contract is identical in every Pi mode:
+a human answer becomes a second `decide` call with `resolve` + `conflictId`; a
+dismissal, a timeout or no UI at all parks the refusal in the pending queue.
 
 ## Component API
 
@@ -299,6 +299,24 @@ modes — only who answers it.
 | `tokenize` / `estimateTokens` | The scorer's tokenizer and the stated char/4 token estimate. |
 | `DEFAULT_BUDGET` / `PRESENTATION_ORDER` | Token caps and the canonical kind-then-key presentation order. |
 
+### `fs-store.ts`
+
+| Export | Purpose |
+|---|---|
+| `memoryPaths(env)` | Where the bank is (`PI_MEMORY_DIR`, default `~/.pi/memory` — the live bank's location, because cutover replaces it rather than moving it) and where extensions live. |
+| `loadKnowledgeStore(paths)` | Parse every `knowledge/*.md` into a store, with raw text and unreadable files reported. |
+| `applyEdits(paths, edits)` | Write the gate's rendered bytes, temp-file + rename, refusing anything outside the bank. |
+| `foreignMemoryExtension(paths)` | The single-instance guard's check. |
+
+### `pending.ts` / `service.ts`
+
+| Export | Purpose |
+|---|---|
+| `saveConflict` / `listConflicts` / `loadConflict` / `deleteConflict` | The queue of unanswered refusals, as JSON records that replay through the gate verbatim. |
+| `renderConflict` | The human-facing view of one queued refusal. |
+| `createService(paths, { ask, now })` | Write / resolveQueued / show / search / injection / doctor / pending, with no pi types. `ask` is how a human answers; without it, refusals are parked. |
+| `collisionReport(paths)` | Load-time guard result. |
+
 ### `gate.ts`
 
 | Export | Purpose |
@@ -307,6 +325,41 @@ modes — only who answers it.
 | `WriteRequest` | `file, key, scope, kind, body, asOf` (required), `source, revision, status, fields, resolve, conflictId, mergedBody, note`. |
 | `EditPlan` | `files[{path, content, changes[]}], summary, warnings[]`. The caller writes these contents verbatim. |
 | `RESOLUTIONS` | `supersede, merge, withdraw, keep-both-flagged, discard`. |
+
+## Pi surface (Phase 5a)
+
+`implementation.ts` is an adapter: tools, the `/memory` command, the injection
+hook — all delegating to `service.ts`, which holds the behaviour without pi types.
+The adapter decides nothing about memory; its only two decisions are *who can be
+asked* and *whether to load at all*.
+
+| Surface | What it does |
+|---|---|
+| `memory_write` | The gate: clean write, amendment, or refusal with a `conflictId`. `promptGuidelines` teach the protocol — never invent `asOf`, never pick a winner yourself. |
+| `memory_show` | Every claim for a key: which is authoritative here, which are retired, which are shadowed by a narrower scope, whether the key is contested (reported as an error, not as an answer). |
+| `memory_search` | Ranked **candidates**, labelled as not answers. |
+| `memory_doctor` | Entries by status, violations, contested identities, headings that are not keys, unreadable files, empty stores, unanswered conflicts. `isError` when anything is wrong. |
+| `/memory` | `doctor \| pending \| resolve <id> \| show <key> \| files`. |
+| `before_agent_start` | The `inject()` text for the prompt plus the pending-conflict notice. Silent — no message, no tokens — when there is nothing to say. |
+
+**Asking.** With a dialog available, the human is asked inside the same call:
+`ctx.ui.select` for the resolution, `ctx.ui.input` for merged text when the answer
+is `merge`, and one line of "why" that becomes `resolution:` provenance. Dialogs
+carry a 2-minute timeout and the abort signal, because a dialog nobody dismisses
+must not hang a turn; timeout, dismiss and abort all park the refusal, which is
+the same outcome as having no UI. In `print`/`json`/`rpc` the refusal is parked
+and the caller is told how to answer it; `/memory resolve <id>` there requires an
+explicit `--resolve=`, and a suggestion is never applied by default.
+
+**The queue is surfaced every turn**, so the agent can raise an unanswered
+conflict with the human, and `/memory pending` shows it on demand.
+
+**Single-instance guard.** A real directory named `memory` in the extensions
+directory is another memory extension (ours is enabled by symlink, so the two are
+distinguishable). This factory then registers nothing and says why at
+`session_start`: two injectors and two `memory_*` tool sets make the prompt
+unreproducible and the tool names ambiguous. Observed in a real Pi session — the
+guard fired exactly as designed against the live standalone extension.
 
 ## Cutover hazards (Phase 5)
 
@@ -328,12 +381,13 @@ modes — only who answers it.
 | 3 | admission gate: refuse rivals, pure resolutions, provenance | ✅ `gate.ts` |
 | 3b | TUI ask + pending queue (dialog on top of the gate's refusal) | ⬜ |
 | 4 | recall + budget + deterministic prompt text | ✅ `inject.ts` |
-| 5 | tools, `/memory` + `doctor` + `migrate`, single-instance guard | ⬜ |
+| 5a | tools, `/memory`, injection hook, pending queue, single-instance guard | ✅ `implementation.ts` `service.ts` `pending.ts` `fs-store.ts` |
+| 5b | migration + cutover of the live standalone extension | ⬜ |
 | 6 | daily-rollover fixes (archive never fires, `Carried Forward` vs `Context for Tomorrow`) | ⬜ |
 
 ## Testing map
 
-116 tests in `extensions/memory/`:
+163 tests in `extensions/memory/`:
 
 - `schema.test.ts` (31): grammar and scope parsing; metadata vs body boundaries;
   fenced `##` is body; CRLF; unclosed fence; legacy prose headings flagged
@@ -374,8 +428,34 @@ modes — only who answers it.
   trimming the tail while naming what was cut; no score ever rendered; long bodies
   collapsed not truncated; byte-identical output; and an end-to-end check that a
   resolution accepted by the gate changes what the prompt says.
-- `index.test.ts` (1): the unfinished extension registers **nothing**, so it
-  cannot compete with the live memory extension.
+- `fs-store.test.ts` (12): the bank lives where the live one lives, and
+  `PI_MEMORY_DIR` / `PI_CODING_AGENT_DIR` / `HOME` overrides are honoured so no
+  test can reach the real bank; writes are the gate's rendered bytes with no
+  temp-file leftovers and no path escape; a disk round trip loses nothing
+  (provenance included); the guard tells our symlink from a foreign real directory.
+- `pending.test.ts` (9): the request round-trips without losing a field; the
+  stored request replays to the same `conflictId`, so the queue cannot drift from
+  the gate; re-refusing one contest updates one record; unreadable queue files are
+  reported rather than guessed at; ids are validated before reaching the
+  filesystem; the queue is oldest-first.
+- `service.test.ts` (19): write / resolveQueued / show / search / injection /
+  doctor against a scratch bank — a parked refusal leaves the bank byte-identical;
+  an answered contest clears its queue entry; a queue entry resolved after the
+  store moved on is re-parked, not applied; a malformed human answer is a
+  rejection, not a refusal.
+- `index.test.ts` (18): the extension driven through Pi's own surface — a fake
+  `pi` capturing registrations, a fake context carrying the dialogs — against a
+  scratch bank: the registration set; the guard standing down and notifying; a
+  clean write; a rival refused with nothing written and the queue filled; the same
+  write in a session with a UI going to the human **and clearing the record the
+  headless attempt parked**; a write that already carries a resolution applying
+  without a second dialog; a dismissed dialog parking instead of writing;
+  malformed entries refused with the parser's own codes; `memory_show` authority,
+  chain, shadowing, contested-as-error; `memory_search` labelled as candidates;
+  `memory_doctor` dirty vs clean; `/memory pending|doctor|resolve|nonsense`;
+  `/memory resolve` with a dialog and with `--resolve=` where there is no UI; the
+  hook injecting authorities, surfacing the queue, and staying silent when there
+  is nothing to say.
 - Catalog pins in `tests/symlink-manager.test.ts` and count pins in
   `tests/picker.test.ts` derive from the live catalog instead of a literal 5.
 

@@ -131,7 +131,7 @@ export function getAvailableExtensions(monorepoRoot: string): ExtensionDescripto
 		{
 			name: "memory",
 			label: "memory",
-			description: "Entry-keyed memory bank with a conflict gate (in development: registers nothing)",
+			description: "Entry-keyed memory bank with a conflict gate (in development: enable only after removing the standalone memory extension)",
 			path: join(monorepoRoot, "extensions", "memory"),
 		},
 	];
