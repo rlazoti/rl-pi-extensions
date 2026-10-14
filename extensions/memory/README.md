@@ -145,6 +145,57 @@ matches paths *under* `src/ui/` but not the bare `src/ui`; `src/**/x.ts` matches
 at any depth including zero; there is no implicit leading `**` (`*.ts` does not
 match `src/a.ts`).
 
+## Injection (Phase 4): recall, budget, text
+
+`inject(store, { query, context, budget })` → `{ text, injected, redirected, conflicts, dropped, outOfScope, entryTokens, tokens }`. Still pure: no fs, no clock, no pi. Phase 5 puts a hook in front of it.
+
+**Retrieval picks candidates; the resolver picks truth.** Recall never decides
+what is correct, and it deliberately keeps stale claims as candidates — a hit on
+a superseded rule must still reach the model, as the rule that replaced it. A
+contested identity is reported even when recall only found one side, because
+authority is a property of the store, not of what retrieval happened to surface.
+
+**Recall is BM25 over entries** (`recall`), with the parameters pinned rather than
+tuned per query: `k1 = 1.2`, `b = 0.75`, heading/key terms weighted ×3. Query
+terms are a **set** — repeating a word in a prompt must not make an entry look
+more relevant. `kind`/`scope`/`status` values are **not** scored, so the words
+`rule`, `global` and `active` cannot drag an unrelated entry into the prompt. No
+stemming: a wrong stem is invisible in the output.
+
+**The index decision, made with numbers instead of vibes** (`scripts/bench-recall.mjs`):
+
+| Entries | Recall per turn |
+|---|---|
+| 22 (this bank today) | ~0.1 ms |
+| 200 | 0.09 ms |
+| 1 000 | 0.50 ms |
+| 5 000 | 2.6 ms |
+
+So: **no search dependency and no on-disk index.** Corpus statistics are memoised
+in a `WeakMap` keyed by the store object — a new store is a new key, so there is
+no invalidation rule to get wrong and no stale index to blame later. That is the
+whole trade: 8–14× faster than a cold scan, at zero staleness risk. MiniSearch
+(the live extension's choice) buys nothing at this size, and qmd's hybrid search
+(1–2 s) is already known too slow for per-turn injection — the live extension
+uses it only for explicit `memory_search` calls for exactly that reason.
+
+**Budget.** `tokens = ceil(chars / 4)`, stated as an estimate, never a real
+tokenizer. Default 900 tokens of entry content, with per-kind caps (`rule` 260,
+`procedure`/`decision`/`preference` 160, `gotcha` 140, `fact` 120) so a pile of
+facts cannot crowd out a rule. Entries that do not fit are **skipped, not
+truncated** — a truncated rule is a new rule — and named in the text ("Not
+injected this turn (token budget): …") so a missing memory is visible instead of
+silently absent. Selection keeps looking after a skip, so one long rule cannot
+delete everything behind it.
+
+**Presentation is canonical: kind, then key.** Retrieval order decides what is
+*considered*; it never decides the order the model reads them in, so a scorer
+tweak cannot reshuffle the prompt. Output is byte-identical for a given store +
+query + context. Each line carries the fields that actually decided — `kind ·
+scope · asOf` — and never a score; the old `(score: 2176)` label read as authority
+and measured nothing of the kind. A contested identity renders as an explicit
+"ask the human, do not pick one" line rather than a silent hole.
+
 ## Dependencies
 
 Justified against AGENTS.md §6:
@@ -154,9 +205,11 @@ Justified against AGENTS.md §6:
   scope *silently*, which is the exact failure class this component exists to
   remove; a hand-rolled matcher would be surface to defend rather than a
   smaller one. The option choices are pinned by tests, not just the happy path.
-- A BM25 index for candidate recall is still an open Phase 4 decision — retrieval
-  no longer arbitrates anything here, so its quality bar is "good candidate
-  recall" and that call belongs to that phase.
+- **No retrieval dependency.** Recall is ~40 lines of BM25 over entries, memoised
+  against the store object; measured cost is 0.1 ms at this bank's size and 2.6 ms
+  at 5 000 entries (`scripts/bench-recall.mjs`). MiniSearch would be a second
+  memory implementation to keep straight for no measured gain; qmd is an external
+  binary at 1–2 s, already too slow for per-turn injection in the live extension.
 
 ## Write path: the admission gate
 
@@ -237,6 +290,15 @@ modes — only who answers it.
 | `planInjection(store, candidates, context)` | The injection contract: injectable entries, redirects, suppressions, conflicts. |
 | `globMatches(glob, path)` | Glob matcher with `**` support (posix semantics; no deps). |
 
+### `inject.ts`
+
+| Export | Purpose |
+|---|---|
+| `inject(store, { query, context, budget })` | Recall → resolver → budget → rendered prompt text, with everything not injected accounted for. |
+| `recall(store, query, limit)` | BM25 candidates, deterministic order, stale claims kept so redirects can fire. |
+| `tokenize` / `estimateTokens` | The scorer's tokenizer and the stated char/4 token estimate. |
+| `DEFAULT_BUDGET` / `PRESENTATION_ORDER` | Token caps and the canonical kind-then-key presentation order. |
+
 ### `gate.ts`
 
 | Export | Purpose |
@@ -245,17 +307,6 @@ modes — only who answers it.
 | `WriteRequest` | `file, key, scope, kind, body, asOf` (required), `source, revision, status, fields, resolve, conflictId, mergedBody, note`. |
 | `EditPlan` | `files[{path, content, changes[]}], summary, warnings[]`. The caller writes these contents verbatim. |
 | `RESOLUTIONS` | `supersede, merge, withdraw, keep-both-flagged, discard`. |
-
-## Injection wiring (Phase 4, open)
-
-The pure core is done (`planInjection`). What is still open is **candidate
-recall**: the index that decides which entries to ask about. Retrieval no longer
-arbitrates anything here, so its quality bar is only "good recall" — and that is
-also why no index was bought early. Whatever produces the candidates, the
-resolver owns authority: entries are injected, never files, and output is
-byte-identical for a given store + prompt. The old `(score: 2176)` labels are
-gone; `kind` / `scope` / `asOf` are what actually decide, and they are shown
-instead.
 
 ## Cutover hazards (Phase 5)
 
@@ -276,13 +327,13 @@ instead.
 | 2 | resolver: two gates, one authority per key per context, conflict reporting | ✅ `resolver.ts` |
 | 3 | admission gate: refuse rivals, pure resolutions, provenance | ✅ `gate.ts` |
 | 3b | TUI ask + pending queue (dialog on top of the gate's refusal) | ⬜ |
-| 4 | injector (entry-level, deterministic, budgeted) | ⬜ |
+| 4 | recall + budget + deterministic prompt text | ✅ `inject.ts` |
 | 5 | tools, `/memory` + `doctor` + `migrate`, single-instance guard | ⬜ |
 | 6 | daily-rollover fixes (archive never fires, `Carried Forward` vs `Context for Tomorrow`) | ⬜ |
 
 ## Testing map
 
-89 tests in `extensions/memory/`:
+116 tests in `extensions/memory/`:
 
 - `schema.test.ts` (31): grammar and scope parsing; metadata vs body boundaries;
   fenced `##` is body; CRLF; unclosed fence; legacy prose headings flagged
@@ -311,6 +362,18 @@ instead.
   incoming refused with the parser's own issue codes; path allowlist; and the
   gate/resolver agreement check — a rival the gate accepts never reaches the read
   path.
+- `inject.test.ts` (26): tokenization and stopword handling; recall ranking
+  (key match beats prose match), set-semantics on query terms, metadata words not
+  scored, stale claims kept as candidates, deterministic tie-breaking independent
+  of scan order, the memoised corpus cannot change an answer; one line per key
+  regardless of how many claims were recalled; asking about a retired claim
+  answers with its replacement and never quotes the dead wording; a contested
+  identity injects nothing and says to ask — including when recall only found one
+  side; broken entries reported as `unkeyed` / `unknown-identity` and never
+  injected; scope context excluding and shadowing; token budget and per-kind caps
+  trimming the tail while naming what was cut; no score ever rendered; long bodies
+  collapsed not truncated; byte-identical output; and an end-to-end check that a
+  resolution accepted by the gate changes what the prompt says.
 - `index.test.ts` (1): the unfinished extension registers **nothing**, so it
   cannot compete with the live memory extension.
 - Catalog pins in `tests/symlink-manager.test.ts` and count pins in

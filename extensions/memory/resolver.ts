@@ -24,6 +24,7 @@
 import { minimatch } from "minimatch";
 import {
 	compareAuthority,
+	isAssertionKey,
 	identityOf,
 	parseRefs,
 	isSupersedeRef,
@@ -463,7 +464,11 @@ export function planInjection(store: MemoryStore, candidates: MemoryEntry[], con
 	for (const candidate of candidates) {
 		const identity = identityOf(candidate);
 		if (identity === null) {
-			suppressed.push({ entry: candidate, reason: "unkeyed" });
+			// Two different defects read the same here but are not the same problem:
+			// a heading that is not an assertion key has no identity to look for,
+			// while a well-formed key with an unparseable scope has one that cannot
+			// be compared. Say which.
+			suppressed.push({ entry: candidate, reason: isAssertionKey(candidate.key) ? "unknown-identity" : "unkeyed" });
 			continue;
 		}
 		const resolution = resolveFor(candidate);
