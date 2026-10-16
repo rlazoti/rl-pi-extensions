@@ -162,7 +162,8 @@ _(carried from 2026-10-15 — 1 day old)_
 ```
 
 - The `- date:` field is authoritative; an undated file is dated from its modification time and **labelled as inferred**, and the missing field is reported. A missing date is never a reason to do nothing.
-- Open work is recognised by meaning (`Next Steps`, `In Progress`, `Handoff`, `Blocked`, `Todo`…), not by exact heading match, and settled work is reported rather than carried — durable things belong in `knowledge/`.
+- Archives are never overwritten, but a name collision is not always a duplicate: two files can legitimately be about the same day (an undated one whose day was inferred, plus the file started for that day), so the second is archived as `2026-10-14-dailyContext-2.md` and the notice says so. Identical bytes are the one true duplicate — the day is already recorded, and nothing is written twice. Blocking on the collision instead left a real bank's daily file stale and unarchivable for two days.
+- Open work is recognised by meaning (`Next Steps`, `In Progress`, `Handoff`, `Blocked`, `Todo`…), not by exact heading match — and **by position too**: anything under an open heading is open work, whether or not its own name is a known alias (`## In Progress` → `### Money Manager`). A heading with children groups rather than swallowing them, so the rollover's own compound titles (`### Money Manager — Handoff`) read back as group plus section on the next pass. Settled work is reported rather than carried — durable things belong in `knowledge/`.
 - **Items carry their own date** (`- (2026-10-15) …`). An undated item is stamped with the day *the file claims*, never today: dating Monday's intention on Tuesday launders it into fresh work.
 - Ageing is per item: past `retireAfterDays` (default **21**) an item stops being carried, and a per-section cap (default **30**, newest survive) bounds a runaway list. **Undated items are never retired** — unknown age is not grounds to drop work. Every drop is counted in the notice and remains in the archive.
 - The shape above is a contract: other tools (including pi's own memory tools) append under those top-level headings, so a format only the rollover can read would make the day's work unreadable to whatever writes it.
@@ -195,7 +196,7 @@ The ageing knobs are **module parameters, not settings**: the extension calls `r
 | `migrate.ts` | prose → entries: proposals, cues, and what gets skipped |
 | `service.ts` | use cases over all of it |
 
-Scripts: `scripts/migrate-report.mjs` (dry run, one proposal per line), `scripts/migrate-apply.mjs` (`--only id,id`), `scripts/daily-rollover.mjs` (`--force` for a file whose mtime is today while its content is not — a human says so, the code never infers it), `scripts/bench-recall.mjs`.
+Scripts (`node --experimental-strip-types --import ./test-support/register.mjs scripts/…`, as each one's header says — they import the component's `.ts` sources): `scripts/migrate-report.mjs` (dry run, one proposal per line), `scripts/migrate-apply.mjs` (`--only id,id`), `scripts/daily-rollover.mjs` (`--force` for a file whose mtime is today while its content is not — a human says so, the code never infers it; it calls the same `service.rollDaily` the extension uses at session start, because a second rollover implementation is how the two grow different rules), `scripts/bench-recall.mjs`.
 
 ## Limits, and what this deliberately is not
 
@@ -208,7 +209,7 @@ Scripts: `scripts/migrate-report.mjs` (dry run, one proposal per line), `scripts
 
 ## Testing
 
-245 colocated tests (`npm test` discovers them recursively). The load-bearing ones: parse↔render byte-idempotence with nothing dropped; authority total-order and four invariant sweeps over 200 generated stores; injection determinism and per-kind budgets; the gate's rival check across files, and a resolution applying only to the state its `conflictId` was derived from; the queue replaying to the same `conflictId`; the rollover round trip (a file the rollover wrote is understood by the next rollover); atomic writes with no temp-file leftovers and no path escape; and the Pi adapter driven through pi's own surface — dialog content, no timer, one dialog at a time, cancelled tool calls parking rather than hanging.
+250 colocated tests (`npm test` discovers them recursively). The load-bearing ones: parse↔render byte-idempotence with nothing dropped; authority total-order and four invariant sweeps over 200 generated stores; injection determinism and per-kind budgets; the gate's rival check across files, and a resolution applying only to the state its `conflictId` was derived from; the queue replaying to the same `conflictId`; the rollover round trip (a file the rollover wrote is understood by the next rollover); atomic writes with no temp-file leftovers and no path escape; and the Pi adapter driven through pi's own surface — dialog content, no timer, one dialog at a time, cancelled tool calls parking rather than hanging.
 
 ## History and rollback
 

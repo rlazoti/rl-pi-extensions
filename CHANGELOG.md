@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **memory: the automatic daily rollover could be blocked forever by its own archive name.** The rollover runs itself at `session_start` (`/memory daily` only inspects and reports), but on the live bank it had stopped: the archive for 2026-10-14 already existed — written earlier that same day from a file whose date had been *inferred from its mtime* — and the fresh file started for 2026-10-14, when it came to be archived, wanted the same name. The guard said "refusing to overwrite a record" and the daily file sat two days stale, with the staleness notice firing every turn to no effect. Now: identical bytes mean the day is already recorded (nothing is archived twice); any other collision takes the next free slot beside it (`2026-10-14-dailyContext-2.md`) and says so in the notice. Never-overwrite still holds; blocking on a legitimate second record does not.
+- **memory: the rollover's own output was partly unreadable to the next rollover — again.** A carried section was rendered as `### Money Manager — Handoff` while the classifier only recognised headings that *exactly* matched an alias, so a second pass called its own carried work an unrecognised heading and dropped it. Alias matching now reads compound titles (group `—` section), and open work is decided by **name or position**: anything under an open heading is open work (`## In Progress` → `### Money Manager`), which the daily **stamping** pass had to learn too — it was stopping at the child heading and leaving items undated, so they could never age. A heading with children now groups instead of swallowing them, so bullets written directly under `## In Progress` are carried as its own work, and the redundant `### In Progress` inside `## In Progress` is gone (the shape self-heals on the next pass).
+- **memory: `scripts/daily-rollover.mjs` had its own rollover path** — planning plus a hand-rolled archive-collision branch — which blocked on exactly the case the service archives beside. It now calls the same `service.rollDaily` the extension uses, so there is one rollover with one set of rules.
+
+250 tests in this component, 723 repo-wide.
+
 ## [1.4.0] - 2026-10-15
 
 ### Added
