@@ -95,7 +95,7 @@ export interface DailyStatus {
 
 export type DailyRolloverOutcome =
 	| { performed: false; reason: string; status: DailyStatus }
-	| { performed: true; notice: string; archivePath: string; carried: number; notCarried: number; status: DailyStatus };
+	| { performed: true; notice: string; archivePath: string; carried: number; notCarried: number; notCarriedDetail: Array<{ heading: string; reason: string }>; status: DailyStatus };
 
 const DAILY_FILE = "core/dailyContext.md";
 
@@ -283,13 +283,22 @@ export function createService(paths: MemoryPaths, options: ServiceOptions = {}):
 		if (file === null || file.text.trim() === "") return { performed: false, reason: "no daily context file yet", status };
 		const plan = planDailyRollover(file, now().slice(0, 10), options);
 		if (plan === null) return { performed: false, reason: "the daily file is already current", status };
-		// An archive is a record, never a draft: a collision means a rollover for that
-		// day already happened, so stop and say so instead of overwriting history.
-		if (writeBankFile(paths, plan.archivePath, plan.archiveText, { noOverwrite: true }) === null) {
-			return { performed: false, reason: `archive ${plan.archivePath} already exists — refusing to overwrite a record`, status };
+		// An archive is a record, never a draft, so it is never overwritten. But a name
+		// collision is not always a duplicate: two files can legitimately be about the
+		// same day — an undated one whose day was inferred from its mtime, plus the
+		// fresh file started for that day — and blocking on that left a real bank's
+		// daily file stale and unarchivable forever. So: identical bytes means the day
+		// is already recorded (nothing is archived twice); anything else takes the next
+		// free slot beside it and says so.
+		const slot = archiveSlot(paths, plan.archivePath, plan.archiveText);
+		if (slot.kind === "identical") return { performed: false, reason: `${plan.archivePath} already records this exact day — there is nothing to archive twice`, status };
+		if (slot.kind === "full") return { performed: false, reason: `archive ${plan.archivePath} and the slots beside it are all taken — refusing to overwrite a record`, status };
+		if (writeBankFile(paths, slot.path, plan.archiveText, { noOverwrite: true }) === null) {
+			return { performed: false, reason: `archive ${slot.path} already exists — refusing to overwrite a record`, status };
 		}
 		writeBankFile(paths, DAILY_FILE, plan.freshText);
-		return { performed: true, notice: renderRolloverNotice(plan), archivePath: plan.archivePath, carried: plan.carried.length, notCarried: plan.notCarried.length, status: dailyStatus() };
+		const displaced = slot.path === plan.archivePath ? "" : `\nArchived as ${slot.path}: ${plan.archivePath} already held a record of that day.`;
+		return { performed: true, notice: `${renderRolloverNotice(plan)}${displaced}`, archivePath: slot.path, carried: plan.carried.length, notCarried: plan.notCarried.length, notCarriedDetail: plan.notCarried, status: dailyStatus() };
 	},
 
 	doctor() {
@@ -320,6 +329,23 @@ export function createService(paths: MemoryPaths, options: ServiceOptions = {}):
 			return listConflicts(paths);
 		},
 	};
+}
+
+/**
+ * Where an archive actually lands: the plain name if it is free, then `-2`, `-3` …
+ * beside it. A file with the same bytes is the one true duplicate — the day is
+ * already recorded — while a different file claiming the same day is history, not a
+ * collision to discard or a rollover to block.
+ */
+function archiveSlot(paths: MemoryPaths, wanted: string, text: string): { kind: "path"; path: string } | { kind: "identical" } | { kind: "full" } {
+	const slot = (nth: number): string => (nth <= 1 ? wanted : wanted.replace(/\.md$/, `-${nth}.md`));
+	for (let nth = 1; nth <= 51; nth += 1) {
+		const candidate = slot(nth);
+		const existing = readBankFile(paths, candidate);
+		if (existing === null) return { kind: "path", path: candidate };
+		if (existing.text === text) return { kind: "identical" };
+	}
+	return { kind: "full" };
 }
 
 /** Where another memory extension would collide with this one. */

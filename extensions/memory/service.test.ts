@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -420,9 +420,41 @@ test("rollDaily archives a stale daily file, carries open work, and never overwr
 	const forced = service.rollDaily({ force: true });
 	assert.equal(forced.performed, true);
 	if (forced.performed) assert.match(forced.archivePath, /2026-10-14-dailyContext\.md$/);
+	// A second forced rollover of the same day has real bytes to keep — the file the
+	// first one wrote. It goes beside the existing record rather than overwriting it
+	// or blocking forever: two files can legitimately be about one day (an undated
+	// one whose day was inferred, plus the file started for that day), and blocking
+	// left a real bank's daily file stale and unarchivable for days.
+	const firstRecord = readFileSync(join(root, "history", "daily", "2026-10", "2026-10-14-dailyContext.md"), "utf8");
 	const attemptedTwice = service.rollDaily({ force: true });
-	assert.equal(attemptedTwice.performed, false);
-	if (!attemptedTwice.performed) assert.match(attemptedTwice.reason, /refusing to overwrite a record/);
+	assert.equal(attemptedTwice.performed, true);
+	if (attemptedTwice.performed) {
+		assert.match(attemptedTwice.archivePath, /2026-10-14-dailyContext-2\.md$/);
+		assert.match(attemptedTwice.notice, /already held a record of that day/);
+	}
+	assert.equal(readFileSync(join(root, "history", "daily", "2026-10", "2026-10-14-dailyContext.md"), "utf8"), firstRecord, "the first record is untouched");
+	} finally {
+		paths.cleanup();
+	}
+});
+
+test("the same day's exact bytes are never archived twice", () => {
+	const paths = scratch();
+	const root = paths.root;
+	const service = createService(paths, { now: () => "2026-10-14T09:00:00.000Z" });
+	mkdirSync(join(root, "core"), { recursive: true });
+	const stale = `- date: 2026-10-11\n\n## Next Steps\n- push when approved\n`;
+	try {
+	writeFileSync(join(root, "core", "dailyContext.md"), stale, "utf8");
+	assert.equal(service.rollDaily().performed, true);
+
+	// Same day, same content, e.g. a replay or a hand-restored file: the record
+	// already exists, so nothing is duplicated and the reason says which case it is.
+	writeFileSync(join(root, "core", "dailyContext.md"), stale, "utf8");
+	const replay = service.rollDaily();
+	assert.equal(replay.performed, false);
+	if (!replay.performed) assert.match(replay.reason, /already records this exact day/);
+	assert.deepEqual(readdirSync(join(root, "history", "daily", "2026-10")), ["2026-10-11-dailyContext.md"]);
 	} finally {
 		paths.cleanup();
 	}

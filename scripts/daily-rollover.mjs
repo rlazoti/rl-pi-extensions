@@ -9,8 +9,7 @@
 // today — something no date check can see, so a human has to say it.
 import { join, resolve } from "node:path";
 
-import { loadKnowledgeStore, memoryPaths, readBankFile, writeBankFile } from "../extensions/memory/fs-store.ts";
-import { dailyFreshness, planDailyRollover, renderRolloverNotice } from "../extensions/memory/rollover.ts";
+import { loadKnowledgeStore, memoryPaths } from "../extensions/memory/fs-store.ts";
 import { createService } from "../extensions/memory/service.ts";
 
 const args = process.argv.slice(2);
@@ -25,26 +24,24 @@ if (!status.exists) {
 	process.exit(0);
 }
 
-const file = readBankFile(paths, "core/dailyContext.md");
-const today = new Date().toISOString().slice(0, 10);
-const freshness = dailyFreshness(file, today);
-console.log(`Daily file: core/dailyContext.md dated ${freshness.date?.date ?? "unknown"}${freshness.date?.source === "mtime" ? " (by file mtime — no date field)" : ""}; today is ${today}.`);
+const freshness = status.freshness;
+console.log(`Daily file: core/dailyContext.md dated ${freshness.date?.date ?? "unknown"}${freshness.date?.source === "mtime" ? " (by file mtime — no date field)" : ""}; today is ${new Date().toISOString().slice(0, 10)}.`);
 
-const plan = planDailyRollover(file, today, { force });
-if (plan === null) {
-	console.log("Already current — nothing archived. Use --force to archive a file whose content is from earlier days anyway.");
-	process.exit(0);
+// One rollover, not two: the extension runs this same call at session start, so a
+// second implementation here is how the two grow different rules (this script used to
+// have its own archive-collision branch, and blocked on a day that already had a
+// record while the service would have archived beside it).
+const outcome = service.rollDaily({ force });
+if (!outcome.performed) {
+	const current = outcome.reason === "the daily file is already current";
+	console.log(current ? "Already current — nothing archived. Use --force to archive a file whose content is from earlier days anyway." : `Not rolled over: ${outcome.reason}`);
+	process.exit(current ? 0 : 3);
 }
 
-if (writeBankFile(paths, plan.archivePath, plan.archiveText, { noOverwrite: true }) === null) {
-	console.error(`Refusing to overwrite the existing record at ${plan.archivePath}. Nothing else changed.`);
-	process.exit(3);
-}
-writeBankFile(paths, "core/dailyContext.md", plan.freshText);
-console.log(renderRolloverNotice(plan));
-if (plan.notCarried.length > 0) {
+console.log(outcome.notice);
+if (outcome.notCarriedDetail.length > 0) {
 	console.log("\nNot carried, with reasons:");
-	for (const item of plan.notCarried) console.log(`- ${item.heading}: ${item.reason}`);
+	for (const item of outcome.notCarriedDetail) console.log(`- ${item.heading}: ${item.reason}`);
 }
 
 const after = loadKnowledgeStore(paths);
