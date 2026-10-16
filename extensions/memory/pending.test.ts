@@ -186,10 +186,10 @@ test("the rendered conflict carries everything needed to decide", () => {
 		const text = renderConflict(saveConflict(paths, refusal(BANK()), REQUEST, "2026-11-01T09:00:00.000Z"));
 		assert.match(text, /^Conflict [0-9a-f]{8} — ui\.background in scope global$/m, "identities are rendered for a human, NUL separator and all");
 		assert.match(text, /aimed at knowledge\/appearance\.md/);
-		assert.match(text, /Incoming \(ui\.background@2026-11-01, asOf 2026-11-01\):/);
-		assert.match(text, /Charcoal, with the palette file kept as history\./);
-		assert.match(text, /knowledge\/ui\.md#ui\.background, asOf 2026-10-02, source: design review/);
-		assert.match(text, /Use dark grey for the UI background\./);
+		// The human deciding must see both claims and the reason, not just the options.
+		assert.match(text, /Being written:\nui\.background@2026-11-01 · asOf 2026-11-01 · source: user request · in knowledge\/appearance\.md:\n {2}Charcoal, with the palette file kept as history\./);
+		assert.match(text, /In the bank now:\nui\.background · asOf 2026-10-02 · source: design review · in knowledge\/ui\.md:\n {2}Use dark grey for the UI background\./);
+		assert.match(text, /Why this is refused:\n {2}.*competes with/s);
 		assert.match(text, /Suggested: supersede/);
 		assert.match(text, /Re-invoke with resolve:/);
 		assert.equal(readFileSync(join(paths.pending, readdirSync(paths.pending)[0]!), "utf8").includes("\"ticket\": \"MEM-14\""), true, "custom fields survive in the stored request");

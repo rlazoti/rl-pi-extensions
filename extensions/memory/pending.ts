@@ -157,22 +157,68 @@ function summarize(entry: MemoryEntry): PendingConflict["candidates"][number] {
 }
 
 /** The human-facing view: enough to decide, without re-deriving anything. */
+/** The two sides of a contest, in either shape: the gate's live entries or a
+ *  stored queue record. Both render the same way, everywhere. */
+export interface ContestSide {
+	heading: string;
+	path?: string;
+	asOf?: string;
+	source?: string;
+	body: string;
+}
+
+export interface Contest {
+	incoming: ContestSide;
+	candidates: ContestSide[];
+	explanation: string;
+}
+
+/**
+ * A decision nobody can see is not a decision. This is the one rendering of "what
+ * the bank says now, what is being written, and the rule that refused it" — the
+ * queue view, the interactive dialog and the tool result all use it, so a human
+ * never has to choose between options whose meaning they cannot see.
+ *
+ * `truncate` collapses whitespace and caps each side: the dialog has to fit on one
+ * screen, and the queue file keeps the full text for `/memory pending`.
+ */
+export function formatContest(contest: Contest, options: { truncate?: number } = {}): string {
+	const claim = (side: ContestSide, limit: number | undefined) => {
+		const body = limit ? truncate(side.body, limit) : side.body.trim();
+		return [
+			`${side.heading}${side.asOf ? ` · asOf ${side.asOf}` : ""}${side.source ? ` · source: ${side.source}` : ""}${side.path ? ` · in ${side.path}` : ""}:`,
+			indent(body),
+		].join("\n");
+	};
+	const lines = ["In the bank now:", ...(contest.candidates.length > 0 ? contest.candidates.map((side) => claim(side, options.truncate)) : ["  (nothing — this key has no live claim)"]), "", "Being written:", claim(contest.incoming, options.truncate), "", "Why this is refused:", indent(contest.explanation)];
+	return lines.join("\n");
+}
+
 export function renderConflict(conflict: PendingConflict): string {
 	const lines = [
 		`Conflict ${conflict.id} — ${formatIdentity(conflict.identity)}`,
 		`Opened ${conflict.createdAt}, aimed at ${conflict.file}`,
 		"",
-		`Incoming (${conflict.incoming.heading}${conflict.incoming.asOf ? `, asOf ${conflict.incoming.asOf}` : ""}):`,
-		indent(conflict.incoming.body),
+		formatContest(conflict),
 		"",
-		"Live claim(s):",
+		`Suggested: ${conflict.suggested}.`,
 	];
-	for (const candidate of conflict.candidates) {
-		lines.push("", `${candidate.path}#${candidate.heading}${candidate.asOf ? `, asOf ${candidate.asOf}` : ""}${candidate.source ? `, source: ${candidate.source}` : ""}:`);
-		lines.push(indent(candidate.body));
-	}
-	lines.push("", `Suggested: ${conflict.suggested}.`, "", conflict.explanation);
 	return `${lines.join("\n")}\n`;
+}
+
+/** One line, capped: for prompt injections and dialog previews, where a whole entry
+ *  is either noise or unreadable. */
+export function clip(text: string, limit: number): string {
+	return truncate(text, limit);
+}
+
+function truncate(text: string, limit: number): string {
+	const flat = text.replace(/\s+/g, " ").trim();
+	if (flat.length <= limit) return flat;
+	// Cut at a word, not mid-word: a line ending in "in s…" reads like a bug and the
+	// reader cannot tell what was truncated.
+	const cut = flat.slice(0, limit);
+	return `${(cut.lastIndexOf(" ") > limit * 0.6 ? cut.slice(0, cut.lastIndexOf(" ")) : cut).trimEnd()}…`;
 }
 
 function indent(text: string): string {

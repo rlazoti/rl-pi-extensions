@@ -259,11 +259,34 @@ resolve: "discard"            incoming is dropped; nothing changes on disk
 claims they retire live — one write per affected file, applied together.
 
 **The dialog sits on top of this, not inside it** (implemented in
-`implementation.ts`). The refusal already carries everything a dialog needs —
-incoming versus candidate bodies, `asOf`, `source`, and a suggestion — so the ask
-is a UI over the refusal, and the gate's contract is identical in every Pi mode:
-a human answer becomes a second `decide` call with `resolve` + `conflictId`; a
-dismissal, a timeout or no UI at all parks the refusal in the pending queue.
+`implementation.ts`). The refusal already carries everything a decision needs —
+incoming versus live bodies, `asOf`, `source`, and what the dates alone would have
+decided — so the ask is a UI over the refusal, and the gate's contract is identical
+in every Pi mode: a human answer becomes a second `decide` call with `resolve` +
+`conflictId`; a cancel, an aborted tool call, a UI that throws, or no UI at all
+leaves the refusal parked in the pending queue.
+
+**The contest is parked before anyone is asked.** The question can be lost — the
+human steps away, another extension's dialog displaces this one, the tool call is
+cancelled, the session ends — and a lost question must not take the refusal with
+it. Answering clears the queue entry; anything else leaves it where the next turn
+will find it. An answer that turns out to be malformed is the opposite case: the
+question *was* answered, so the entry is cleared and the caller is told what was
+missing, rather than the next turn being told nobody was asked.
+
+**One question at a time.** Pi gives extensions a single dialog slot — the editor
+area — and a second `ui.select` replaces the first, leaving whoever asked the first
+question awaiting a dialog that is no longer on screen. Two parallel
+`memory_write` calls with rival claims therefore produced one visible question and
+one caller hanging with no visible reason. `implementation.ts` serialises its own
+dialogs: a second concurrent conflict is parked and reported
+("another conflict is already on screen"), never asked underneath the first.
+
+**No timer.** An earlier version auto-dismissed after two minutes. That put a clock
+above the human: an answer nobody had had time to consider was discarded, and the
+session resumed with a half-answered refusal on screen. The dialog waits as long as
+the human needs. Esc, or cancelling the tool call, is how to say "not now" — and
+because the contest is already parked, walking away costs nothing.
 
 ## Component API
 
@@ -377,14 +400,19 @@ asked* and *whether to load at all*.
 | `/memory` | `doctor \| pending \| resolve <id> \| show <key> \| files`. |
 | `before_agent_start` | The `inject()` text for the prompt plus the pending-conflict notice. Silent — no message, no tokens — when there is nothing to say. |
 
-**Asking.** With a dialog available, the human is asked inside the same call:
-`ctx.ui.select` for the resolution, `ctx.ui.input` for merged text when the answer
-is `merge`, and one line of "why" that becomes `resolution:` provenance. Dialogs
-carry a 2-minute timeout and the abort signal, because a dialog nobody dismisses
-must not hang a turn; timeout, dismiss and abort all park the refusal, which is
-the same outcome as having no UI. In `print`/`json`/`rpc` the refusal is parked
-and the caller is told how to answer it; `/memory resolve <id>` there requires an
-explicit `--resolve=`, and a suggestion is never applied by default.
+**Asking.** With a dialog available, the human is asked inside the same call. The
+title is the whole contest — what the bank says now, what is being written, and the
+rule that refused it (`formatContest`, the same rendering `/memory pending` and the
+tool result use, so nothing drifts) — and only then the five resolutions, each
+labelled with what it does. `merge` previews both claims on one line each while the
+human types the replacement, and a final line collects the "why" that becomes
+`resolution:` provenance. Every dialog gets the **tool call's own abort signal**, so
+cancelling the call closes the dialog instead of stranding it, and none gets a
+timeout. In `print`/`json`/`rpc` the refusal is parked and the caller is told how to
+answer it; `/memory resolve <id>` there requires an explicit `--resolve=` and prints
+the full contest first, because choosing a resolution blind is not choosing. The
+per-turn notice carries both claims too, not just an id: one line of "there is a
+conflict" is nothing for a human to decide on and nothing for an agent to relay.
 
 **The queue is surfaced every turn**, so the agent can raise an unanswered
 conflict with the human, and `/memory pending` shows it on demand.
@@ -661,16 +689,16 @@ lives one level down, so the familiar top-level names stay appendable.
 | 1 | entry schema + tolerant topic-file parser + authority order | ✅ `schema.ts` |
 | 2 | resolver: two gates, one authority per key per context, conflict reporting | ✅ `resolver.ts` |
 | 3 | admission gate: refuse rivals, pure resolutions, provenance | ✅ `gate.ts` |
-| 3b | TUI ask + pending queue (dialog on top of the gate's refusal) | ⬜ |
+| 3b | TUI ask + pending queue (dialog on top of the gate's refusal) | ✅ `implementation.ts` `pending.ts` |
 | 4 | recall + budget + deterministic prompt text | ✅ `inject.ts` |
 | 5a | tools, `/memory`, injection hook, pending queue, single-instance guard | ✅ `implementation.ts` `service.ts` `pending.ts` `fs-store.ts` |
 | 5b-1 | migration tooling + dry run of the live bank | ✅ `migrate.ts` `scripts/migrate-report.mjs` |
-| 5b-2 | apply the migration + cutover of the live extension | ⬜ (decisions taken; needs the go-ahead) |
+| 5b-2 | apply the migration + cutover of the live extension | ✅ live bank migrated 2026-10-14; backup in `~/.pi/backups/` |
 | 6 | daily rollover: archive, reported carry, item dates, ageing, cap, staleness surfacing | ✅ `rollover.ts` `dailyItems.ts` `markdown.ts` |
 
 ## Testing map
 
-239 tests in `extensions/memory/`:
+245 tests in `extensions/memory/`:
 
 - `schema.test.ts` (31): grammar and scope parsing; metadata vs body boundaries;
   fenced `##` is body; CRLF; unclosed fence; legacy prose headings flagged
@@ -716,7 +744,7 @@ lives one level down, so the familiar top-level names stay appendable.
   test can reach the real bank; writes are the gate's rendered bytes with no
   temp-file leftovers and no path escape; a disk round trip loses nothing
   (provenance included); the guard tells our symlink from a foreign real directory.
-- `pending.test.ts` (9): the request round-trips without losing a field; the
+- `pending.test.ts` (10): the request round-trips without losing a field; the
   stored request replays to the same `conflictId`, so the queue cannot drift from
   the gate; re-refusing one contest updates one record; unreadable queue files are
   reported rather than guessed at; ids are validated before reaching the
@@ -724,12 +752,12 @@ lives one level down, so the familiar top-level names stay appendable.
 - `dailyItems.test.ts` (10): the item grammar (`- (YYYY-MM-DD) …`), sub-bullets belonging to their parent item, fence awareness; stamping from the file's date rather than today; already-dated items untouched; `stampDailyFile` touching only open sections and leaving everything else byte for byte; retirement by age; **undated items never retired** (unknown age is not an excuse to drop work); the per-section cap keeping the newest and naming the overflow; every drop reported.
 - `rollover.test.ts` (21): rollover happens exactly when the day changed and not when it did not; date-field precedence; mtime recovery labelled as such; an undated file normalised instead of sitting undated forever; alias recognition for open work (`Next Steps` / `Handoff` / `Blocked` / `Todo` …) with no prefix matching; settled work reported rather than carried; unrecognised headings named with the alternatives offered; project groups preserved with only their open parts; a group with nothing open reported; age markers so a carried intention looks as old as it is; nothing-carried stated out loud; fenced code preserved; archives byte-identical; no churn on a second pass; undated archive naming; the fresh file keeps the top-level section names other tools append to; **round trip** — a file the rollover wrote is understood by the next rollover: annotation in the body, item dates kept, aged items retired without leaving an empty section or a stack of provenance notes.
 - `migrate.test.ts` (27): proposals and their cues; what is skipped and why (structural headings matched whole, status snapshots, non-`knowledge/` paths, bodyless sections, `## Source` folded into provenance); split families, qualifier merging, fence attachment, per-claim `kind`, placeholder-degrading keys, `similar-claim`; already-entry skip and the broken-entry report; prose consumption with hand-written claims preserved and a colliding proposal stopped; batch collisions; determinism and re-application idempotence; the report's own text.
-- `service.test.ts` (19): write / resolveQueued / show / search / injection /
+- `service.test.ts` (24): write / resolveQueued / show / search / injection /
   doctor against a scratch bank — a parked refusal leaves the bank byte-identical;
   an answered contest clears its queue entry; a queue entry resolved after the
   store moved on is re-parked, not applied; a malformed human answer is a
   rejection, not a refusal.
-- `index.test.ts` (18): the extension driven through Pi's own surface — a fake
+- `index.test.ts` (27): the extension driven through Pi's own surface — a fake
   `pi` capturing registrations, a fake context carrying the dialogs — against a
   scratch bank: the registration set; the guard standing down and notifying; a
   clean write; a rival refused with nothing written and the queue filled; the same
@@ -741,7 +769,12 @@ lives one level down, so the familiar top-level names stay appendable.
   `memory_doctor` dirty vs clean; `/memory pending|doctor|resolve|nonsense`;
   `/memory resolve` with a dialog and with `--resolve=` where there is no UI; the
   hook injecting authorities, surfacing the queue, and staying silent when there
-  is nothing to say.
+  is nothing to say; **the dialog showing both claims and the refusal reason**
+  (not just the options); **no dialog carrying a timer**; **two conflicting writes
+  in one turn asking once and parking the other** (Pi has one dialog slot, and a
+  displaced caller hangs invisibly); a write whose tool call is already cancelled
+  opening no dialog at all; and the merge path completing select → merged claim →
+  why, with the merged text in the store.
 - Catalog pins in `tests/symlink-manager.test.ts` and count pins in
   `tests/picker.test.ts` derive from the live catalog instead of a literal 5.
 

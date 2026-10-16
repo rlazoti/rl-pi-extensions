@@ -16,7 +16,7 @@ import { dailyDate, dailyFreshness, isOpenHeading, planDailyRollover, renderRoll
 import { stampDailyFile } from "./dailyItems.js";
 import { decide, RESOLUTIONS, type ConflictRefusal, type GateResult, type Resolution, type WriteRequest } from "./gate.js";
 import { inject, recall, type Candidate, type Injection } from "./inject.js";
-import { deleteConflict, listConflicts, loadConflict, renderConflict, saveConflict, type PendingConflict, type PendingList } from "./pending.js";
+import { deleteConflict, formatContest, listConflicts, loadConflict, renderConflict, saveConflict, type PendingConflict, type PendingList } from "./pending.js";
 import { resolveAll, resolveKey, type AuthorityPlan, type MemoryStore, type ScopeContext, type Violation } from "./resolver.js";
 import { formatIdentity, type EntryStatus, type MemoryEntry, type ParseIssue } from "./schema.js";
 
@@ -41,6 +41,10 @@ export interface WriteOutcome {
 	pendingId?: string;
 	/** Human-readable form of the queued refusal, for dialogs and `/memory pending`. */
 	conflictText?: string;
+	/** The same contest, compact: both claims and the rule that refused it, capped to
+	 *  fit one screen. The agent reads this, so it can repeat the real contest instead
+	 *  of "there is a conflict — pick one". */
+	contest?: string;
 	issues?: ParseIssue[];
 }
 
@@ -123,10 +127,11 @@ export function createService(paths: MemoryPaths, options: ServiceOptions = {}):
 			summary: `CONFLICT ${formatIdentity(refusal.identity)} — nothing was written.`,
 			conflictId: refusal.conflictId,
 			instructions:
-				`Nothing was written. Decide, then re-invoke the same write with one of resolve: ${RESOLUTIONS.join(" | ")} and conflictId: ${refusal.conflictId}. ` +
-				"If you are not entitled to decide, ask the human. The refusal is parked and will be surfaced until it is answered.",
+				`No decision was collected (no UI, the question was cancelled or interrupted, or another conflict is already on screen), so the contest is parked and surfaced every turn until it is answered. ` +
+				`Do not retry this write and do not pick a winner yourself: ask the human, then re-invoke the same write with one of resolve: ${RESOLUTIONS.join(" | ")} and conflictId: ${refusal.conflictId}, or have them run /memory resolve ${refusal.conflictId}.`,
 			pendingId: queued.id,
 			conflictText: renderConflict(queued),
+			contest: formatContest(refusal, { truncate: 260 }),
 		};
 	};
 
@@ -163,8 +168,19 @@ export function createService(paths: MemoryPaths, options: ServiceOptions = {}):
 		// refusal it was given): no dialog, but the queue entry must still clear.
 		if (first.kind !== "conflict" || !options.ask) return settle(fromGate(first, request, loaded.store), request.conflictId);
 
-		const choice = await options.ask(first, request);
-		if (choice === null || choice === undefined) return park(first, request);
+		// Parked *before* anyone is asked. The question can be lost: the human steps
+		// away, another extension's dialog displaces this one in the single dialog
+		// slot, the tool call is cancelled, the session ends. A lost question must not
+		// take the refusal with it. Answering clears the queue entry; anything else
+		// leaves it there, where the next turn will find it.
+		const queued = park(first, request);
+		let choice: ResolutionChoice | null | undefined;
+		try {
+			choice = await options.ask(first, request);
+		} catch (error) {
+			return { ...queued, summary: `${queued.summary} The question could not be asked (${error instanceof Error ? error.message : String(error)}), so it stays in the queue.` };
+		}
+		if (choice === null || choice === undefined) return queued;
 
 		const answered = decide(loaded.store, {
 			...request,
@@ -175,6 +191,17 @@ export function createService(paths: MemoryPaths, options: ServiceOptions = {}):
 		});
 		// A second refusal (state moved on) is parked, not silently retried.
 		if (answered.kind === "conflict") return park(answered, request);
+		if (answered.kind === "reject") {
+			// The question *was* answered — badly. That is not an unanswered contest:
+			// leaving it queued would tell the next turn that nobody was asked, when in
+			// fact the answer was unusable. The caller has to fix it and re-invoke, and
+			// the refusal is re-parked then if the contest still stands.
+			deleteConflict(paths, first.conflictId);
+			return {
+				...settle(fromGate(answered, request, loaded.store), first.conflictId),
+				instructions: `The answer for ${first.conflictId} was unusable, so nothing was written and the contest is not queued. Re-invoke with a valid resolve (${RESOLUTIONS.join(" | ")}) and conflictId: ${first.conflictId}.`,
+			};
+		}
 		const outcome = settle(fromGate(answered, request, loaded.store), first.conflictId);
 		if (outcome.kind === "written") {
 			outcome.summary = `${outcome.summary} Resolved by the human: ${choice.resolution}${choice.note ? ` (${choice.note})` : ""}.`;

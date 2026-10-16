@@ -18,7 +18,9 @@ import { formatIdentity } from "./schema.js";
 import type { ScopeContext } from "./resolver.js";
 import { memoryPaths } from "./fs-store.js";
 import { collisionReport, createService, RESOLUTIONS, type AskFn, type ResolutionChoice, type WriteOutcome } from "./service.js";
-import type { WriteRequest } from "./gate.js";
+import { clip, formatContest, renderConflict } from "./pending.js";
+import type { ContestSide } from "./pending.js";
+import type { Resolution, WriteRequest } from "./gate.js";
 import type { Candidate, DailyStatus, DoctorReport, KeyReport } from "./service.js";
 import type { PendingConflict, PendingList } from "./pending.js";
 
@@ -31,11 +33,23 @@ const RESOLUTION_LABELS: Record<string, string> = {
 };
 
 /**
- * A dialog that never dismisses blocks the turn forever, and a human who is away
- * from the keyboard must not be a reason for a write to hang. On timeout or
- * dismiss the refusal is parked, which is the same outcome as "no UI".
+ * No timer. A human who is not at the keyboard is not on a clock: the earlier
+ * version auto-dismissed after two minutes, which discarded an answer nobody had
+ * had time to give and left the turn in a half-answered state. The dialog waits.
+ * Esc, or cancelling the tool call, is how to say "not now" — and the refusal is
+ * already parked by then, so walking away costs nothing.
  */
-const ASK_TIMEOUT_MS = 120_000;
+
+/**
+ * Pi's interactive UI gives extensions one dialog slot: the editor area. A second
+ * `ui.select` replaces the first, and whoever asked the first question can be left
+ * awaiting a dialog that is no longer on screen — a session hanging with no visible
+ * reason. So this extension asks one question at a time: a second concurrent
+ * conflict is parked and reported instead of asked, and answered right after the
+ * first. The tool call's own abort signal is passed to every dialog, so cancelling
+ * the call closes the dialog rather than stranding it.
+ */
+let questionInFlight = false;
 
 const DATE = Type.String({ description: "YYYY-MM-DD — the date this claim became true. Never invented, never defaulted to today." });
 const CONFLICT_ID = Type.String({ pattern: "^[0-9a-f]{8}$", description: "The conflictId from a refusal. Required with resolve." });
@@ -83,25 +97,32 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 		}
 	});
 
-	const askFactory = (ctx: ExtensionToolContext | ExtensionContext): AskFn => async (refusal, request) => {
+	const askFactory = (ctx: ExtensionToolContext | ExtensionContext, signal?: AbortSignal): AskFn => async (refusal, request) => {
 		if (!ctx.hasUI) return null;
+		// The caller has already gone away, or a question is already on screen. Do not
+		// open a second dialog: `service.ts` parked this contest before calling, so
+		// returning null is a clean "ask later", not a lost write.
+		if (signal?.aborted === true || questionInFlight) return null;
+		questionInFlight = true;
+		try {
+			const shown = RESOLUTIONS.map((resolution) => RESOLUTION_LABELS[resolution] ?? resolution);
+			const picked = await ctx.ui.select(contestTitle(`Memory conflict — ${formatIdentity(refusal.identity)}`, refusal.incoming, refusal.candidates, refusal.explanation, refusal.conflictId, refusal.suggested), shown, { signal: signal ?? ctx.signal });
+			if (picked === undefined) return null;
+			const resolution = RESOLUTIONS[shown.indexOf(picked)];
+			if (resolution === undefined) return null;
 
-		const shown = RESOLUTIONS.map((resolution) => RESOLUTION_LABELS[resolution] ?? resolution);
-		const picked = await ctx.ui.select(`Memory conflict — ${formatIdentity(refusal.identity)}`, shown, { signal: ctx.signal, timeout: ASK_TIMEOUT_MS });
-		if (picked === undefined) return null;
-		const resolution = RESOLUTIONS[shown.indexOf(picked)];
-		if (resolution === undefined) return null;
+			let mergedBody: string | undefined;
+			if (resolution === "merge") {
+				const typed = await ctx.ui.input(`Merge ${refusal.incoming.key} — type the one claim that replaces both`, sidesPreview(refusal.incoming, refusal.candidates), { signal: signal ?? ctx.signal });
+				if (!typed?.trim()) return null;
+				mergedBody = typed.trim();
+			}
 
-		let mergedBody: string | undefined;
-		if (resolution === "merge") {
-			const typed = await ctx.ui.input(`Merged claim for ${request.key}`, "the single sentence that replaces both claims", { signal: ctx.signal, timeout: ASK_TIMEOUT_MS });
-			if (!typed?.trim()) return null;
-			mergedBody = typed.trim();
+			const why = await ctx.ui.input(`Why (${resolution})?`, "one line, recorded as provenance — blank to skip", { signal: signal ?? ctx.signal });
+			return { resolution, ...(mergedBody ? { mergedBody } : {}), ...(why?.trim() ? { note: why.trim() } : {}) };
+		} finally {
+			questionInFlight = false;
 		}
-
-		const why = await ctx.ui.input(`Why (${resolution})?`, "one line, recorded as provenance — blank to skip", { signal: ctx.signal, timeout: ASK_TIMEOUT_MS });
-		const choice: ResolutionChoice = { resolution, ...(mergedBody ? { mergedBody } : {}), ...(why?.trim() ? { note: why.trim() } : {}) };
-		return choice;
 	};
 
 	pi.on("before_agent_start", async (event, ctx) => {
@@ -117,17 +138,16 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 		const parts = [injection.text];
 		if (queue.conflicts.length > 0) {
 			parts.push(
-				`## Memory conflicts awaiting a decision\n${queue.conflicts
-					.map((conflict) => `- ${conflict.id}: ${formatIdentity(conflict.identity)} in ${conflict.file} (asked ${conflict.createdAt}). Answer with memory_write + resolve + conflictId, or /memory resolve ${conflict.id}.`)
-					.join("\n")}`,
+				`## Memory conflicts awaiting a decision\n${queue.conflicts.map(describePendingForPrompt).join("\n")}`,
 			);
 		}
 		if (queue.corrupt.length > 0) {
 			parts.push(`## Memory queue damage\n${queue.corrupt.map((problem) => `- ${problem.file}: ${problem.error}`).join("\n")}`);
 		}
 		if (daily.freshness.stale) {
-			const age = daily.freshness.ageDays ?? "unknown";
-			parts.push(`## Daily context freshness\ncore/dailyContext.md is dated ${daily.freshness.date?.date ?? "unknown"} (${age} day(s) old${daily.freshness.date?.source === "mtime" ? ", dated by file mtime because the file has no date field" : ""}). Unfinished items in it may no longer be true; say so rather than repeating them.`);
+			const when = daily.freshness.date?.date ?? "unknown";
+			const why = daily.freshness.date?.source === "mtime" ? ", dated by file mtime because the file has no date field" : "";
+			parts.push(`## Daily context freshness\ncore/dailyContext.md is dated ${when} (${describeAge(daily.freshness.ageDays).trim()}${why}). Unfinished items in it may no longer be true; say so rather than repeating them.`);
 		}
 
 		return { message: { customType: "memory", content: parts.filter((part) => part !== "").join("\n\n"), display: false } };
@@ -166,7 +186,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 			note: Type.Optional(Type.String({ description: "One line on why this decision was made. Recorded as provenance." })),
 			fields: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Extra fields kept verbatim; this schema does not read them." })),
 		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			const request: WriteRequest = {
 				file: params.file,
 				key: params.key,
@@ -183,7 +203,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 				...(params.note ? { note: params.note } : {}),
 				...(params.fields ? { fields: params.fields } : {}),
 			};
-			const service = createService(paths, ctx.hasUI ? { ask: askFactory(ctx) } : {});
+			const service = createService(paths, ctx.hasUI ? { ask: askFactory(ctx, signal) } : {});
 			const outcome = await service.write(request);
 			return toolResult(formatOutcome(outcome), outcome, outcome.kind === "rejected");
 		},
@@ -267,8 +287,15 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 					if (!id) return ctx.ui.notify("memory resolve <conflictId>", "error");
 					const queued = service.pending().conflicts.find((conflict) => conflict.id === id);
 					if (!queued) return ctx.ui.notify(`No pending conflict ${id}.`, "error");
-					const choice = ctx.hasUI ? await askNow(ctx, queued) : await askByFlag(rest, queued);
-					if (choice === null) return ctx.ui.notify([`Left open. ${id} is still pending — nothing was written.`, conflictHint].filter(Boolean).join(" "), "warning");
+					const choice = ctx.hasUI ? await askNow(ctx, queued) : askByFlag(rest, queued);
+					if (choice === null) {
+						// No UI means no dialog, so the answer has to be spelled out here —
+						// and the contest has to be readable, or the flag is a blind choice.
+						const hint = ctx.hasUI
+							? ""
+							: `${renderConflict(queued)}\nPass --resolve=<${RESOLUTIONS.join("|")}>${queued.suggested ? ` (suggested: ${queued.suggested})` : ""}, optionally --merged=<text> and --note=<why>.`;
+						return ctx.ui.notify([`Left open. ${id} is still pending — nothing was written.`, hint].filter(Boolean).join("\n\n"), "warning");
+					}
 					const outcome = await service.resolveQueued(id, choice);
 					return ctx.ui.notify(formatOutcome(outcome), outcome.kind === "rejected" ? "error" : "info");
 				}
@@ -281,33 +308,34 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 
 // ─── Asking, in the two ways Pi allows it ───────────────────────────────────
 
-let conflictHint = "";
+async function askNow(ctx: ExtensionContext, conflict: PendingConflict, signal?: AbortSignal): Promise<ResolutionChoice | null> {
+	if (questionInFlight || signal?.aborted === true) return null;
+	questionInFlight = true;
+	try {
+		const shown = RESOLUTIONS.map((resolution) => RESOLUTION_LABELS[resolution] ?? resolution);
+		const picked = await ctx.ui.select(contestTitle(`Resolve ${conflict.id} — ${formatIdentity(conflict.identity)}`, conflict.incoming, conflict.candidates, conflict.explanation, conflict.id, conflict.suggested), shown, { signal: signal ?? ctx.signal });
+		if (picked === undefined) return null;
+		const resolution = RESOLUTIONS[shown.indexOf(picked)];
+		if (resolution === undefined) return null;
 
-async function askNow(ctx: ExtensionContext, conflict: PendingConflict): Promise<ResolutionChoice | null> {
-	const shown = RESOLUTIONS.map((resolution) => RESOLUTION_LABELS[resolution] ?? resolution);
-	const picked = await ctx.ui.select(`Resolve ${conflict.id} — ${formatIdentity(conflict.identity)}`, shown, { signal: ctx.signal, timeout: ASK_TIMEOUT_MS });
-	if (picked === undefined) return null;
-	const resolution = RESOLUTIONS[shown.indexOf(picked)];
-	if (resolution === undefined) return null;
-
-	let mergedBody: string | undefined;
-	if (resolution === "merge") {
-		const typed = await ctx.ui.input(`Merged claim for ${conflict.request.key}`, "the single sentence that replaces both claims", { signal: ctx.signal, timeout: ASK_TIMEOUT_MS });
-		if (!typed?.trim()) return null;
-		mergedBody = typed.trim();
+		let mergedBody: string | undefined;
+		if (resolution === "merge") {
+			const typed = await ctx.ui.input(`Merge ${conflict.request.key} — type the one claim that replaces both`, sidesPreview(conflict.incoming, conflict.candidates), { signal: signal ?? ctx.signal });
+			if (!typed?.trim()) return null;
+			mergedBody = typed.trim();
+		}
+		const why = await ctx.ui.input(`Why (${resolution})?`, "one line, recorded as provenance — blank to skip", { signal: signal ?? ctx.signal });
+		return { resolution, ...(mergedBody ? { mergedBody } : {}), ...(why?.trim() ? { note: why.trim() } : {}) };
+	} finally {
+		questionInFlight = false;
 	}
-	const why = await ctx.ui.input(`Why (${resolution})?`, "one line, recorded as provenance — blank to skip", { signal: ctx.signal, timeout: ASK_TIMEOUT_MS });
-	return { resolution, ...(mergedBody ? { mergedBody } : {}), ...(why?.trim() ? { note: why.trim() } : {}) };
 }
 
 /** No-UI path: the decision has to arrive on the command line. */
-async function askByFlag(rest: string[], conflict: PendingConflict): Promise<ResolutionChoice | null> {
+function askByFlag(rest: string[], conflict: PendingConflict): ResolutionChoice | null {
 	const index = rest.findIndex((token) => token.startsWith("--resolve="));
-	if (index === -1) {
-		// Nothing is guessed: `suggested` is a hint, not an answer.
-		conflictHint = `${conflict.id}: pass --resolve=<${RESOLUTIONS.join("|")}>${conflict.suggested ? ` (suggested: ${conflict.suggested})` : ""}`;
-		return null;
-	}
+	// Nothing is guessed: `suggested` is a hint, not an answer.
+	if (index === -1) return null;
 	const resolution = RESOLUTIONS.find((candidate) => candidate === rest[index]!.slice("--resolve=".length));
 	if (resolution === undefined) return null;
 	const merged = rest.find((token) => token.startsWith("--merged="));
@@ -317,6 +345,45 @@ async function askByFlag(rest: string[], conflict: PendingConflict): Promise<Res
 
 // ─── Formatting ─────────────────────────────────────────────────────────────
 
+/** What an unanswered contest looks like in the per-turn notice: both claims, in the
+ *  space a prompt can spare. One line of "there is a conflict" is not enough for the
+ *  human to decide, and the agent relaying it needs something to relay. */
+function describePendingForPrompt(conflict: PendingConflict): string {
+	const others = conflict.candidates.length > 1 ? ` (+${conflict.candidates.length - 1} more)` : "";
+	return [
+		`- ${conflict.id}: ${formatIdentity(conflict.identity)} in ${conflict.file} (asked ${conflict.createdAt})`,
+		`  the bank says: ${conflict.candidates[0] ? clip(conflict.candidates[0].body, 200) : "(no live claim)"}${others}`,
+		`  being written: ${clip(conflict.incoming.body, 200)}`,
+		`  why: ${clip(conflict.explanation.split(" Re-invoke with resolve:")[0] ?? conflict.explanation, 120)}`,
+		`  full text: memory_show ${conflict.request.key}. Decide with /memory resolve ${conflict.id}, or memory_write + resolve + conflictId — and do not pick a winner yourself.`,
+	].join("\n");
+}
+
+function describeAge(ageDays: number | null): string {
+	if (ageDays === null) return "unknown age";
+	if (ageDays < 0) return `dated ${-ageDays} day(s) in the future — check its \`- date:\` field or the clock`;
+	return ageDays === 0 ? "today" : `${ageDays} day(s) old`;
+}
+
+	// The two sides, the rule that refused the write, and how to defer: what a person
+	// needs in order to choose. Options alone are not a decision they can make.
+
+/** The two sides, the rule that refused the write, and how to defer: what a person
+ *  needs in order to choose. Options alone are not a decision they can make. */
+function contestTitle(headline: string, incoming: ContestSide, candidates: ContestSide[], explanation: string, conflictId: string, suggested?: Resolution): string {
+	const contest = formatContest({ incoming, candidates, explanation }, { truncate: 300 });
+	// A hint, not an answer: shown so the human knows what the dates alone would have
+	// decided, and ignorable just as legitimately.
+	return [headline, "", contest, "", `Esc leaves it queued — /memory resolve ${conflictId}. Nothing is written until you choose.${suggested ? ` (the dates alone would suggest: ${suggested})` : ""}`].join("\n");
+}
+
+/** The two claims, one line each: what a merge has to reconcile, in view while typing. */
+function sidesPreview(incoming: ContestSide, candidates: ContestSide[]): string {
+	const one = (side: ContestSide) => side.body.replace(/\s+/g, " ").slice(0, 120);
+	return [`bank: ${one(candidates[0] ?? { heading: "", body: "(none)" })}`, `new:   ${one(incoming)}`].join("\n");
+}
+
+
 /** `details` is the structured outcome: logs and renderers get the real shape
  *  instead of a re-derivation from the text the model reads. */
 function toolResult<T>(text: string, details: T, isError = false): AgentToolResult<T> {
@@ -325,6 +392,7 @@ function toolResult<T>(text: string, details: T, isError = false): AgentToolResu
 
 function formatOutcome(outcome: WriteOutcome): string {
 	const lines = [outcome.summary];
+	if (outcome.contest) lines.push("", outcome.contest);
 	if (outcome.instructions) lines.push("", outcome.instructions);
 	if (outcome.warnings?.length) lines.push("", ...outcome.warnings.map((warning) => `warning: ${warning}`));
 	if (outcome.issues?.length) lines.push("", ...outcome.issues.map((issue) => `${issue.severity} [${issue.code}] ${issue.message}`));
@@ -377,7 +445,7 @@ function formatDaily(status: DailyStatus): string {
 	if (!status.exists) return "Daily context: no core/dailyContext.md yet.";
 	const { date, ageDays, stale, needsDate } = status.freshness;
 	const when = date === null ? "undated" : `${date.date}${date.source === "mtime" ? " (dated by file mtime)" : ""}`;
-	const age = ageDays === null ? "" : ageDays === 0 ? " (today)" : ` (${ageDays} day(s) old)`;
+	const age = ageDays === null ? "" : ` (${describeAge(ageDays)})`;
 	return `Daily context: ${when}${age}${stale ? " — stale; it will be archived and carried at the next session start" : ""}${needsDate ? " — add a `- date: YYYY-MM-DD` line so rollover does not have to guess" : ""}.`;
 }
 

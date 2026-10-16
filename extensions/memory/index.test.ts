@@ -48,11 +48,14 @@ function fakePi(): { pi: ExtensionAPI; harness: Harness } {
 interface FakeContext {
 	ctx: ExtensionToolContext;
 	asked: string[];
+	/** Every dialog's options object, in order: what the extension asked with. */
+	dialogs: unknown[];
 	answers: Map<string, string | undefined>;
 }
 
 function fakeContext(options: { hasUI?: boolean; cwd?: string; answers?: Record<string, string | undefined> } = {}): FakeContext {
 	const asked: string[] = [];
+	const dialogs: unknown[] = [];
 	const answers = new Map(Object.entries(options.answers ?? {}));
 	const ctx = {
 		hasUI: options.hasUI ?? false,
@@ -60,19 +63,21 @@ function fakeContext(options: { hasUI?: boolean; cwd?: string; answers?: Record<
 		cwd: options.cwd ?? "/repo/rl-pi-extensions",
 		signal: undefined,
 		ui: {
-			select: async (title: string, choices: string[]) => {
+			select: async (title: string, choices: string[], opts?: unknown) => {
 				asked.push(`select:${title}`);
+				dialogs.push(opts);
 				return answers.get(title) ?? answers.get(title.split(" — ")[0]!) ?? undefined;
 			},
-			input: async (title: string) => {
+			input: async (title: string, placeholder?: string, opts?: unknown) => {
 				asked.push(`input:${title}`);
-				return answers.get(title) ?? "";
+				dialogs.push(opts);
+				return answers.get(title) ?? answers.get(title.split(" — ")[0]!) ?? "";
 			},
 			confirm: async () => true,
 			notify: () => {},
 		},
 	} as unknown as ExtensionToolContext;
-	return { ctx, asked, answers };
+	return { ctx, asked, dialogs, answers };
 }
 
 // ─── Scratch bank, every time ───────────────────────────────────────────────
@@ -370,6 +375,84 @@ test("the same write asked of a session with a UI goes to the human, in the call
 		assert.equal(conflictId.length, 8);
 	}));
 
+test("the conflict dialog shows both claims and the rule that refused the write", async () =>
+	withBank(async (bank) => {
+		bank.seed({ "ui.md": UI });
+		const { pi, harness } = fakePi();
+		factory(pi);
+		const tool = harness.tools.get("memory_write")!;
+		const human = fakeContext({ hasUI: true, answers: { "Memory conflict": undefined } });
+
+		await tool.execute("t1", WRITE_ARGS, undefined, undefined, human.ctx);
+		const title = human.asked.find((entry) => entry.startsWith("select:"))!.slice("select:".length);
+
+		// Options alone are not something a person can choose between.
+		assert.match(title, /Use dark grey for the UI background\./, "the claim in the bank");
+		assert.match(title, /Charcoal\./, "the claim being written");
+		assert.match(title, /In the bank now:/);
+		assert.match(title, /Being written:/);
+		assert.match(title, /Why this is refused:/);
+		assert.match(title, /competes with/, "the reason, not just a refusal");
+		assert.match(title, /\/memory resolve [0-9a-f]{8}/, "how to answer later");
+		assert.match(title, /Nothing is written until you choose/);
+	}));
+
+test("no conflict dialog is on a timer", async () =>
+	withBank(async (bank) => {
+		bank.seed({ "ui.md": UI });
+		const { pi, harness } = fakePi();
+		factory(pi);
+		const tool = harness.tools.get("memory_write")!;
+		const human = fakeContext({ hasUI: true, answers: { "Memory conflict": "merge — one claim replaces both, you supply the merged text", "Merge ui.background": "Charcoal, with dark grey kept as history." } });
+
+		const outcome = await tool.execute("t1", WRITE_ARGS, undefined, undefined, human.ctx);
+		assert.equal((outcome.details as { kind: string }).kind, "written", "the merge path completes: select, then the merged claim, then the reason");
+		assert.ok(human.asked.some((entry) => entry.startsWith("input:Merge ui.background")), "the merge question previews both sides");
+		assert.equal(human.dialogs.length, 3, "select + merged claim + why");
+		for (const dialog of human.dialogs) {
+			assert.equal((dialog as { timeout?: number })?.timeout, undefined, "a timer outranks the human: the dialog waits until they answer or cancel");
+		}
+		assert.match(bank.read("appearance.md"), /Charcoal, with dark grey kept as history\./);
+	}));
+
+test("two conflicting writes in one turn ask once and park the other", async () =>
+	withBank(async (bank) => {
+		bank.seed({ "ui.md": UI });
+		const { pi, harness } = fakePi();
+		factory(pi);
+		const tool = harness.tools.get("memory_write")!;
+		const human = fakeContext({ hasUI: true, answers: { "Memory conflict": undefined } });
+		const rivalPush = { file: "knowledge/appearance.md", key: "git.push", scope: "global", kind: "rule", body: "Push freely after review.", asOf: "2026-11-02", revision: "2026-11-02" };
+
+		// Pi gives extensions one dialog slot. A second ui.select replaces the first,
+		// and the write that asked the first question is then waiting on a dialog
+		// nobody can see — a session stuck with no visible reason.
+		const [first, second] = await Promise.all([tool.execute("t1", WRITE_ARGS, undefined, undefined, human.ctx), tool.execute("t2", rivalPush, undefined, undefined, human.ctx)]);
+
+		assert.equal(human.asked.filter((entry) => entry.startsWith("select:")).length, 1, "one question at a time");
+		assert.equal((first.details as { kind: string }).kind, "refused");
+		assert.equal((second.details as { kind: string }).kind, "refused");
+		assert.match((second.content[0] as { text: string }).text, /another conflict is already on screen/);
+		assert.equal(bank.queue().length, 2, "both contests are parked: neither is lost while one is on screen");
+		assert.equal(bank.exists("appearance.md"), false);
+	}));
+
+test("a write whose tool call is already cancelled never opens a dialog", async () =>
+	withBank(async (bank) => {
+		bank.seed({ "ui.md": UI });
+		const { pi, harness } = fakePi();
+		factory(pi);
+		const tool = harness.tools.get("memory_write")!;
+		const human = fakeContext({ hasUI: true, answers: { "Memory conflict": "discard — drop the new claim, the existing one stands" } });
+		const cancelled = new AbortController();
+		cancelled.abort();
+
+		const outcome = await tool.execute("t1", WRITE_ARGS, cancelled.signal, undefined, human.ctx);
+		assert.deepEqual(human.asked, [], "nobody is waiting for an answer; opening a dialog here strands it");
+		assert.equal((outcome.details as { kind: string }).kind, "refused");
+		assert.equal(bank.queue().length, 1, "the contest is still parked, and the next turn says so");
+	}));
+
 test("a write that already carries a resolution is applied without another dialog", async () =>
 	withBank(async (bank) => {
 		bank.seed({ "ui.md": UI });
@@ -551,7 +634,7 @@ test("/memory resolve without a UI needs an explicit --resolve, and guesses noth
 		const ctx = { hasUI: false, cwd: "/repo/x", ui: { notify: (message: string) => notices.push(message), select: async () => undefined, input: async () => "", confirm: async () => true } } as unknown as ExtensionCommandContext;
 
 		await harness.commands.get("memory")!.handler(`resolve ${id}`, ctx);
-		assert.match(notices[0]!, /pass --resolve=<supersede\|merge\|withdraw\|keep-both-flagged\|discard> \(suggested: supersede\)/);
+		assert.match(notices[0]!, /[Pp]ass --resolve=<supersede\|merge\|withdraw\|keep-both-flagged\|discard> \(suggested: supersede\)/);
 		assert.equal(bank.queue().length, 1, "still pending: a suggestion is not an answer");
 
 		await harness.commands.get("memory")!.handler(`resolve ${id} --resolve=discard`, ctx);
