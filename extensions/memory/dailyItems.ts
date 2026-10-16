@@ -194,7 +194,7 @@ export function pruneDailyBody(body: string, today: string, options: AgeingOptio
  */
 export function stampDailyFile(text: string, date: string, isOpen: (heading: string) => boolean): { text: string; stamped: number } {
 	const out: string[] = [];
-	let inOpenSection = false;
+	let openLevel: number | null = null;
 	let fence: string | null = null;
 	let stamped = 0;
 
@@ -209,12 +209,17 @@ export function stampDailyFile(text: string, date: string, isOpen: (heading: str
 		}
 		const heading = fence === null ? /^ {0,3}(#{1,6})\s+(.*\S)\s*$/.exec(line) : null;
 		if (heading) {
-			inOpenSection = isOpen(heading[2]!.trim());
+			// Position counts, not just the name: `## In Progress` followed by
+			// `### Money Manager` is still open work, and the next heading at the same
+			// level (or shallower) closes the section.
+			const level = heading[1]!.length;
+			if (isOpen(heading[2]!.trim())) openLevel = level;
+			else if (openLevel !== null && level <= openLevel) openLevel = null;
 			out.push(line);
 			continue;
 		}
 		const bullet = fence === null ? BULLET.exec(line) : null;
-		if (inOpenSection && bullet && /^\s*/.exec(line)![0] === "") {
+		if (openLevel !== null && bullet && /^\s*/.exec(line)![0] === "") {
 			const rest = line.slice(bullet[0]!.length);
 			if (ITEM_DATE.test(rest) || rest.trim() === "") {
 				out.push(line);

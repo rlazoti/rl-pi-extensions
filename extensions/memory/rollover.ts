@@ -139,12 +139,22 @@ function normalise(heading: string): string {
 		.trim();
 }
 
+/**
+ * The parts of a heading, split on the separators used to stack a group and a
+ * section into one title (`Money Manager — Handoff`). The rollover writes those
+ * titles, so the classifier has to read them: a title it cannot read is carried work
+ * the next pass drops.
+ */
+function headingParts(heading: string): string[] {
+	return heading.split(/\s+[—–/]\s+/).map((part) => part.trim()).filter((part) => part !== "");
+}
+
 export function isOpenHeading(heading: string): boolean {
-	return OPEN_HEADINGS.has(normalise(heading));
+	return headingParts(heading).some((part) => OPEN_HEADINGS.has(normalise(part)));
 }
 
 export function isSettledHeading(heading: string): boolean {
-	return SETTLED_HEADINGS.has(normalise(heading));
+	return headingParts(heading).some((part) => SETTLED_HEADINGS.has(normalise(part)));
 }
 
 /** Read the date a daily file is about. A `- date:` field wins; a bare date in the text is only evidence. */
@@ -187,33 +197,66 @@ interface Classified {
 }
 
 function classify(node: Section): Classified {
-	if (node.children.length > 0 && !isOpenHeading(node.title) && !isSettledHeading(node.title)) return { node, kind: "group" };
-	if (isOpenHeading(node.title)) return { node, kind: "open" };
+	// A heading with children is a grouping level even when its own words name open
+	// work: `## In Progress` holding `### Next Steps` is two levels of one idea, and
+	// treating the outer one as a leaf swallowed the inner heading into the body and
+	// produced `### In Progress` inside `## In Progress` in the next day's file.
 	if (isSettledHeading(node.title)) return { node, kind: "settled" };
+	if (node.children.length > 0) return { node, kind: "group" };
+	if (isOpenHeading(node.title)) return { node, kind: "open" };
 	return { node, kind: "unknown" };
 }
 
+/**
+ * Open work is decided by name **or position**: under an open heading, a child is
+ * open work whatever it is called, because the parent already said so
+ * (`## In Progress` / `### Money Manager`). A heading with children groups instead —
+ * its own bullets are carried separately, by `ownOpenWork`.
+ */
+function isOpenWork(node: Section, underOpenHeading: boolean): boolean {
+	if (isSettledHeading(node.title) || node.children.length > 0) return false;
+	return isOpenHeading(node.title) || underOpenHeading;
+}
+
+function ownOpenWork(node: Section, underOpenHeading: boolean): string {
+	if (node.lines.length === 0 || (!underOpenHeading && !isOpenHeading(node.title))) return "";
+	return node.lines.join("\n").trim();
+}
+
 /** Collect open-work leaves under a node, with the group they belong to. */
-function collectOpen(node: Section, group?: string): Array<{ group?: string; heading: string; text: string }> {
+function collectOpen(node: Section, group?: string, underOpen = false): Array<{ group?: string; heading: string; text: string }> {
 	const found: Array<{ group?: string; heading: string; text: string }> = [];
-	const classified = classify(node);
-	if (classified.kind === "open") {
+	if (isSettledHeading(node.title)) return found;
+	if (isOpenWork(node, underOpen)) {
 		const body = sectionText(node);
 		if (body !== "") found.push({ group, heading: node.title, text: body });
 		return found;
 	}
-	const nextGroup = classified.kind === "group" ? node.title : group;
-	for (const child of node.children) found.push(...collectOpen(child, nextGroup));
+	const own = ownOpenWork(node, underOpen);
+	if (own !== "") found.push({ group, heading: node.title, text: own });
+	const nextGroup = node.children.length > 0 ? node.title : group;
+	for (const child of node.children) found.push(...collectOpen(child, nextGroup, underOpen || isOpenHeading(node.title)));
 	return found;
 }
 
 function renderCarried(entry: { group?: string; heading: string; text: string }, from: string, ageDays: number | null): string {
-	// Provenance is a body line, never part of the heading: an annotation in a heading
-	// stops the next rollover recognising its own output. `Open work` is not a heading
-	// the classifier knows, so a section that was already called that keeps its name.
+	// Provenance is a body line, never part of the heading: an annotation inside a
+	// heading stops the next rollover recognising its own output.
 	const age = ageDays !== null && ageDays >= 2 ? ` — ${ageDays} days old` : "";
-	const title = [entry.group, entry.heading].filter((part) => part !== undefined && part !== "" && !/^open work$/i.test(part)).join(" — ") || "Carried work";
-	return ["", `### ${title}`, "", `_(carried from ${from}${age})_`, "", entry.text].join("\n");
+	// A group named with the same words as the section already being written is noise;
+	// a project name is not.
+	const group = entry.group !== undefined && entry.group !== "" && !isOpenHeading(entry.group) ? entry.group : undefined;
+	const title = [group, entry.heading].filter((part) => part !== undefined && part !== "" && !isWrapperHeading(part)).join(" — ").trim();
+	const note = `_(carried from ${from}${age})_`;
+	// `## In Progress` with work of its own needs no sub-heading repeating itself.
+	return title === "" ? [note, "", entry.text].join("\n") : [`### ${title}`, "", note, "", entry.text].join("\n");
+}
+
+/** Headings the fresh file already writes at level 2, so repeating them at level 3
+ *  says nothing and invites the next pass to nest the same idea twice. */
+function isWrapperHeading(heading: string): boolean {
+	const key = normalise(heading);
+	return key === "in progress" || key === "open work" || key === "carried work";
 }
 
 /**
@@ -241,28 +284,30 @@ export function planDailyRollover(file: DailyFile, today: string, options: { for
 	const retiredItems: RolloverPlan["retiredItems"] = [];
 	const cappedItems: RolloverPlan["cappedItems"] = [];
 
-	const walk = (node: Section, group?: string) => {
+	const carry = (heading: string, body: string, group: string | undefined) => {
+		if (body === "") return;
+		// Carried item by item: stamped with the day the file was about (never today —
+		// that would launder old intentions into fresh work), then aged and capped per
+		// section. Everything dropped is returned, not hidden.
+		const pruned = pruneDailyBody(body, today, { retireAfterDays: options.retireAfterDays, maxItems: options.maxItems, stampWith: from.source === "missing" ? today : from.date });
+		for (const item of pruned.retired) retiredItems.push({ section: heading, item });
+		for (const item of pruned.capped) cappedItems.push({ section: heading, item });
+		// Prose under an open heading is still open work: a section that says
+		// "run the gate:" with a command block carries even with no bullets.
+		const hadItems = parseDailyItems(body).some(isItem);
+		const keptItems = parseDailyItems(pruned.text).some(isItem);
+		if (keptItems || (pruned.text !== "" && !hadItems)) {
+			carried.push({ group, heading, text: pruned.text, from: from.source === "missing" ? "undated" : from.date, ageDays: daysBetween(from.date, today), stamped: pruned.stamped });
+		}
+		if (hadItems && !keptItems) {
+			notCarried.push({ heading, reason: `every open item aged out or went past the carry cap (${pruned.retired.length} aged, ${pruned.capped.length} capped) — they are in the archive, not gone` });
+		}
+	};
+
+	const walk = (node: Section, group?: string, underOpen = false) => {
 		const classified = classify(node);
-		if (classified.kind === "open") {
-			const body = stripCarriedNote(sectionText(node));
-			if (body !== "") {
-				// Carried item by item: stamped with the day the file was about (never
-				// today — that would launder old intentions into fresh work), then aged
-				// and capped per section. Everything dropped is returned, not hidden.
-				const pruned = pruneDailyBody(body, today, { retireAfterDays: options.retireAfterDays, maxItems: options.maxItems, stampWith: from.source === "missing" ? today : from.date });
-				for (const item of pruned.retired) retiredItems.push({ section: node.title, item });
-				for (const item of pruned.capped) cappedItems.push({ section: node.title, item });
-				// Prose under an open heading is still open work: a section that says
-				// "run the gate:" with a command block carries even with no bullets.
-				const hadItems = parseDailyItems(body).some(isItem);
-				const keptItems = parseDailyItems(pruned.text).some(isItem);
-				if (keptItems || (pruned.text !== "" && !hadItems)) {
-					carried.push({ group, heading: node.title, text: pruned.text, from: from.source === "missing" ? "undated" : from.date, ageDays: daysBetween(from.date, today), stamped: pruned.stamped });
-				}
-				if (hadItems && !keptItems) {
-					notCarried.push({ heading: node.title, reason: `every open item aged out or went past the carry cap (${pruned.retired.length} aged, ${pruned.capped.length} capped) — they are in the archive, not gone` });
-				}
-			}
+		if (isOpenWork(node, underOpen)) {
+			carry(node.title, stripCarriedNote(sectionText(node)), group);
 			return;
 		}
 		if (classified.kind === "settled") {
@@ -273,13 +318,17 @@ export function planDailyRollover(file: DailyFile, today: string, options: { for
 			notCarried.push({ heading: node.title, reason: "empty section — nothing under it to carry or archive" });
 			return;
 		}
-		if (classified.kind === "unknown" && node.children.length === 0) {
+		if (classified.kind === "unknown" && node.children.length === 0 && !underOpen) {
 			notCarried.push({ heading: node.title, reason: "unrecognised heading — not carried; if it is open work, name it Next Steps / In Progress / Handoff / Blocked, or move it into one of those" });
 			return;
 		}
+		// A grouping level carries its own bullets (if it has any) before its children,
+		// then recurses: `## Money Manager` over `### Handoff` is Money Manager's work.
+		const own = ownOpenWork(node, underOpen);
+		if (own !== "") carry(node.title, stripCarriedNote(own), group);
 		const nextGroup = classified.kind === "group" ? node.title : group;
-		for (const child of node.children) walk(child, nextGroup);
-		if (classified.kind === "group" && node.children.length > 0 && collectOpen(node).length === 0) {
+		for (const child of node.children) walk(child, nextGroup, underOpen || isOpenHeading(node.title));
+		if (classified.kind === "group" && node.children.length > 0 && collectOpen(node, group, underOpen).length === 0 && own === "") {
 			notCarried.push({ heading: node.title, reason: "no open work under it — archived as a group" });
 		}
 	};
@@ -300,7 +349,8 @@ export function planDailyRollover(file: DailyFile, today: string, options: { for
 	if (carried.length === 0) {
 		fresh.push("## In Progress", "", "_Nothing was carried forward. The previous day's file is archived, and the sections that were not carried are listed with their reasons in the rollover report._", "");
 	} else {
-		fresh.push("## In Progress", ...carried.map((entry) => renderCarried({ heading: entry.heading, group: entry.group, text: entry.text }, entry.from, entry.ageDays)));
+		fresh.push("## In Progress", "");
+		for (const entry of carried) fresh.push(renderCarried({ heading: entry.heading, group: entry.group, text: entry.text }, entry.from, entry.ageDays), "");
 	}
 	fresh.push("## Completed", "", "## Key Decisions", "", "## Notes", "");
 

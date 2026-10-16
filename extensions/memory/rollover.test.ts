@@ -115,10 +115,49 @@ test("project grouping survives the rollover, and only the open parts of it", ()
 	const plan = planDailyRollover({ text: GROUPED, modified: "2026-10-12" }, TODAY)!;
 	assert.deepEqual(plan.carried.map((entry) => `${entry.group} / ${entry.heading}`), ["Money Manager / In Progress", "rl-pi-extensions / Handoff"]);
 	assert.match(plan.freshText, /## In Progress/);
-	assert.match(plan.freshText, /### Money Manager — In Progress/);
+	assert.match(plan.freshText, /### Money Manager\n\n_\(carried from 2026-10-12 — 2 days old\)_/);
 	// Grouping survives, one level down, so the open-work heading stays familiar.
 	assert.match(plan.freshText, /### rl-pi-extensions — Handoff\n\n_\(carried from 2026-10-12 — 2 days old\)_/);
 	assert.equal(plan.freshText.includes("Categories & Tags spec written"), false);
+});
+
+test("an open heading that contains another open heading groups, not nests", () => {
+	const plan = planDailyRollover({ text: `- date: 2026-10-13\n\n## In Progress\n\n### Next Steps\n\n- (2026-10-13) verify the simulator\n`, modified: "2026-10-13" }, TODAY)!;
+	// The outer heading says the same thing as the section we already write, so the
+	// inner one carries the work and the outer one disappears rather than nesting.
+	assert.match(plan.freshText, /## In Progress/);
+	assert.match(plan.freshText, /### Next Steps/);
+	assert.equal(plan.freshText.includes("### In Progress"), false);
+	assert.deepEqual(plan.carried.map((entry) => entry.heading), ["Next Steps"]);
+	// Blank-line separated from the scaffold that follows, because a heading glued to
+	// the last item reads as part of it.
+	assert.match(plan.freshText, /verify the simulator\n\n## Completed/);
+
+	// And the shape is stable across another rollover, not one clean pass.
+	const again = planDailyRollover({ text: plan.freshText }, "2026-10-20")!;
+	assert.deepEqual(again.carried.map((entry) => entry.heading), ["Next Steps"]);
+});
+
+test("a title the rollover wrote is still recognised by the next rollover", () => {
+	const first = planDailyRollover({ text: `- date: 2026-10-13\n\n## Money Manager\n### Handoff\n- push when approved\n`, modified: "2026-10-13" }, TODAY)!;
+	assert.match(first.freshText, /### Money Manager — Handoff/);
+
+	// A compound heading must read back as open work — otherwise the second pass calls
+	// it an unrecognised heading and drops it — and the rendered title must be stable
+	// across passes rather than growing a wrapper or a suffix each time.
+	const again = planDailyRollover({ text: first.freshText }, "2026-10-20")!;
+	assert.equal(again.carried.length, 1);
+	assert.match(again.carried[0]!.text, /push when approved/);
+	assert.deepEqual(again.notCarried.map((item) => item.heading).filter((heading) => heading.includes("Handoff")), []);
+	assert.match(again.freshText, /### Money Manager — Handoff/);
+	assert.equal(again.freshText.includes("In Progress — Money Manager"), false, "the wrapper heading is not a project name");
+});
+
+test("work written directly under an open heading is carried alongside its children", () => {
+	const plan = planDailyRollover({ text: `- date: 2026-10-13\n\n## In Progress\n- direct work\n\n### Money Manager\n- project work\n`, modified: "2026-10-13" }, TODAY)!;
+	assert.deepEqual(plan.carried.map((entry) => `${entry.group ?? ""} / ${entry.heading}`), [" / In Progress", "In Progress / Money Manager"], "the parent's own bullets and the child's, in order");
+	assert.match(plan.freshText, /- \(2026-10-13\) direct work/);
+	assert.match(plan.freshText, /- \(2026-10-13\) project work/);
 });
 
 test("the fresh file keeps the section names other tools append to", () => {
@@ -137,10 +176,13 @@ test("a group with no open work is reported rather than dropped", () => {
 test("carried work shows its age, so a stale intention does not read as current", () => {
 	const plan = planDailyRollover({ text: `- date: 2026-10-03\n\n## In Progress\n- verify the simulator\n`, }, TODAY)!;
 	assert.equal(plan.carried[0]!.ageDays, 11);
-	assert.match(plan.freshText, /### In Progress\n\n_\(carried from 2026-10-03 — 11 days old\)_/);
+	// `## In Progress` with items of its own needs no sub-heading repeating it.
+	assert.equal(plan.freshText.includes("### In Progress"), false);
+	assert.match(plan.freshText, /## In Progress\n\n_\(carried from 2026-10-03 — 11 days old\)_\n\n- \(2026-10-03\) verify the simulator/);
 
+	// One day old: the age marker is dropped, the note stays.
 	const yesterday = planDailyRollover({ text: `- date: 2026-10-13\n\n## In Progress\n- verify the simulator\n`, }, TODAY)!;
-	assert.match(yesterday.freshText, /### In Progress\n\n_\(carried from 2026-10-13\)_/);
+	assert.match(yesterday.freshText, /## In Progress\n\n_\(carried from 2026-10-13\)_/);
 });
 
 test("an empty carry is stated, not left as a blank file that looks like nothing happened", () => {
@@ -152,7 +194,8 @@ test("an empty carry is stated, not left as a blank file that looks like nothing
 test("a file the rollover wrote is still understood by the rollover", () => {
 	const first = planDailyRollover({ text: `- date: 2026-10-13\n\n## Money Manager\n### In Progress\n- verify the simulator\n`, modified: "2026-10-13" }, TODAY)!;
 	assert.match(first.freshText, /## In Progress/);
-	assert.match(first.freshText, /### Money Manager — In Progress/);
+	assert.match(first.freshText, /### Money Manager/);
+	assert.equal(first.freshText.includes("### In Progress"), false);
 	assert.match(first.freshText, /- \(2026-10-13\) verify the simulator/, "the carry dated the item with the day the file was about");
 
 	// Nothing left to stamp: carrying already did it, and the heading is still a

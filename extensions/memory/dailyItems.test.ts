@@ -8,6 +8,16 @@ const item = (date: string | null, text: string): DailyItem => ({ date, text, ra
 
 // ─── Reading items ──────────────────────────────────────────────────────────
 
+test("items under a named child of an open heading are open work too", () => {
+	// Position decides: `## In Progress` / `### Money Manager` is Money Manager's
+	// open work, and the stamp pass must not stop at the child's unfamiliar name.
+	const text = `## In Progress\n\n### Money Manager\n- verify the simulator\n\n## Completed\n- shipped it\n`;
+	const stamped = stampDailyFile(text, "2026-10-13", isOpenHeading);
+	assert.equal(stamped.stamped, 1);
+	assert.match(stamped.text, /- \(2026-10-13\) verify the simulator/);
+	assert.match(stamped.text, /- shipped it/, "the settled section still closes the open one");
+});
+
 test("an item carries its date in the text, and the text is kept clean", () => {
 	const parsed = parseDailyItems("- (2026-10-11) verify the simulator\n- push when approved\n").filter(isItem);
 	assert.deepEqual(parsed.map((entry) => [entry.date, entry.text]), [["2026-10-11", "verify the simulator"], [null, "push when approved"]]);
