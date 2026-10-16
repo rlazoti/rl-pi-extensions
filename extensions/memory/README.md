@@ -28,9 +28,11 @@ Three parts make that hold: `schema.ts` makes identity computable, `resolver.ts`
 | `memory_write` | Add or amend an entry. Clean write, amendment in place, or refusal with a `conflictId`. |
 | `memory_show` | Every claim for one key: which is authoritative *here*, which are retired, which are shadowed by a narrower scope, and whether the key is contested (reported as an error, not as an answer). |
 | `memory_search` | Ranked **candidates**, explicitly labelled as not answers. |
-| `memory_doctor` | Entries by status, malformed entries, contested identities, headings that are not keys, unreadable files, empty stores, unanswered conflicts, daily-file freshness. `isError` when anything is wrong. |
-| `/memory` | `doctor` \| `pending` \| `resolve <id>` \| `show <key>` \| `files` \| `daily` |
-| `before_agent_start` | Injects the authorities that apply to this prompt and context, plus any unanswered conflict. Silent — no message, no tokens — when there is nothing to say. |
+| `memory_read` | Any file in the bank — `core/activeProjects.md`, an archived daily in `history/daily/`, a store — with its size and the offset to continue from. Read-only, and the answer says it is evidence, not an authority. |
+| `memory_list` | The whole bank (stores, working files, archives) with sizes and dates, in one view. |
+| `memory_doctor` | Entries by status, malformed entries, contested identities, headings that are not keys, unreadable files, empty stores, unanswered conflicts, leftover temp files, how much of the working state actually got injected, daily-file freshness. `isError` when anything is wrong. |
+| `/memory` | `doctor` \| `pending` \| `resolve <id>` \| `show <key>` \| `files [dir]` (the whole bank) \| `daily` |
+| `before_agent_start` | Injects the authorities that apply to this prompt and context, plus any unanswered conflict, plus the working state. Silent — no message, no tokens — when there is nothing to say. |
 
 ### What lands in the prompt
 
@@ -48,12 +50,38 @@ Shadowed by a more specific scope: dotfiles.tmux-status-bar (out-of-scope).
 - A hit on a **stale** claim is answered with the claim that replaced it, not with the dead rule; a claim that lost to a narrower scope is reported as shadowed rather than dropped. Nothing is discarded on the way to the prompt without being named.
 - Presentation is canonical: kind, then key. Retrieval order decides what is *considered*, never what the model reads first, so output is byte-identical for a given store + query + context. Lines carry the fields that actually decided (`kind · scope · asOf`) and never a score.
 
+### …and the working state
+
+The authority block answers *what is true*. The bank's other two files answer *what was happening*, and until now nothing read them: `core/activeProjects.md` was written by hand and by file tools and never reached a prompt, and `core/dailyContext.md` was only rewritten at rollover — so the open work in it was invisible except as an "N day(s) old" warning.
+
+```markdown
+## Working state — hand-maintained files, not entry stores and not authorities
+
+### core/activeProjects.md
+# Active Projects
+## rl-pi-extensions (~/Projects/Terminal/rl-pi-extensions)
+- Status: v1.4.1 released and pushed…
+
+### core/dailyContext.md — open work (2026-10-16)
+**Next Steps**
+- (2026-10-16) Decide the pending conflict 4fee6f92…
+- (2026-10-14) Run app in simulator and verify all screens…
+_13 further open item(s) did not fit this turn — the rest with memory_read core/dailyContext.md._
+```
+
+- `activeProjects.md` is **verbatim** prose — the extension has no parser for someone else's file — cut on whole **lines** from the top, never mid-line, with the file named so `memory_read` gets the rest.
+- `dailyContext.md` is injected as the **open items** its headings hold, and the filter is the rollover's own classifier (`OPEN_HEADING` / `isCarriedForward` in `rollover.ts`), not a second one: if the file is unreadable by the rollover, that is a bug to fix in one place, not to re-implement here.
+- Selection when it does not fit: **undated first** (an item stamped today by its author outranks a guess), then **newest first**, then source order, and the carried line reports how many were dropped. Same rule as the entry budget: skip and name, never truncate.
+- Both caps are separate from the 900-token authority budget, and are module parameters in the same stance as the ageing knobs (`DEFAULT_STATE_BUDGET` in `workingState.ts`, not a settings file); the doctor reports what got in: `core/dailyContext.md: 9/22 open items shown, 470 tokens`.
+- **This block is never an authority.** It carries no key, no scope and no `asOf`, says so in its own heading, and cannot win a `memory_show` or a gate decision. A status line is evidence of what was written, and the tools that read it say the same thing.
+
 ## The bank on disk
 
 ```text
 ~/.pi/memory/
 ├── knowledge/*.md        entry stores — the authority surface
 ├── core/dailyContext.md  the day's working file (see Daily rollover)
+├── core/activeProjects.md hand-maintained status; injected verbatim, never parsed
 ├── history/daily/        archived daily files, never overwritten
 └── .pending/*.json       unanswered conflicts
 ```
@@ -175,6 +203,7 @@ _(carried from 2026-10-15 — 1 day old)_
 | Bank root | `PI_MEMORY_DIR` | `~/.pi/memory` |
 | Extensions dir | `PI_CODING_AGENT_DIR` / `HOME` | `~/.pi/agent/extensions` |
 | Injection budget | `inject(store, { budget })` | 900 tokens of entry content |
+| Working-state caps | `renderWorkingState({ budget: { activeProjects, daily } })` | 600 / 500 tokens of file content, each estimated, each reported by the doctor |
 | Ageing | `rollDaily({ retireAfterDays, maxItems })` | 21 days, 30 items per section |
 
 The ageing knobs are **module parameters, not settings**: the extension calls `rollDaily()` with no options, so retuning them means editing the defaults in `dailyItems.ts`. They are deliberately not a settings file until observed rollovers say what they should be.
@@ -193,6 +222,7 @@ The ageing knobs are **module parameters, not settings**: the extension calls `r
 | `fs-store.ts` | bank paths, atomic write-beside-then-rename, the collision guard |
 | `pending.ts` | the conflict queue (JSON, because it must replay to the gate verbatim) and `formatContest` |
 | `dailyItems.ts` / `rollover.ts` | item grammar, stamping, ageing; archive + reported carry |
+| `workingState.ts` | the injection the authority machinery cannot answer: verbatim `activeProjects.md`, open daily items, per-file budgets |
 | `migrate.ts` | prose → entries: proposals, cues, and what gets skipped |
 | `service.ts` | use cases over all of it |
 
@@ -204,12 +234,14 @@ Scripts (`node --experimental-strip-types --import ./test-support/register.mjs s
 - **No embeddings, no re-ranking, no auto-merge.** A similarity threshold is the same guess as an LLM "reconciling" the text — the old bank's three files produced an identical snippet, so nothing downstream could even see the contradiction.
 - **The model never resolves a conflict.** It is told the identity is contested and to ask you.
 - **Daily items written by other tools arrive undated** and get their date at the next session start, so their age is one day coarse. Closing that means owning the daily append path or agreeing the item grammar with whatever writes it.
+- **The daily selection is a heuristic, not a parse.** `OPEN_HEADING` decides what is open by matching heading words; a heading it does not recognise is dropped and counted, never silently merged. Judge the classifier in real use, not in tests.
+- **The working-state block is not memory.** It is a rendering of two hand-maintained files, re-read every turn, and it deliberately has no keys, no authority and no retrieval. Recall for *facts* goes through `memory_show` / `memory_search`; `memory_read` is for the file itself.
 - **Migration is a judgement call, made visible rather than automatic.** It proposes, the gate simulates each proposal, and `scripts/migrate-apply.mjs --only <id>` applies the ones you choose. The live bank's prose migration is done (23 claims, run 2026-10-14; the run log is in the CHANGELOG, not here).
 - `asOf` is never defaulted, by anyone. A claim without a date sorts last and says so.
 
 ## Testing
 
-250 colocated tests (`npm test` discovers them recursively). The load-bearing ones: parse↔render byte-idempotence with nothing dropped; authority total-order and four invariant sweeps over 200 generated stores; injection determinism and per-kind budgets; the gate's rival check across files, and a resolution applying only to the state its `conflictId` was derived from; the queue replaying to the same `conflictId`; the rollover round trip (a file the rollover wrote is understood by the next rollover); atomic writes with no temp-file leftovers and no path escape; and the Pi adapter driven through pi's own surface — dialog content, no timer, one dialog at a time, cancelled tool calls parking rather than hanging.
+284 colocated tests (`npm test` discovers them recursively). The load-bearing ones: parse↔render byte-idempotence with nothing dropped; authority total-order and four invariant sweeps over 200 generated stores; injection determinism and per-kind budgets; the gate's rival check across files, and a resolution applying only to the state its `conflictId` was derived from; the queue replaying to the same `conflictId`; the rollover round trip (a file the rollover wrote is understood by the next rollover); atomic writes with no temp-file leftovers and no path escape; the working-state budgets (a line is never cut in half, dropped items are counted, an unreadable daily file still gets its warning); reads contained to the bank — `..`, absolute paths, and a **symlink inside the bank pointing outside it** all refused; windows counted in graphemes so a ZWJ emoji is never split; and the Pi adapter driven through pi's own surface — dialog content, no timer, one dialog at a time, cancelled tool calls parking rather than hanging.
 
 ## History and rollback
 

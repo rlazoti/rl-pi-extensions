@@ -530,3 +530,109 @@ test("doctor reports the bank as it actually is", async () => {
 		paths.cleanup();
 	}
 });
+
+// ─── Working state and read-only recall ──────────────────────────────────────
+
+function seedAnywhere(paths: MemoryPaths, files: Record<string, string>): void {
+	for (const [name, content] of Object.entries(files)) {
+		mkdirSync(join(paths.root, name.split("/").slice(0, -1).join("/")), { recursive: true });
+		writeFileSync(join(paths.root, name), content, "utf8");
+	}
+}
+
+const CLOCK = { now: () => "2026-10-16T09:00:00.000Z" };
+
+test("working state reads the two prose files and reports what fit", () => {
+	const paths = scratch();
+	try {
+		seedAnywhere(paths, {
+			"core/activeProjects.md": "# Active Projects\n\n## rl-pi-extensions\n- v1.4.1 released and pushed\n",
+			"core/dailyContext.md": "- date: 2026-10-16\n\n## In Progress\n- (2026-10-16) bump the Pi pins when the runtime updates\n",
+		});
+		const report = createService(paths, CLOCK).workingState();
+
+		assert.match(report.text, /- v1\.4\.1 released and pushed/);
+		assert.match(report.text, /bump the Pi pins/);
+		assert.equal(report.activeProjects.exists, true);
+		assert.equal(report.activeProjects.droppedLines, 0);
+		assert.equal(report.daily.items, 1);
+		assert.equal(report.daily.stale, false);
+	} finally {
+		paths.cleanup();
+	}
+});
+
+test("the daily cap is separate from the authority budget, and says so when nothing fits", () => {
+	const paths = scratch();
+	try {
+		seedAnywhere(paths, {
+			"core/activeProjects.md": "# Active Projects\n\n## one\n- a project line that is fairly long so it costs tokens to render at all\n",
+			"core/dailyContext.md": "- date: 2026-10-16\n\n## In Progress\n- (2026-10-16) open item\n",
+		});
+		const starved = createService(paths, CLOCK).workingState({ activeProjects: 5, daily: 5 });
+
+		assert.ok(starved.activeProjects.droppedLines > 0);
+		assert.equal(starved.daily.shownItems, 0);
+		assert.match(starved.text, /No open item fit this turn — the whole list with memory_read core\/dailyContext\.md/);
+		assert.match(starved.text, /the rest with memory_read core\/activeProjects\.md/);
+	} finally {
+		paths.cleanup();
+	}
+});
+
+test("readFile reaches core/ and history/, and refuses anything that is not in the bank", () => {
+	const paths = scratch();
+	try {
+		seedAnywhere(paths, {
+			"core/activeProjects.md": "# Active Projects\n\n## rl-pi-extensions\n- v1.4.1 released\n",
+			"history/daily/2026-10/2026-10-14-dailyContext.md": "- date: 2026-10-14\n\n## Completed\n- shipped it\n",
+		});
+		const service = createService(paths, CLOCK);
+
+		const archived = service.readFile("history/daily/2026-10/2026-10-14-dailyContext.md");
+		assert.equal(archived.kind, "read", "an archive from three weeks ago is reachable, which is the whole point of archiving");
+		if (archived.kind === "read") assert.match(archived.slice.text, /shipped it/);
+
+		assert.equal(service.readFile("../secrets.env").kind, "outside");
+		assert.equal(service.readFile("knowledge").kind, "directory");
+		assert.equal(service.readFile("core/nothing.md").kind, "missing");
+	} finally {
+		paths.cleanup();
+	}
+});
+
+test("listFiles shows the whole bank, including the stores' own siblings", () => {
+	const paths = scratch();
+	try {
+		seedAnywhere(paths, { "knowledge/ui.md": UI, "core/dailyContext.md": "- date: 2026-10-16\n\n## In Progress\n- work\n" });
+		const outcome = createService(paths, CLOCK).listFiles();
+
+		assert.equal(outcome.kind, "listed");
+		if (outcome.kind !== "listed") return;
+		const listed = outcome.listing.entries.map((entry) => entry.path);
+		assert.ok(listed.includes("core/dailyContext.md"));
+		assert.ok(listed.includes("knowledge/ui.md"));
+	} finally {
+		paths.cleanup();
+	}
+});
+
+test("the doctor reports the working-state files it injects, and a leftover temp file", () => {
+	const paths = scratch();
+	try {
+		seed(paths);
+		seedAnywhere(paths, {
+			"core/activeProjects.md": "# Active Projects\n\n## rl-pi-extensions\n- v1.4.1\n",
+			"core/dailyContext.md": `- date: 2026-09-30\n\n## In Progress\n- (2026-09-30) an old open item\n`,
+			"knowledge/ui.md.tmp-4242": "half a file",
+		});
+		const report = createService(paths, CLOCK).doctor();
+
+		assert.deepEqual(report.tempFiles, ["knowledge/ui.md.tmp-4242"], "a write interrupted mid-rename leaves evidence, and the doctor shows it");
+		assert.equal(report.workingState.activeProjects.exists, true);
+		assert.equal(report.workingState.daily.stale, true);
+		assert.equal(report.workingState.daily.ageDays, 16);
+	} finally {
+		paths.cleanup();
+	}
+});

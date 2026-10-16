@@ -11,8 +11,9 @@
  * so the write goes through.
  */
 
-import { applyEdits, foreignMemoryExtension, listKnowledgeFiles, loadKnowledgeStore, readBankFile, writeBankFile, type LoadedStore, type MemoryPaths } from "./fs-store.js";
-import { dailyDate, dailyFreshness, isOpenHeading, planDailyRollover, renderRolloverNotice, type Freshness } from "./rollover.js";
+import { applyEdits, foreignMemoryExtension, isTempFile, listBankFiles, listKnowledgeFiles, loadKnowledgeStore, readBankFile, readBankFileChecked, writeBankFile, type BankListingResult, type BankRead, type LoadedStore, type MemoryPaths } from "./fs-store.js";
+import { dailyDate, dailyFreshness, describeAge, isOpenHeading, planDailyRollover, renderRolloverNotice, type Freshness } from "./rollover.js";
+import { ACTIVE_PROJECTS_FILE, DAILY_FILE, renderWorkingState, type StateBudget, type WorkingStateReport } from "./workingState.js";
 import { stampDailyFile } from "./dailyItems.js";
 import { decide, RESOLUTIONS, type ConflictRefusal, type GateResult, type Resolution, type WriteRequest } from "./gate.js";
 import { inject, recall, type Candidate, type Injection } from "./inject.js";
@@ -69,6 +70,10 @@ export interface DoctorReport {
 	pending: PendingConflict[];
 	corruptQueue: Array<{ file: string; error: string }>;
 	emptyFiles: string[];
+	/** `.tmp-<pid>` siblings: proof a write was interrupted mid-rename. */
+	tempFiles: string[];
+	/** The hand-written files the injector reads, and how much of each fit. */
+	workingState: WorkingStateReport;
 }
 
 export interface MemoryService {
@@ -77,6 +82,11 @@ export interface MemoryService {
 	show(key: string, context: ScopeContext): KeyReport;
 	search(query: string, limit?: number): Candidate[];
 	injection(prompt: string, context: ScopeContext): Injection;
+	/** The working-state block: `core/activeProjects.md` + open work in the daily file. */
+	workingState(budget?: Partial<StateBudget>): WorkingStateReport;
+	/** Read any file inside the bank — the only way to reach `core/` and `history/`. */
+	readFile(file: string, options?: { offset?: number; maxChars?: number }): BankRead;
+	listFiles(dir?: string, limit?: number): BankListingResult;
 	doctor(): DoctorReport;
 	pending(): PendingList;
 	/** The daily working file: what day it claims to be, and whether that is today. */
@@ -97,8 +107,6 @@ export type DailyRolloverOutcome =
 	| { performed: false; reason: string; status: DailyStatus }
 	| { performed: true; notice: string; archivePath: string; carried: number; notCarried: number; notCarriedDetail: Array<{ heading: string; reason: string }>; status: DailyStatus };
 
-const DAILY_FILE = "core/dailyContext.md";
-
 export interface ServiceOptions {
 	/** Absent in print/json/rpc: nothing can be asked, so refusals are parked. */
 	ask?: AskFn;
@@ -108,6 +116,14 @@ export interface ServiceOptions {
 
 export function createService(paths: MemoryPaths, options: ServiceOptions = {}): MemoryService {
 	const now = options.now ?? (() => new Date().toISOString());
+
+	const workingStateReport = (budget?: Partial<StateBudget>): WorkingStateReport =>
+		renderWorkingState({
+			activeProjects: readBankFile(paths, ACTIVE_PROJECTS_FILE)?.text ?? null,
+			daily: readBankFile(paths, DAILY_FILE),
+			today: now().slice(0, 10),
+			...(budget ? { budget } : {}),
+		});
 
 	const dailyStatus = (): DailyStatus => {
 		const file = readBankFile(paths, DAILY_FILE);
@@ -262,6 +278,20 @@ export function createService(paths: MemoryPaths, options: ServiceOptions = {}):
 			return inject(loadKnowledgeStore(paths).store, { query: prompt, context });
 		},
 
+		workingState(budget) {
+			return workingStateReport(budget);
+		},
+
+		readFile(file, options) {
+			// `resolveAnyInBank` (containment without the entry-shape rule) is the whole
+			// point: `core/` and `history/` are reachable, everything outside is not.
+			return readBankFileChecked(paths, file, options ?? {});
+		},
+
+		listFiles(dir, limit) {
+			return listBankFiles(paths, dir ?? ".", limit === undefined ? {} : { limit });
+		},
+
 		daily() {
 		return dailyStatus();
 	},
@@ -308,6 +338,8 @@ export function createService(paths: MemoryPaths, options: ServiceOptions = {}):
 			for (const entry of loaded.store.entries) byStatus[entry.status] += 1;
 
 			const files = listKnowledgeFiles(paths);
+			const listed = listBankFiles(paths);
+			const tempFiles = listed.kind === "listed" ? listed.listing.entries.filter((entry) => isTempFile(entry.path)).map((entry) => entry.path) : [];
 			return {
 				bankRoot: paths.root,
 				files,
@@ -322,6 +354,8 @@ export function createService(paths: MemoryPaths, options: ServiceOptions = {}):
 				pending: queue.conflicts,
 				corruptQueue: queue.corrupt,
 				emptyFiles: files.filter((file) => (loaded.store.byPath.get(file)?.entries.length ?? 0) === 0),
+				tempFiles,
+				workingState: workingStateReport(),
 			};
 		},
 

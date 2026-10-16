@@ -183,11 +183,22 @@ export function dailyFreshness(file: DailyFile, today: string): Freshness {
 	return { date, ageDays, stale: date === null || date.date !== today, needsDate };
 }
 
+/**
+ * How old a daily file is, in the words every surface uses. One definition: a notice
+ * that says "2 day(s) old" and a prompt block that says "yesterday" is two calendars
+ * for the same file.
+ */
+export function describeAge(ageDays: number | null): string {
+	if (ageDays === null) return "unknown age";
+	if (ageDays < 0) return `dated ${-ageDays} day(s) in the future — check its \`- date:\` field or the clock`;
+	return ageDays === 0 ? "today" : `${ageDays} day(s) old`;
+}
+
 /** The provenance line a previous rollover wrote. Stripped before re-rendering, or
 it stacks up one per rollover and the file becomes a game of telephone. */
 const CARRIED_NOTE = /^\s*_?\(carried from .*?\)_?\s*$/;
 
-function stripCarriedNote(body: string): string {
+export function stripCarriedNote(body: string): string {
 	return body.split(/\r?\n/).filter((line) => !CARRIED_NOTE.test(line)).join("\n").trim();
 }
 
@@ -223,6 +234,27 @@ function ownOpenWork(node: Section, underOpenHeading: boolean): string {
 	return node.lines.join("\n").trim();
 }
 
+/**
+ * The open work in a daily file, classified exactly the way a rollover classifies it:
+ * by name or position, grouped, with the carried-from annotation stripped and the
+ * group+heading rendered as one title. Injection asks the same question the rollover
+ * asks, so it must use the same classifier — two definitions of "open work" means the
+ * prompt shows work the rollover would have dropped, or hides work it would carry.
+ */
+export function collectOpenWork(text: string): Array<{ group?: string; heading: string; title: string; text: string }> {
+	const found: Array<{ group?: string; heading: string; title: string; text: string }> = [];
+	const walk = (nodes: readonly Section[], group?: string, underOpen = false): void => {
+		for (const node of nodes) {
+			for (const entry of collectOpen(node, group, underOpen)) {
+				const body = stripCarriedNote(entry.text);
+				if (body !== "") found.push({ group: entry.group, heading: entry.heading, title: carryTitle(entry), text: body });
+			}
+		}
+	};
+	walk(parseMarkdown(text).nodes);
+	return found;
+}
+
 /** Collect open-work leaves under a node, with the group they belong to. */
 function collectOpen(node: Section, group?: string, underOpen = false): Array<{ group?: string; heading: string; text: string }> {
 	const found: Array<{ group?: string; heading: string; text: string }> = [];
@@ -243,13 +275,23 @@ function renderCarried(entry: { group?: string; heading: string; text: string },
 	// Provenance is a body line, never part of the heading: an annotation inside a
 	// heading stops the next rollover recognising its own output.
 	const age = ageDays !== null && ageDays >= 2 ? ` — ${ageDays} days old` : "";
-	// A group named with the same words as the section already being written is noise;
-	// a project name is not.
-	const group = entry.group !== undefined && entry.group !== "" && !isOpenHeading(entry.group) ? entry.group : undefined;
-	const title = [group, entry.heading].filter((part) => part !== undefined && part !== "" && !isWrapperHeading(part)).join(" — ").trim();
+	const title = carryTitle(entry);
 	const note = `_(carried from ${from}${age})_`;
 	// `## In Progress` with work of its own needs no sub-heading repeating itself.
 	return title === "" ? [note, "", entry.text].join("\n") : [`### ${title}`, "", note, "", entry.text].join("\n");
+}
+
+/**
+ * One visible label for open work: `group — heading`, with a group that merely
+ * repeats the section name left out. Shared by the fresh daily file and the prompt
+ * block (`workingState.ts`): two rules for the same label is how they start
+ * disagreeing about what a section is called.
+ */
+export function carryTitle(entry: { group?: string; heading: string }): string {
+	// A group named with the same words as the section already being written is noise;
+	// a project name is not.
+	const group = entry.group !== undefined && entry.group !== "" && !isOpenHeading(entry.group) ? entry.group : undefined;
+	return [group, entry.heading].filter((part) => part !== undefined && part !== "" && !isWrapperHeading(part)).join(" — ").trim();
 }
 
 /** Headings the fresh file already writes at level 2, so repeating them at level 3

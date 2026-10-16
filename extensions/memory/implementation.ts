@@ -15,8 +15,10 @@ import { Type } from "typebox";
 import { basename } from "node:path";
 
 import { formatIdentity } from "./schema.js";
+import { describeAge } from "./rollover.js";
+import { ACTIVE_PROJECTS_FILE, DAILY_FILE } from "./workingState.js";
 import type { ScopeContext } from "./resolver.js";
-import { memoryPaths } from "./fs-store.js";
+import { memoryPaths, type BankListing, type BankListingResult, type BankRead } from "./fs-store.js";
 import { collisionReport, createService, RESOLUTIONS, type AskFn, type ResolutionChoice, type WriteOutcome } from "./service.js";
 import { clip, formatContest, renderConflict } from "./pending.js";
 import type { ContestSide } from "./pending.js";
@@ -132,8 +134,8 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 		const service = createService(paths);
 		const injection = service.injection(event.prompt, scopeContext(ctx));
 		const queue = service.pending();
-		const daily = service.daily();
-		if (injection.text === "" && queue.conflicts.length === 0 && queue.corrupt.length === 0 && !daily.freshness.stale) return;
+		const working = service.workingState();
+		if (injection.text === "" && queue.conflicts.length === 0 && queue.corrupt.length === 0 && working.text === "") return;
 
 		const parts = [injection.text];
 		if (queue.conflicts.length > 0) {
@@ -144,11 +146,12 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 		if (queue.corrupt.length > 0) {
 			parts.push(`## Memory queue damage\n${queue.corrupt.map((problem) => `- ${problem.file}: ${problem.error}`).join("\n")}`);
 		}
-		if (daily.freshness.stale) {
-			const when = daily.freshness.date?.date ?? "unknown";
-			const why = daily.freshness.date?.source === "mtime" ? ", dated by file mtime because the file has no date field" : "";
-			parts.push(`## Daily context freshness\ncore/dailyContext.md is dated ${when} (${describeAge(daily.freshness.ageDays).trim()}${why}). Unfinished items in it may no longer be true; say so rather than repeating them.`);
-		}
+		// Working state goes last and says what it is: the authorities above decide what
+		// is true, and a hand-written status line must not read like one. Open work is
+		// shown with its own dates and the staleness caution attached to it, so a stale
+		// intention is still not handed over as current fact — it is just no longer
+		// invisible.
+		parts.push(working.text);
 
 		return { message: { customType: "memory", content: parts.filter((part) => part !== "").join("\n\n"), display: false } };
 	});
@@ -246,16 +249,96 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 			const service = createService(paths);
 			const report = service.doctor();
 			const queue = service.pending();
-			const unhealthy = report.violations.length + report.contested.length + report.unreadable.length + report.corruptQueue.length + report.unkeyed.length > 0;
+			const unhealthy = report.violations.length + report.contested.length + report.unreadable.length + report.corruptQueue.length + report.unkeyed.length + report.tempFiles.length > 0;
 			const daily = service.daily();
 			return toolResult(`${formatDoctor(report)}\n\n${formatDaily(daily)}\n\n${formatQueue(queue)}`, { report, queue, daily }, unhealthy || daily.freshness.stale);
+		},
+	});
+
+	// ── Read-only recall over the whole bank ──────────────────────────────
+	//
+	// `knowledge/` is the authority surface, and the injector summarises it entry by
+	// entry. `core/` and `history/` are prose the gate will not write and the injector
+	// can only shorten. Without these two tools, the archived history and the dropped
+	// half of a working-state file were unreachable to the model however useful they were.
+
+	pi.registerTool({
+		name: "memory_read",
+		label: "Memory Read",
+		description:
+			"Read a file inside the memory bank, including core/ working state and history/daily archives — " +
+			"which no other tool reaches. Read-only: nothing here is an authority, and memory_write refuses these files on purpose.",
+		promptSnippet: "Read a memory-bank file (core/ working state, history/ archives) that injection only summarises",
+		promptGuidelines: [
+			"This is how you see what the prompt dropped: the working-state block names the file and counts the lines or items it could not show.",
+			"core/ and history/ are prose, not entry stores. Do not try to correct a stale status file with memory_write — it refuses them, and a status file is meant to go stale.",
+			"A file in the bank is evidence of what was written, not an authority for what is true now. Use memory_show for the authority on a claim.",
+		],
+		parameters: Type.Object({
+			file: Type.String({
+				description: 'Bank-relative path, e.g. "core/activeProjects.md" or "history/daily/2026-10/2026-10-14-dailyContext.md".',
+			}),
+			offset: Type.Optional(Type.Number({ description: "Character offset to start at (default 0)." })),
+			maxChars: Type.Optional(Type.Number({ description: "Maximum characters to return (default 20000, capped at 100000)." })),
+		}),
+		async execute(_toolCallId, params) {
+			const maxChars = Math.min(100_000, Math.max(1, Math.floor(params.maxChars ?? 20_000)));
+			const offset = Math.max(0, Math.floor(params.offset ?? 0));
+			const outcome = createService(paths).readFile(params.file, { offset, maxChars });
+			if (outcome.kind === "outside") {
+				return toolResult<BankRead>(`Refused: "${params.file}" is not inside the memory bank (${paths.root}). Pass a bank-relative path such as core/activeProjects.md.`, outcome, true);
+			}
+			if (outcome.kind === "directory") {
+				return toolResult<BankRead>(`"${params.file}" is a directory — memory_read reads files; memory_list ${params.file} shows its contents.`, outcome, true);
+			}
+			if (outcome.kind === "missing") {
+				return toolResult<BankRead>(`No "${params.file}" in the bank (${paths.root}). memory_list shows what is there.`, outcome, true);
+			}
+			const slice = outcome.slice;
+			const header = `${params.file} — ${slice.totalChars} chars, showing ${slice.offset}-${slice.offset + slice.shownChars}${slice.modified ? `, modified ${slice.modified}` : ""}`;
+			const footer = slice.truncated ? `\n_truncated: continue with offset ${slice.offset + slice.shownChars}._` : "";
+			return toolResult<BankRead>(`${header}\n\n${slice.text}${footer}`, outcome);
+		},
+	});
+
+	pi.registerTool({
+		name: "memory_list",
+		label: "Memory List",
+		description:
+			"List the memory bank's files with sizes and dates: entry stores under knowledge/, working state under core/, " +
+			"and archived daily files under history/daily/. Read-only; the .pending queue is not listed here (memory_doctor reports it).",
+		promptSnippet: "List memory-bank files (knowledge stores, core working state, history archives)",
+		parameters: Type.Object({
+			dir: Type.Optional(Type.String({ description: 'Bank-relative directory, e.g. "history/daily". Default: the bank root.' })),
+			limit: Type.Optional(Type.Number({ description: "Max entries (default 200)." })),
+		}),
+		async execute(_toolCallId, params) {
+			const outcome = createService(paths).listFiles(params.dir, params.limit);
+			if (outcome.kind === "outside") {
+				return toolResult<BankListingResult>(`Refused: "${params.dir}" is not inside the memory bank (${paths.root}).`, outcome, true);
+			}
+			if (outcome.kind === "not-a-directory") {
+				return toolResult<BankListingResult>(`"${params.dir}" is not a directory — memory_read reads files.`, outcome, true);
+			}
+			if (outcome.kind === "missing") {
+				return toolResult<BankListingResult>(`No "${params.dir}" in the bank (${paths.root}).`, outcome, true);
+			}
+			const listing = outcome.listing;
+			if (listing.entries.length === 0) return toolResult<BankListingResult>(`${outcome.dir}: empty.`, outcome);
+			const lines = listing.entries.map((entry) =>
+				entry.directory ? entry.path : `${entry.path}  ${entry.chars ?? "?"} chars${entry.modified ? `  ${entry.modified}` : ""}`,
+			);
+			const note = listing.truncated
+				? `\n_List stopped at the ${listing.truncatedBecause === "limit" ? "entry limit" : "directory depth limit"} — pass a narrower directory._`
+				: "";
+			return toolResult<BankListingResult>(`${outcome.dir}: ${listing.entries.length} entries\n${lines.join("\n")}${note}`, outcome);
 		},
 	});
 
 	// ── Command ──────────────────────────────────────────────────────────────
 
 	pi.registerCommand("memory", {
-		description: "Memory store: doctor | pending | resolve <id> | show <key> | files | daily",
+		description: "Memory bank: doctor | pending | resolve <id> | show <key> | files [dir] | daily",
 		handler: async (args, ctx) => {
 			const service = createService(paths, ctx.hasUI ? { ask: askFactory(ctx) } : {});
 			const [subcommand, ...rest] = args.trim().split(/\s+/);
@@ -263,7 +346,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 			switch (subcommand) {
 				case undefined:
 				case "help":
-					return ctx.ui.notify("memory doctor | pending | resolve <id> | show <key> | files | daily", "info");
+					return ctx.ui.notify("memory doctor | pending | resolve <id> | show <key> | files [dir] | daily", "info");
 				case "doctor": {
 					const report = service.doctor();
 					return ctx.ui.notify(`${formatDoctor(report)}\n\n${formatQueue(service.pending())}`, report.violations.length > 0 ? "warning" : "info");
@@ -276,8 +359,15 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 					const extra = rollover.performed ? `\n\n${rollover.notice}` : rollover.reason === "the daily file is already current" ? "" : `\n\nNot rolled over: ${rollover.reason}`;
 					return ctx.ui.notify(`${formatDaily(service.daily())}${extra}`, rollover.performed ? "info" : "warning");
 				}
-				case "files":
-					return ctx.ui.notify(service.doctor().files.join("\n") || "no entry stores yet", "info");
+				case "files": {
+					// The whole bank, not only the entry stores: a store listing answered
+					// "what is in the bank" with a list that hid half of it.
+					const outcome = service.listFiles(rest[0]);
+					if (outcome.kind === "outside") return ctx.ui.notify(`not inside the memory bank: ${rest[0] ?? ""}`, "error");
+					if (outcome.kind === "not-a-directory") return ctx.ui.notify(`not a directory: ${rest[0]} — memory_read ${rest[0]} reads the file`, "error");
+					if (outcome.kind === "missing") return ctx.ui.notify(`no such directory in the bank: ${rest[0]}`, "error");
+					return ctx.ui.notify(formatBankListing(outcome.listing, outcome.dir), "info");
+				}
 				case "show": {
 					if (!rest[0]) return ctx.ui.notify("memory show <key>", "error");
 					return ctx.ui.notify(formatKeyReport(service.show(rest[0], scopeContext(ctx))), "info");
@@ -300,7 +390,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 					return ctx.ui.notify(formatOutcome(outcome), outcome.kind === "rejected" ? "error" : "info");
 				}
 				default:
-					return ctx.ui.notify(`Unknown subcommand "${subcommand}". Try: doctor | pending | resolve <id> | show <key> | files | daily`, "error");
+					return ctx.ui.notify(`Unknown subcommand "${subcommand}". Try: doctor | pending | resolve <id> | show <key> | files [dir] | daily`, "error");
 			}
 		},
 	});
@@ -359,11 +449,7 @@ function describePendingForPrompt(conflict: PendingConflict): string {
 	].join("\n");
 }
 
-function describeAge(ageDays: number | null): string {
-	if (ageDays === null) return "unknown age";
-	if (ageDays < 0) return `dated ${-ageDays} day(s) in the future — check its \`- date:\` field or the clock`;
-	return ageDays === 0 ? "today" : `${ageDays} day(s) old`;
-}
+/** `describeAge` lives in `rollover.ts`: one calendar for the notice, the doctor and the prompt. */
 
 	// The two sides, the rule that refused the write, and how to defer: what a person
 	// needs in order to choose. Options alone are not a decision they can make.
@@ -436,8 +522,19 @@ function formatDoctor(report: DoctorReport): string {
 	if (report.violations.length > 0) lines.push("", "Violations:", ...report.violations.map((violation) => `- ${violation.code} ${violation.path}#${violation.key ?? ""}: ${violation.message}`));
 	if (report.unkeyed.length > 0) lines.push("", "Headings that are not assertion keys:", ...report.unkeyed.map((entry) => `- ${entry}`));
 	if (report.unreadable.length > 0) lines.push("", "Unreadable files:", ...report.unreadable.map((problem) => `- ${problem.path}: ${problem.error}`));
+	if (report.tempFiles.length > 0) lines.push("", "Leftover temp files (an interrupted write):", ...report.tempFiles.map((file) => `- ${file}`));
 	if (report.emptyFiles.length > 0) lines.push("", "Stores with no entries:", ...report.emptyFiles.map((file) => `- ${file}`));
-	if (report.contested.length === 0 && report.violations.length === 0 && report.unkeyed.length === 0 && report.unreadable.length === 0) lines.push("", "No structural problems found.");
+
+	// The hand-written files belong to the bank too, and this is where a file nothing
+	// reads becomes visible: "absent", or "3 of 40 lines shown", is the evidence.
+	const state = report.workingState;
+	lines.push(
+		"",
+		"Working state (injected, never authoritative):",
+		`- ${ACTIVE_PROJECTS_FILE}: ${state.activeProjects.exists ? `${state.activeProjects.shownLines}/${state.activeProjects.lines} lines shown, ${state.activeProjects.tokens} tokens` : "absent"}`,
+		`- ${DAILY_FILE}: ${state.daily.exists ? `${state.daily.shownItems}/${state.daily.items} open items shown, ${state.daily.tokens} tokens, ${describeAge(state.daily.ageDays)}${state.daily.needsDate ? " (date inferred from mtime)" : ""}` : "absent"}`,
+	);
+	if (report.contested.length === 0 && report.violations.length === 0 && report.unkeyed.length === 0 && report.unreadable.length === 0 && report.tempFiles.length === 0) lines.push("", "No structural problems found.");
 	return lines.join("\n");
 }
 
@@ -447,6 +544,17 @@ function formatDaily(status: DailyStatus): string {
 	const when = date === null ? "undated" : `${date.date}${date.source === "mtime" ? " (dated by file mtime)" : ""}`;
 	const age = ageDays === null ? "" : ` (${describeAge(ageDays)})`;
 	return `Daily context: ${when}${age}${stale ? " — stale; it will be archived and carried at the next session start" : ""}${needsDate ? " — add a `- date: YYYY-MM-DD` line so rollover does not have to guess" : ""}.`;
+}
+
+/** The whole bank in one view: stores, working files, archives — with sizes. */
+function formatBankListing(listing: BankListing, dir: string): string {
+	const lines = listing.entries.map((entry) =>
+		entry.directory ? entry.path : `${entry.path}  ${entry.chars ?? "?"} chars${entry.modified ? `  ${entry.modified}` : ""}`,
+	);
+	const note = listing.truncated
+		? `\n_List stopped at the ${listing.truncatedBecause === "limit" ? "entry limit" : "directory depth limit"} — pass a narrower directory._`
+		: "";
+	return `${dir === "." || dir === "" ? "Memory bank" : dir}: ${listing.entries.length} entries\n${lines.join("\n")}${note}`;
 }
 
 function formatQueue(queue: PendingList): string {

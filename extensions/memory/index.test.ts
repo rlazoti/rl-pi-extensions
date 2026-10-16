@@ -201,7 +201,11 @@ test("the extension registers its tools, its command and the injection hook", as
 	withBank(() => {
 		const { pi, harness } = fakePi();
 		factory(pi);
-		assert.deepEqual([...harness.tools.keys()].sort(), ["memory_doctor", "memory_search", "memory_show", "memory_write"]);
+		assert.deepEqual(
+			[...harness.tools.keys()].sort(),
+			["memory_doctor", "memory_list", "memory_read", "memory_search", "memory_show", "memory_write"],
+			"memory_read and memory_list are the only way to reach core/ and history/",
+		);
 		assert.deepEqual([...harness.commands.keys()], ["memory"]);
 		assert.deepEqual([...harness.hooks.keys()], ["session_start", "before_agent_start"], "session_start owns the daily rollover");
 	}));
@@ -291,15 +295,22 @@ test("an undated open item is dated so it can age, without touching the archive 
 		assert.match(notices.map((notice) => notice.message).join(" "), /dated 1 open item/);
 	}));
 
-test("a stale daily file is surfaced in the prompt even when the store has nothing to say", async () =>
+test("the open work in a stale daily file is shown, with the caution attached", async () =>
 	withBank(async (bank) => {
 		bank.seedAt("core/dailyContext.md", STALE_DAILY);
 		const { pi, harness } = fakePi();
 		factory(pi);
 
 		const result = (await harness.hooks.get("before_agent_start")!({ type: "before_agent_start", prompt: "what should I work on?" }, fakeContext().ctx as never)) as { message: { content: string } };
-		assert.match(result.message.content, /Daily context freshness/);
+		// The store has nothing to say, so this block is the whole injection — and it is
+		// the work itself, not a notice that some work exists somewhere.
+		assert.match(result.message.content, /## Working state/);
+		assert.match(result.message.content, /verify the simulator build/);
 		assert.match(result.message.content, /2026-10-03/);
+		assert.match(result.message.content, /13 day\(s\) old/);
+		assert.match(result.message.content, /may no longer be true; say so rather than repeating them/);
+		assert.equal(result.message.content.includes("wrote the spec"), false, "settled work is not handed to the model as current");
+		assert.match(result.message.content, /not authorities/, "a hand-written status line must not read like an authority");
 	}));
 
 test("/memory daily reports the daily file and rolls it over on demand", async () =>
@@ -670,4 +681,142 @@ test("the hook surfaces unanswered conflicts on every turn until they are answer
 		const result = (await harness.hooks.get("before_agent_start")!({ type: "before_agent_start", messageType: "user", prompt: "unrelated question about the weather" }, fakeContext().ctx as never)) as { message: { content: string } };
 		assert.match(result.message.content, /## Memory conflicts awaiting a decision/);
 		assert.match(result.message.content, /\/memory resolve [0-9a-f]{8}/);
+	}));
+
+// ─── Working state in the prompt, and the read-only recall tools ─────────────
+
+const PROJECTS_FILE = `# Active Projects
+
+## rl-pi-extensions (~/Projects/Terminal/rl-pi-extensions)
+- Status: v1.4.1 released and pushed; 723 tests green
+- Next: fold the Unreleased section at the next release
+`;
+
+const text = (result: { content: unknown[] }): string => (result.content[0] as { text: string }).text;
+
+test("activeProjects.md reaches the prompt: it was always written, and used to be never read", async () =>
+	withBank(async (bank) => {
+		bank.seed({ "ui.md": UI });
+		bank.seedAt("core/activeProjects.md", PROJECTS_FILE);
+		const { pi, harness } = fakePi();
+		factory(pi);
+
+		const result = (await harness.hooks.get("before_agent_start")!({ type: "before_agent_start", prompt: "what should I do next" }, fakeContext().ctx as never)) as { message: { content: string } };
+		assert.match(result.message.content, /## Working state/);
+		assert.match(result.message.content, /v1\.4\.1 released and pushed/);
+		assert.match(result.message.content, /not entry stores and not authorities/, "a status line must not read like an authority");
+	}));
+
+test("memory_read opens the archives no other tool reaches, and reports its window", async () =>
+	withBank(async (bank) => {
+		bank.seed({ "ui.md": UI });
+		bank.seedAt("history/daily/2026-10/2026-10-14-dailyContext.md", "# Daily Context — 2026-10-14\n\n- date: 2026-10-14\n\n## Completed\n- shipped the entry store\n");
+		const { pi, harness } = fakePi();
+		factory(pi);
+		const read = harness.tools.get("memory_read")!;
+
+		const outcome = await read.execute("t1", { file: "history/daily/2026-10/2026-10-14-dailyContext.md" }, undefined, undefined, fakeContext().ctx);
+		assert.equal(outcome.isError, false);
+		assert.match(text(outcome), /shipped the entry store/);
+		assert.match(text(outcome), /^history\/daily\/2026-10\/2026-10-14-dailyContext\.md — \d+ chars, showing 0-\d+/);
+
+		assert.ok(read.promptGuidelines?.some((line) => /evidence of what was written, not an authority/i.test(line)), "the tool teaches the distinction the prompt cannot fit");
+	}));
+
+test("a truncated read says where to continue, and continuing returns the rest", async () =>
+	withBank(async (bank) => {
+		bank.seedAt("core/activeProjects.md", "0123456789abcdefghij");
+		const { pi, harness } = fakePi();
+		factory(pi);
+		const read = harness.tools.get("memory_read")!;
+
+		const first = await read.execute("t1", { file: "core/activeProjects.md", maxChars: 10 }, undefined, undefined, fakeContext().ctx);
+		assert.match(text(first), /_truncated: continue with offset 10\._/);
+		const rest = await read.execute("t2", { file: "core/activeProjects.md", offset: 10 }, undefined, undefined, fakeContext().ctx);
+		assert.match(text(rest), /abcdefghij/);
+		assert.equal(text(rest).includes("truncated"), false, "the tail is the tail: no more to read");
+	}));
+
+test("memory_read refuses the three ways a read can go wrong, each with the way out", async () =>
+	withBank(async (bank) => {
+		bank.seed({ "ui.md": UI });
+		bank.seedAt("core/activeProjects.md", PROJECTS_FILE);
+		const { pi, harness } = fakePi();
+		factory(pi);
+		const read = harness.tools.get("memory_read")!;
+
+		const escape = await read.execute("t1", { file: "../.ssh/id_ed25519" }, undefined, undefined, fakeContext().ctx);
+		assert.equal(escape.isError, true);
+		assert.match(text(escape), /not inside the memory bank/);
+
+		const dir = await read.execute("t2", { file: "core" }, undefined, undefined, fakeContext().ctx);
+		assert.equal(dir.isError, true);
+		assert.match(text(dir), /is a directory — memory_read reads files; memory_list core shows its contents/);
+
+		const gone = await read.execute("t3", { file: "core/nope.md" }, undefined, undefined, fakeContext().ctx);
+		assert.equal(gone.isError, true);
+		assert.match(text(gone), /memory_list shows what is there/);
+	}));
+
+test("memory_list shows stores, working state and archives in one view", async () =>
+	withBank(async (bank) => {
+		bank.seed({ "ui.md": UI });
+		bank.seed({ "more.md": UI });
+		bank.seedAt("core/activeProjects.md", PROJECTS_FILE);
+		bank.seedAt("history/daily/2026-10/2026-10-14-dailyContext.md", "- date: 2026-10-14\n");
+		const { pi, harness } = fakePi();
+		factory(pi);
+		const list = harness.tools.get("memory_list")!;
+
+		const all = await list.execute("t1", {}, undefined, undefined, fakeContext().ctx);
+		assert.equal(all.isError, false);
+		for (const path of ["knowledge/ui.md", "core/activeProjects.md", "history/daily/2026-10/2026-10-14-dailyContext.md"]) {
+			assert.ok(text(all).includes(path), `${path} is listed`);
+		}
+		assert.equal(text(all).includes(".pending"), false, "the queue is the doctor's business, not a file listing");
+
+		const narrow = await list.execute("t2", { dir: "knowledge", limit: 1 }, undefined, undefined, fakeContext().ctx);
+		assert.match(text(narrow), /List stopped at the entry limit/);
+		const escape = await list.execute("t3", { dir: ".." }, undefined, undefined, fakeContext().ctx);
+		assert.equal(escape.isError, true);
+	}));
+
+test("the doctor says how much of the working state the prompt could carry", async () =>
+	withBank(async (bank) => {
+		bank.seed({ "ui.md": UI });
+		bank.seedAt("core/activeProjects.md", PROJECTS_FILE);
+		bank.seedAt("core/dailyContext.md", `- date: 2026-09-30\n\n## In Progress\n- (2026-09-30) an old open item\n`);
+		const { pi, harness } = fakePi();
+		factory(pi);
+
+		const outcome = await harness.tools.get("memory_doctor")!.execute("t1", {}, undefined, undefined, fakeContext().ctx);
+		assert.match(text(outcome), /Working state \(injected, never authoritative\):/);
+		assert.match(text(outcome), /core\/activeProjects\.md: \d+\/\d+ lines shown/);
+		assert.match(text(outcome), /core\/dailyContext\.md: 1\/1 open items shown, \d+ tokens, 16 day\(s\) old/);
+	}));
+
+test("/memory files lists the whole bank, and says when a path is not one", async () =>
+	withBank(async (bank) => {
+		bank.seed({ "ui.md": UI });
+		bank.seedAt("core/activeProjects.md", PROJECTS_FILE);
+		bank.seedAt("history/daily/2026-10/2026-10-14-dailyContext.md", "- date: 2026-10-14\n");
+		const { pi, harness } = fakePi();
+		factory(pi);
+		const command = harness.commands.get("memory")!;
+
+		const notices: Array<{ message: string; level?: string }> = [];
+		const ctx = { hasUI: true, ui: { notify: (message: string, level?: string) => notices.push({ message, level }), select: async () => undefined, input: async () => "", confirm: async () => true } } as unknown as ExtensionCommandContext;
+
+		await command.handler("files", ctx);
+		for (const path of ["knowledge/ui.md", "core/activeProjects.md", "history/daily/2026-10/2026-10-14-dailyContext.md"]) {
+			assert.ok(notices[0]!.message.includes(path), `${path} is in the listing — a store listing hid the rest of the bank`);
+		}
+
+		await command.handler("files knowledge", ctx);
+		assert.match(notices[1]!.message, /^knowledge: \d+ entries/);
+
+		await command.handler("files ../outside", ctx);
+		assert.equal(notices[2]!.level, "error");
+		await command.handler("files knowledge/ui.md", ctx);
+		assert.match(notices[3]!.message, /memory_read knowledge\/ui\.md reads the file/);
 	}));

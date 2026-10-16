@@ -127,9 +127,9 @@ test("getAvailableExtensions returns the 6 managed extensions under the given ro
 	assert.equal(exts[2].description, "Desktop notifications when Pi needs your attention");
 	assert.equal(exts[3].description, "Insert predefined text snippets into the prompt");
 	assert.equal(exts[4].description, "Source-region and Magit diff-line feedback from Emacs");
-	// Phase 1 of the memory extension: listed so it stays manageable, but it
-	// registers nothing yet, so enabling it is a no-op rather than a hazard.
-	assert.match(exts[5].description, /in development/);
+	// The description is what the picker shows before someone enables a live
+	// component: it says what the thing does, not where its migration is up to.
+	assert.match(exts[5].description, /one authority per claim/);
 	for (const ext of exts) {
 		assert.equal(resolve(ext.path), resolve("/fake/path", "extensions", ext.name));
 	}
