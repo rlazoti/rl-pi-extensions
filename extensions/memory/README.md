@@ -72,7 +72,7 @@ _13 further open item(s) did not fit this turn — the rest with memory_read cor
 - `activeProjects.md` is **verbatim** prose — the extension has no parser for someone else's file — cut on whole **lines** from the top, never mid-line, with the file named so `memory_read` gets the rest.
 - `dailyContext.md` is injected as the **open items** its headings hold, and the filter is the rollover's own classifier (`OPEN_HEADING` / `isCarriedForward` in `rollover.ts`), not a second one: if the file is unreadable by the rollover, that is a bug to fix in one place, not to re-implement here.
 - Selection when it does not fit: **undated first** (an item stamped today by its author outranks a guess), then **newest first**, then source order, and the carried line reports how many were dropped. Same rule as the entry budget: skip and name, never truncate.
-- Both caps are separate from the 900-token authority budget, and are module parameters in the same stance as the ageing knobs (`DEFAULT_STATE_BUDGET` in `workingState.ts`, not a settings file); the doctor reports what got in: `core/dailyContext.md: 9/22 open items shown, 470 tokens`.
+- Both caps are separate from the 900-token authority budget, and are module parameters in the same stance as the ageing knobs (`DEFAULT_STATE_BUDGET` in `workingState.ts`, not a settings file — a test pins the numbers, so retuning one is a deliberate edit); the doctor reports what got in: `core/dailyContext.md: 8/9 open items shown, 493 tokens`.
 - **This block is never an authority.** It carries no key, no scope and no `asOf`, says so in its own heading, and cannot win a `memory_show` or a gate decision. A status line is evidence of what was written, and the tools that read it say the same thing.
 
 ## The bank on disk
