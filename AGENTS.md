@@ -65,15 +65,27 @@ extensions/
 │   ├── emacs/
 │   │   ├── pi-feedback.el          # Emacs client (source-region feedback)
 │   │   └── pi-feedback-test.el     # Emacs ERT tests
+├── memory/
+│   ├── index.ts                    # Entry point (re-exports implementation)
+│   ├── implementation.ts           # Tools, /memory, injection hook, dialogs
+│   ├── gate.ts resolver.ts schema.ts   # Admission gate, authority, entry grammar
+│   ├── inject.ts pending.ts service.ts # Recall + budget, conflict queue, use cases
+│   ├── rollover.ts dailyItems.ts       # Daily archive, reported carry, item ageing
+│   ├── migrate.ts fs-store.ts markdown.ts # Prose→entry migration, atomic bank I/O
+│   └── README.md                   # The spec: authority, conflict protocol, non-goals
 └── rl-extensions/
     ├── index.ts                    # TUI extension manager
     └── picker.ts                   # Picker overlay (layout via panel.ts)
 ```
 
-> `extensions/memory/` is also present (Phases 1-2 of a new component: `schema.ts`
-> entry parser and `resolver.ts` authority resolution; `implementation.ts`
-> registers nothing yet). It is in the catalog but never symlinked while
-> unfinished — see `extensions/memory/README.md`.
+> `extensions/memory/` is a **live component** (shipped in v1.4.0): `memory_write` /
+> `memory_show` / `memory_search` / `memory_doctor`, `/memory …`, a per-turn
+> injection hook, and a write-time gate that refuses rival claims until the human
+> decides. It is enabled by a symlink at `~/.pi/agent/extensions/memory` (created by
+> the rl-extensions manager), and it is the only component with a runtime dependency
+> of its own (`minimatch`). `extensions/memory/README.md` is the spec — authority
+> order, the conflict protocol, and the deliberate non-goals are decided there, not
+> re-argued per session.
 
 ### Entry Point Pattern
 

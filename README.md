@@ -11,6 +11,7 @@ Personal Pi coding agent extensions, managed as a single package with a TUI for 
 | **session-attention** | Desktop notifications when Pi needs your attention |
 | **snippets** | Insert predefined text snippets into the prompt |
 | **emacs-feedback** | Source-region and Magit diff-line feedback from Emacs |
+| **memory** | Entry-keyed knowledge store: one authority per claim per context, rival claims refused until you decide. Spec in `extensions/memory/README.md` |
 
 ## Usage
 
