@@ -5,7 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { ExtensionPicker, type ExtensionPickerResult } from "../extensions/rl-extensions/picker.ts";
-import { setExtensionsDirForTesting } from "../extensions/symlink-manager.ts";
+import { getAvailableExtensions, getMonorepoRoot, setExtensionsDirForTesting } from "../extensions/symlink-manager.ts";
+
+// Status-line pins assert against the live catalog size, not a literal count:
+// what these tests pin is the counting *behavior* (a truncated list announces
+// what it hid), which must survive adding a component to the repo.
+const CATALOG_COUNT = getAvailableExtensions(getMonorepoRoot()).length;
 
 // Behavioral harness: a real ExtensionPicker rendered against a fake TUI/theme/
 // keybindings and a temp extensions dir. The source-string tests in this file
@@ -563,7 +568,7 @@ test("picker: a search that matches nothing renders no rows and cannot be toggle
 		harness.picker.handleInput("\u001b"); // leave the search box
 		harness.picker.handleInput(" "); // Space with nothing on screen must do nothing
 		assert.ok(
-			harness.rows.some((row) => row.includes("0/5 enabled") && !row.includes("pending")),
+			harness.rows.some((row) => row.includes(`0/${CATALOG_COUNT} enabled`) && !row.includes("pending")),
 			`no toggle may be queued while the list is empty, got: ${JSON.stringify(
 				harness.rows.filter((row) => row.includes("enabled")),
 			)}`,
@@ -638,9 +643,12 @@ test("picker: the status line says when rows are hidden by a short panel", () =>
 	const harness = createPickerHarness(18, 80);
 	try {
 		const status = harness.rows.find((row) => row.includes("enabled"));
+		const shown = /(?<shown>\d+)\/(?<total>\d+) shown/.exec(status ?? "");
+		assert.ok(shown?.groups, `a truncated list must announce a shown/total fraction, got: ${JSON.stringify(status)}`);
+		assert.equal(Number(shown.groups.total), CATALOG_COUNT, "the fraction counts the whole catalog");
 		assert.ok(
-			status?.includes("4/5 shown"),
-			`a truncated list must announce how much it hid, got: ${JSON.stringify(status)}`,
+			Number(shown.groups.shown) < CATALOG_COUNT,
+			`the panel is short, so some rows must be reported as hidden, got: ${JSON.stringify(status)}`,
 		);
 	} finally {
 		harness.close();
