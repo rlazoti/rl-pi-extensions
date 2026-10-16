@@ -118,6 +118,12 @@ rm ~/.pi/agent/extensions/tmux-feedback
 - Always call `tui.requestRender()` after state changes.
 - Guard TUI-only behavior with `ctx.mode === "tui"` when needed.
 
+### Formats a component both writes and reads
+
+- A component that writes a format must be able to read back what it wrote, and the test is the **second pass**: write, read, write again. Every occurrence of this in `memory` was the writer changing shape (a `Group — Section` heading, a provenance line moved into the body) while the reader still matched only the hand-written form, so the next pass called its own output unrecognised and dropped real work.
+- Position carries meaning, not only names: `## In Progress` over `### Money Manager` is Money Manager's open work, and a heading with children groups rather than swallowing them.
+- A derived filename is a slot, not an identity. Never overwrite a record; identical bytes mean it already exists; any other collision takes the next free slot beside it. Blocking on the name left a live daily file permanently unarchivable while its staleness warning fired every turn.
+
 ---
 
 ## 5. Testing Expectations
