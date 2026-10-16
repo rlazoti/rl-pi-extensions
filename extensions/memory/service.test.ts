@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -139,6 +139,42 @@ test("a dismissed dialog parks the refusal instead of writing anything", async (
 		assert.equal(outcome.kind, "refused");
 		assert.equal(service.pending().conflicts.length, 1);
 		assert.equal(existsSync(join(paths.knowledge, "appearance.md")), false);
+	} finally {
+		paths.cleanup();
+	}
+});
+
+test("a question that dies mid-air leaves the contest parked, not lost", async () => {
+	const paths = scratch();
+	try {
+		seed(paths);
+		// The dialog can be displaced, the component can die, the UI can throw. None of
+		// that may cost the refusal its record, and none of it may leave the write
+		// awaiting an answer that will never come.
+		const service = createService(paths, {
+			ask: async () => {
+				throw new Error("dialog component vanished");
+			},
+		});
+		const outcome = await service.write(rival);
+		assert.equal(outcome.kind, "refused");
+		assert.match(outcome.summary, /dialog component vanished/);
+		assert.equal(service.pending().conflicts.length, 1, "the contest outlives the question");
+	} finally {
+		paths.cleanup();
+	}
+});
+
+test("the parked refusal hands over both claims, so the caller can relay them", async () => {
+	const paths = scratch();
+	try {
+		seed(paths);
+		const service = createService(paths);
+		const outcome = await service.write(rival);
+		assert.equal(outcome.kind, "refused");
+		assert.match(outcome.contest ?? "", /In the bank now:[\s\S]*Use dark grey[\s\S]*Being written:[\s\S]*Charcoal/);
+		assert.match(outcome.contest ?? "", /Why this is refused:/);
+		assert.ok((outcome.conflictText ?? "").length > (outcome.contest ?? "").length, "the queue keeps the full text; the handover is the short one");
 	} finally {
 		paths.cleanup();
 	}
@@ -418,6 +454,10 @@ test("daily() reports an undated file as dated by mtime and needing a date field
 	mkdirSync(join(root, "core"), { recursive: true });
 	try {
 	writeFileSync(join(root, "core", "dailyContext.md"), "# Daily Context\n\n## In Progress\n- still going\n", "utf8");
+	// Hermetic: an mtime is the wall clock, and the wall clock is not the injected
+	// day. Left to the real mtime this test passes only on one date a month.
+	const touched = new Date("2026-10-14T12:00:00.000Z");
+	utimesSync(join(root, "core", "dailyContext.md"), touched, touched);
 
 	const status = service.daily();
 	assert.equal(status.exists, true);
