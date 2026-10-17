@@ -399,7 +399,6 @@ test("component: /memory migrate draft names the next file, a named file, or a b
 		assert.match(notes[notes.length - 1]!, /no verified backup/);
 
 		await command.handler("migrate backup", ctx);
-		await new Promise((resolve) => setTimeout(resolve, 50));
 		assert.match(notes[notes.length - 1]!, /backup written and listed back/);
 
 		await command.handler("migrate draft", ctx);
@@ -415,6 +414,27 @@ test("component: /memory migrate draft names the next file, a named file, or a b
 		assert.match(notes[notes.length - 1]!, /drafted knowledge\/git-standards\.md \(1 proposals\)/);
 		await command.handler("migrate draft", ctx);
 		assert.match(notes[notes.length - 1]!, /every source file has been drafted/);
+	} finally {
+		cleanup();
+	}
+});
+
+test("component: a migrated proposal is told it never injects, and a sloppy origin is refused", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		const { harness, ctx } = install({ paths });
+		const propose = harness.tools.get("memory_propose")!;
+		const sloppy = await propose.execute("t1", { key: "ledger.format", kind: "fact", scope: "global", asOf: "2026-09-01", source: "migrated from knowledge/ledger.md", body: "Ledgers are plain text files under ~/Documents/ledger." }, undefined, undefined, toolCtx());
+		assert.equal(sloppy.isError, true);
+		assert.match(sloppy.content[0]!.text, /origin is "agent"/);
+
+		const migrated = await propose.execute("t2", { key: "ledger.format", kind: "fact", scope: "global", asOf: "2026-09-01", source: "migrated from knowledge/ledger.md", origin: "migration", body: "Ledgers are plain text files under ~/Documents/ledger." }, undefined, undefined, toolCtx());
+		assert.notEqual(migrated.isError, true);
+		assert.match(migrated.content[0]!.text, /part of the migration backlog: it never injects until you approve it/);
+
+		// And the injection really leaves it out.
+		const { result } = await (await import("./bank.ts")).createBank({ paths, clock: CLOCK, git: async () => ({}) }).injection("ledger format", "/repo/rl-pi-extensions", "s");
+		assert.equal(result.text, "", "a pending migration claim is not injected (R28)");
 	} finally {
 		cleanup();
 	}

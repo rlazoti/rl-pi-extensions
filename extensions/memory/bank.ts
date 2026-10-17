@@ -237,7 +237,11 @@ export class Bank {
 		ensureBankDirs(this.paths);
 		const stored = propose(this.paths, gate.claim, this.today);
 		this.invalidate();
-		const waiting = stored.against ? ` It waits against the approved claim ("${stored.against.body}") and will not be injected until you approve it.` : " Nothing is approved yet for this key, so it injects as [unapproved] until you review it.";
+		const waiting = stored.against
+			? ` It waits against the approved claim ("${stored.against.body}") and will not be injected until you approve it.`
+			: gate.claim.origin === "migration"
+				? " It is part of the migration backlog: it never injects until you approve it (/memory review --wave migration)."
+				: " Nothing is approved yet for this key, so it injects as [unapproved] until you review it.";
 		return {
 			ok: true,
 			text: `proposed ${gate.claim.key} @ ${gate.claim.scope} (pending, ${gate.claim.origin}).${waiting}${gate.claim.statusOverride ? `\nstatus check overridden: ${gate.claim.statusOverride}` : ""}${stored.replacedDraft ? `\nthe previous draft for this identity is in ${stored.replacedDraft.file}` : ""}`,

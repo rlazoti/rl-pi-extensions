@@ -288,7 +288,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 			case "trial":
 				return trial(rest);
 			case "migrate":
-				return migrate(rest, ctx);
+				return await migrate(rest);
 			case "paths":
 				return { ok: true, text: describePaths(bank.paths) };
 			default:
@@ -377,13 +377,13 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 		return bank.reportTrial(days === undefined ? undefined : Number(days));
 	}
 
-	function migrate(rest: string[], ctx: ExtensionCommandContext): Outcome {
+	async function migrate(rest: string[]): Promise<Outcome> {
 		const step = rest[0] ?? "status";
 		switch (step) {
 			case "backup":
-				// Async, but the command handler is awaited by Pi.
-				void bank.migrateBackup().then((outcome) => ctx.ui.notify(outcome.text, outcome.ok ? "info" : "warning"));
-				return { ok: true, text: "backup started: it writes a tarball of the bank and lists it back before anything else is unlocked" };
+				// Awaited: the command is not finished until the tarball exists and has
+				// been listed back, because every other migration step refuses until then.
+				return await bank.migrateBackup();
 			case "plan":
 				return bank.migratePlan();
 			case "status":

@@ -112,6 +112,16 @@ export function gatePropose(request: GateRequest): GateOutcome {
 	const grammar = validateClaim(claim);
 	if (grammar.length > 0) return refuse(grammar);
 
+	// The one inconsistency the store cannot repair later: the wave semantics
+	// (D9 — migrated claims never inject until approved) hang off `origin`, and a
+	// migrated source recorded with `origin: agent` injects as [unapproved] and is
+	// reviewed in the wrong batch.
+	if (/^migrated\s+from\b/i.test(claim.source.trim()) && claim.origin !== "migration") {
+		return refuse([
+			`the source says this was migrated, but origin is "${claim.origin ?? "agent"}": pass origin: "migration" — migrated claims are reviewed as their own batch and never inject until approved`,
+		]);
+	}
+
 	const superseded = detectSupersession(claim.body);
 	if (superseded.length > 0) {
 		return refuse([

@@ -110,6 +110,21 @@ test("gate: an override needs a reason, is stored on the claim, and is refused w
 	if (!unneeded.ok) assert.match(unneeded.problems[0]!, /no status signals — it is not needed/);
 });
 
+test("gate: a migrated source with origin agent is refused, because the wave semantics hang off origin (D9, R28)", () => {
+	const migrated = gatePropose({ claim: claim("Ledgers are plain text files under ~/Documents/ledger.", { source: "migrated from knowledge/ledger.md" }) });
+	assert.equal(migrated.ok, false);
+	if (migrated.ok) return;
+	assert.match(migrated.problems[0]!, /origin is "agent"/);
+	assert.match(migrated.problems[0]!, /never inject until approved/);
+
+	const consistent = gatePropose({ claim: claim("Ledgers are plain text files under ~/Documents/ledger.", { source: "migrated from knowledge/ledger.md", origin: "migration" }) });
+	assert.equal(consistent.ok, true);
+
+	// An ordinary source that merely mentions a migration stays with the agent.
+	const ordinary = gatePropose({ claim: claim("Ledgers are plain text files.", { source: "Rodrigo, after migrating the ledger setup" }) });
+	assert.equal(ordinary.ok, true);
+});
+
 test("gate: grammar problems are refused before anything else", () => {
 	const outcome = gatePropose({ claim: claim("A rule.", { asOf: "" }) });
 	assert.equal(outcome.ok, false);
