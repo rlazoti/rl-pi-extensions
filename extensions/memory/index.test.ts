@@ -497,6 +497,54 @@ test("component: migrate everything, then decide the batch once — and it injec
 	}
 });
 
+test("component: /memory review in the TUI shows the claim text and decides from keys", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		const bank = createBank({ paths, clock: CLOCK, git: async () => ({ root: "/repo/rl-pi-extensions", remote: "git@github.com:rlazoti/rl-pi-extensions.git" }) });
+		bank.proposeClaim({ key: "git.flow", kind: "rule", scope: "global", asOf: "2026-01-01", source: "a test", body: "Never push without confirmation." });
+		bank.proposeClaim({ key: "ledger.format", kind: "fact", scope: "global", asOf: "2026-09-01", source: "a test", body: "Ledgers are plain text files." });
+
+		const rendered: string[] = [];
+		const theme = { fg: (_style: string, text: string) => text, bg: (_style: string, text: string) => text, getBgAnsi: () => "" } as never;
+		const fakeTui = { terminal: { rows: 30, cols: 80 }, requestRender() {} };
+		const notes: string[] = [];
+		const ctx = {
+			...fakeContext({ mode: "tui" }).ctx,
+			ui: {
+				notify: (message: string) => notes.push(message),
+				select: async () => undefined,
+				editor: async () => undefined,
+				input: async () => undefined,
+				confirm: async () => true,
+				custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (r: unknown) => void) => { handleInput(data: string): void; render(width: number): string[] }) => {
+					const card = factory(fakeTui, theme, undefined, () => {});
+					// Read the card the way the user does, then decide the first claim.
+					rendered.push(...card.render(80));
+					card.handleInput("a");
+					card.handleInput("\u001b");
+					return { acted: [{ key: "git.flow", action: "approved" }], stopped: true, at: 1 };
+				},
+			},
+			sessionManager: { getSessionId: () => "s" },
+		} as unknown as ExtensionCommandContext;
+
+		await harness0();
+		async function harness0() {
+			const { harness } = install({ paths, mode: "tui" });
+			await harness.commands.get("memory")!.handler("review", ctx);
+		}
+
+		const screen = rendered.join("\n");
+		assert.match(screen, /Review 1\/2 — git\.flow @ global/);
+		assert.match(screen, /Never push without confirmation\./);
+		assert.match(screen, /new claim: nothing to replace|a approve · x reject/);
+		assert.match(notes[0]!, /git\.flow: approved/);
+		assert.equal(bank.queueCounts().total, 1, "one approved, one still waiting");
+	} finally {
+		cleanup();
+	}
+});
+
 test("component: one command decides a whole wave, and a long queue becomes a file to read (R18)", async () => {
 	const { paths, cleanup } = scratchBank();
 	try {
@@ -600,7 +648,7 @@ test("component: /memory status, review and the migration gate", async () => {
 		const review = notes[notes.length - 1]!;
 		assert.match(review, /1 claim waiting/);
 		assert.match(review, /replaces: Never push without confirmation\./);
-		assert.match(review, /No dialog UI here: act with \/memory approve\|reject\|defer\|edit <key>/);
+		assert.match(review, /No dialog UI here: act with \/memory approve\|reject\|defer <key> \[scope\], or --wave/);
 
 		await command.handler("approve git.flow global", ctx);
 		assert.match(notes[notes.length - 1]!, /approved git\.flow @ global — the previous version is in/);
@@ -618,24 +666,31 @@ test("component: /memory status, review and the migration gate", async () => {
 	}
 });
 
-test("component: /memory review drives the TUI one claim at a time", async () => {
+test("component: /memory review opens ONE card for the batch, not one dialog per claim", async () => {
 	const { paths, cleanup } = scratchBank();
 	try {
 		upsertClaim(paths, claim("git.flow", { body: "Never push without confirmation." }));
 		propose(paths, claim("git.flow", { state: "pending", body: "Never force-push." }), "2026-10-15");
-		const asked: string[] = [];
-		const { harness, ctx, selects } = install({
-			paths,
-			mode: "tui",
-			select: async (title, choices) => {
-				asked.push(title);
-				return choices.includes("approve") ? "approve" : undefined;
+		const { harness } = install({ paths, mode: "tui" });
+		const opened: string[] = [];
+		const theme = { fg: (_style: string, text: string) => text, bg: (_style: string, text: string) => text, getBgAnsi: () => "" } as never;
+		const fakeTui = { terminal: { rows: 30, cols: 80 }, requestRender() {} };
+		const ctx = {
+			...fakeContext({ mode: "tui" }).ctx,
+			ui: {
+				...fakeContext({ mode: "tui" }).ctx.ui,
+				custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (r: unknown) => void) => { handleInput(data: string): void; render(width: number): string[] }) => {
+					opened.push("card");
+					const card = factory(fakeTui, theme, undefined, () => {});
+					card.handleInput("a"); // approve the one claim in the queue
+					return { acted: [{ key: "git.flow", action: "approved" }], stopped: false, at: 0 };
+				},
 			},
-		});
+			sessionManager: { getSessionId: () => "s" },
+		} as unknown as ExtensionCommandContext;
+
 		await harness.commands.get("memory")!.handler("review", ctx);
-		assert.equal(asked.length, 1, "one dialog per claim, and the loop ends with the queue empty");
-		assert.match(selects[0]!.title, /Review git\.flow @ global/);
-		assert.deepEqual(selects[0]!.options, ["approve", "reject", "edit the wording", "defer", "stop here"]);
+		assert.equal(opened.length, 1, "the batch is one dialog, and the card ends when the queue is empty");
 		assert.ok(existsSync(join(paths.history, "git.flow.md")), "the approved claim it replaced is in history");
 	} finally {
 		cleanup();

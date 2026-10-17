@@ -157,10 +157,15 @@ and claims pending longer than `pendingFlagDays` — naming `/memory review`. Wi
 nothing waiting, nothing is shown; outside the TUI it is logged once. Claims are
 never dropped automatically, however long they wait.
 
-`/memory review` walks the queue. In the TUI it opens **one dialog at a time**
-(Pi has a single dialog slot): approve, reject, edit the wording, defer, stop.
-Anywhere else it lists the queue and the exact commands to act on it. Past a
-dozen claims the full listing is also written to
+`/memory review` in the TUI opens **one card for the whole batch**, and the card
+shows the claim's own words: key, scope, kind, date, age, origin, source, tags,
+the approved claim it would replace, and the body — a selector that shows only
+the key is not a review (R18.1). Keys: `a` approve, `x` reject, `d` defer,
+`e` edit the wording, `n`/`p` move without deciding, `Esc` stop. `e` closes the
+card and opens the editor with the current text, because no dialog opens inside
+a dialog (R18.2); the review then reopens where you left off. Anywhere else the
+same listing comes back as text, with the exact commands to act on it. Past a
+dozen claims it is also written to
 `migration/review-<wave>-<day>.md`, because a queue you must read is a document,
 not a scrollback. A whole batch is decided with
 `/memory approve|reject|defer --wave agent|migration`; wording changes stay per

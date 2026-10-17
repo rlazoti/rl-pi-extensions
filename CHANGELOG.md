@@ -27,6 +27,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 651 tests repo-wide (174 in this component, one file per module), `npm run typecheck` clean.
 
+### Added (memory, second pass)
+
+- `/memory migrate apply [--wave rules|facts|daily | --all]` drafts a whole migration wave in one
+  command: every live legacy entry becomes a pending `origin: migration` claim through the same gate
+  a hand-written proposal passes, and every refusal is reported with its reason. `/memory migrate
+  daily` carries the old daily-context file's open items into the daily log with the dates they
+  already had, and refuses to turn a project-status file into open work (spec D16).
+- Review works on a batch: `/memory review`, `approve`, `reject`, `defer` and `edit` take
+  `--wave agent|migration`; past a dozen claims the listing is also written to
+  `migration/review-<wave>-<date>.md`. In the TUI the review is now a **card** showing the claim's
+  own text, its metadata and the approved claim it would replace (spec R18.1, D17) — it used to
+  show only keys.
+
+### Fixed (memory, second pass)
+
+- The bank snapshot had no invalidation on external change: editing `claims/*.md` by hand — the
+  documented way to fix a claim — or approving from a second Pi session never reached the next turn.
+  The snapshot is re-read when the store's file mtimes move.
+- Calendar days came from UTC (`new Date().toISOString()`, mtime `.slice(0,10)`), so between local
+  midnight and the UTC offset a claim aged one day short and a daily file rolled over early. `time.ts`
+  derives the local day, keeps UTC-dated files readable, and never rolls over a file dated in the
+  future; `writeAtomicSync` fsyncs the file before the rename.
+- The review notice named only the oldest pending claim; the largest batch (agent-proposed vs.
+  migrated) is now named and counted.
+
+### Tests (memory, second pass)
+
+- +32 memory tests (182 total, 659 in the suite).
+
 ## [1.5.0] - 2026-10-16
 
 ### Added

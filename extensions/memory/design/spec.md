@@ -49,6 +49,11 @@ in its constraints) and Pi's extension API docs (`session_start` and `before_age
 - R18. `/memory review` lists pending claims in batches, each next to the approved claim it would
   replace. Actions per claim or per batch: approve, reject, edit, defer. Migration claims are
   reviewed as their own batch, by wave.
+  - R18.1 A review shows the claim's **text**. In the TUI it is one card for the whole batch — the
+    claim, its metadata, and the approved claim it would replace — with the decision keys beside
+    it; a selector that shows only the key is not a review. In a non-TUI context the same listing
+    is returned as text, and when it is long it is also written under `migration/` to be read.
+  - R18.2 Edit closes the card before opening the editor: no dialog opens inside a dialog.
 - R19. Config `inlineConflictDialog` (default `false`): when `true`, a proposal that would replace an
   approved claim opens a dialog right away. Dialogs are shown one at a time and cancel with the
   tool call.
@@ -285,3 +290,5 @@ flowchart LR
 | D13 | Old pending claims | Flagged at 14 days, then no longer injected. Never dropped. | R20, R21, R28 |
 | D14 | Status signals | The four proposed signals. Overrides counted in trial metrics. | R22, R24, R43 |
 | D15 | Caller changes | One-time read-only inventory by the assistant before cutover; Rodrigo edits. | R40.0, R40.1 |
+| D16 | Migration effort | A whole wave is drafted by one command (`/memory migrate apply`) and reviewed as a batch (`--wave`), because one entry per turn would spend a day on migration. Refusals are reported, never quietly kept. | R18, R25, R37, R38 |
+| D17 | Review surface | A custom card, not `ui.select`: the claim's own words and its rival are on screen, and the whole batch is one dialog. | R18.1, R18.2 |

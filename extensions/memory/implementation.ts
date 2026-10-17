@@ -15,6 +15,7 @@ import { Type } from "typebox";
 
 import { createBank, type Bank, type Outcome } from "./bank.js";
 import { createNoticeSink, type NoticeSink } from "./notice.js";
+import { openReview, type ReviewItem } from "./review.js";
 import { DAILY_SECTIONS } from "./daily.js";
 import { bankExists, describePaths } from "./store.js";
 
@@ -308,34 +309,50 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 
 	async function review(rest: string[], ctx: ExtensionCommandContext): Promise<Outcome> {
 		const wave = rest[0] === "--wave" ? (rest[1] as "agent" | "migration") : undefined;
-		const listed = bank.reviewList(wave === "agent" || wave === "migration" ? { wave } : {});
+		const scope = wave === "agent" || wave === "migration" ? { wave } : {};
+		const listed = bank.reviewList(scope);
 		if (ctx.mode !== "tui" || !ctx.hasUI) {
-			return { ok: true, text: `${listed.text}\n\nNo dialog UI here: act with /memory approve|reject|defer|edit <key> [scope].` };
+			return { ok: true, text: `${listed.text}\n\nNo dialog UI here: act with /memory approve|reject|defer <key> [scope], or --wave ${wave ?? "agent|migration"} for the batch.` };
 		}
 		if (listed.pending.length === 0) return { ok: true, text: listed.text };
 
-		// One dialog at a time: Pi has a single dialog slot, and a second question
-		// opened over the first leaves the first awaiting a dialog that is gone.
-		const acted: string[] = [];
-		for (const entry of listed.pending) {
-			const title = `${entry.claim.key} @ ${entry.claim.scope}`;
-			// Pi's select has no signal parameter in this version; the loop still ends
-			// as soon as the dialog returns nothing (dismissed or aborted).
-			const choice = await ctx.ui.select(`Review ${title}`, ["approve", "reject", "edit the wording", "defer", "stop here"]);
-			if (choice === undefined || choice === "stop here") {
-				return { ok: true, text: `${acted.length > 0 ? acted.join("\n") : "Review stopped."}\n\n${listed.text}` };
-			}
-			let body: string | undefined;
-			if (choice === "edit the wording") {
-				const edited = await ctx.ui.editor(`Edit ${title}`, entry.claim.body);
-				if (edited === undefined) continue;
-				body = edited;
-			}
-			const action = choice === "approve" ? "approve" : choice === "reject" ? "reject" : choice === "defer" ? "defer" : "edit";
-			const outcome = bank.review(action, entry.claim.key, entry.claim.scope, body);
-			acted.push(outcome.text);
+		// One dialog for the whole batch, showing each claim's text. A selector
+		// cannot carry the content, and a review that shows only the key is not a
+		// review. Edit leaves the dialog, because no dialog opens inside a dialog.
+		const summary: string[] = [];
+		for (let pass = 0; pass <= listed.pending.length; pass++) {
+			const items = reviewItems();
+			if (items.length === 0) break;
+			const result = await openReview(ctx.ui, items, {
+				approve: (item) => bank.review("approve", item.key, item.scope).text,
+				reject: (item) => bank.review("reject", item.key, item.scope).text,
+				defer: (item) => bank.review("defer", item.key, item.scope).text,
+			});
+			for (const act of result.acted) summary.push(`${act.key}: ${act.action}`);
+			if (result.edit === undefined) break;
+			const edited = await ctx.ui.editor(`Edit ${result.edit.key} @ ${result.edit.scope} — the text as it stands now`, result.edit.body);
+			if (edited === undefined || edited.trim() === result.edit.body.trim()) break;
+			summary.push(bank.review("edit", result.edit.key, result.edit.scope, edited).text);
 		}
-		return { ok: true, text: acted.join("\n") };
+		const counts = bank.queueCounts();
+		return { ok: true, text: summary.length > 0 ? `${summary.join("\n")}\n\n${counts.total} claim(s) still await review.` : listed.text };
+
+		function reviewItems(): ReviewItem[] {
+			return bank.reviewList(scope).pending.map((entry) => ({
+				key: entry.claim.key,
+				scope: entry.claim.scope,
+				kind: entry.claim.kind,
+				asOf: entry.claim.asOf,
+				source: entry.claim.source,
+				origin: entry.claim.origin,
+				tags: entry.claim.tags,
+				body: entry.claim.body,
+				replaces: entry.approved?.body,
+				ageDays: entry.ageDays,
+				flagged: entry.flagged,
+				file: entry.file.startsWith(bank.paths.root) ? entry.file.slice(bank.paths.root.length + 1) : entry.file,
+			}));
+		}
 	}
 
 	function reviewAction(action: "approve" | "reject" | "defer" | "edit", rest: string[]): Outcome {
