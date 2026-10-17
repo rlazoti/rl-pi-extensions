@@ -1,16 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
-import type { AgentToolResult, ExtensionAPI, ExtensionCommandContext, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
+
 import factory from "./index.ts";
+import { setBankForTesting } from "./implementation.ts";
+import { createBank } from "./bank.ts";
+import { bankPaths, ensureBankDirs } from "./store.ts";
+import { upsertClaim } from "./store.ts";
+import { propose } from "./queue.ts";
+import type { Claim } from "./grammar.ts";
 
 /**
- * The extension is driven through Pi's real surface — registerTool /
- * registerCommand / hooks — with a fake `pi` and a fake context, against a
- * scratch memory bank. Nothing here reads or writes the live ~/.pi/memory.
+ * The component is driven through Pi's real surface — registerTool,
+ * registerCommand, both hooks — against a scratch bank with an injected clock and
+ * git probe. Nothing here reads or writes the live ~/.pi/memory.
  */
 
 interface FakeTool {
@@ -18,805 +25,511 @@ interface FakeTool {
 	description: string;
 	promptGuidelines?: string[];
 	parameters: unknown;
-	execute: (id: string, params: Record<string, unknown>, signal: AbortSignal | undefined, onUpdate: unknown, ctx: ExtensionToolContext) => Promise<AgentToolResult<unknown>>;
+	execute: (id: string, params: Record<string, unknown>, signal: AbortSignal | undefined, onUpdate: unknown, ctx: ExtensionToolContext) => Promise<{ content: { text: string }[]; details: unknown; isError?: boolean }>;
 }
 
 interface Harness {
 	tools: Map<string, FakeTool>;
 	commands: Map<string, { description: string; handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> }>;
-	hooks: Map<string, (event: unknown, ctx: ExtensionToolContext) => unknown>;
-	notifications: Array<{ message: string; level?: string }>;
+	hooks: Map<string, (event: unknown, ctx: ExtensionContext) => unknown>;
+	notifications: { message: string; level?: string }[];
 }
 
 function fakePi(): { pi: ExtensionAPI; harness: Harness } {
 	const harness: Harness = { tools: new Map(), commands: new Map(), hooks: new Map(), notifications: [] };
 	const pi = {
-		on: (event: string, handler: (event: unknown, ctx: ExtensionToolContext) => unknown) => {
+		on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => {
 			harness.hooks.set(event, handler);
 			return () => {};
 		},
-		registerTool: (tool: FakeTool) => {
-			harness.tools.set(tool.name, tool);
-		},
-		registerCommand: (name: string, options: { description: string; handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> }) => {
-			harness.commands.set(name, options);
-		},
+		registerTool: (tool: FakeTool) => harness.tools.set(tool.name, tool),
+		registerCommand: (name: string, options: { description: string; handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> }) => harness.commands.set(name, options),
 	} as unknown as ExtensionAPI;
 	return { pi, harness };
 }
 
 interface FakeContext {
-	ctx: ExtensionToolContext;
-	asked: string[];
-	/** Every dialog's options object, in order: what the extension asked with. */
-	dialogs: unknown[];
-	answers: Map<string, string | undefined>;
+	ctx: ExtensionCommandContext;
+	selects: { title: string; options: string[] }[];
 }
 
-function fakeContext(options: { hasUI?: boolean; cwd?: string; answers?: Record<string, string | undefined> } = {}): FakeContext {
-	const asked: string[] = [];
-	const dialogs: unknown[] = [];
-	const answers = new Map(Object.entries(options.answers ?? {}));
+function fakeContext(options: { mode?: "tui" | "print" | "rpc"; cwd?: string; select?: (title: string, choices: string[]) => Promise<string | undefined> } = {}): FakeContext {
+	const selects: { title: string; options: string[] }[] = [];
+	const notifications: { message: string; level?: string }[] = [];
 	const ctx = {
-		hasUI: options.hasUI ?? false,
-		mode: options.hasUI ? "tui" : "print",
+		mode: options.mode ?? "print",
+		hasUI: options.mode === "tui",
 		cwd: options.cwd ?? "/repo/rl-pi-extensions",
 		signal: undefined,
+		notifications,
+		sessionManager: { getSessionId: () => "session-abc", getSessionFile: () => "/tmp/session.jsonl" },
 		ui: {
-			select: async (title: string, choices: string[], opts?: unknown) => {
-				asked.push(`select:${title}`);
-				dialogs.push(opts);
-				return answers.get(title) ?? answers.get(title.split(" — ")[0]!) ?? undefined;
+			notify: (message: string, level?: string) => notifications.push({ message, level }),
+			select: async (title: string, choices: string[]) => {
+				selects.push({ title, options: choices });
+				return options.select ? options.select(title, choices) : undefined;
 			},
-			input: async (title: string, placeholder?: string, opts?: unknown) => {
-				asked.push(`input:${title}`);
-				dialogs.push(opts);
-				return answers.get(title) ?? answers.get(title.split(" — ")[0]!) ?? "";
-			},
+			editor: async () => undefined,
+			input: async () => undefined,
 			confirm: async () => true,
-			notify: () => {},
 		},
-	} as unknown as ExtensionToolContext;
-	return { ctx, asked, dialogs, answers };
+	} as unknown as ExtensionCommandContext;
+	return { ctx, selects };
 }
 
-// ─── Scratch bank, every time ───────────────────────────────────────────────
+const CLOCK = () => new Date(2026, 9, 16, 21, 30, 0);
 
-interface Bank {
-	root: string;
-	agentDir: string;
-	knowledge: string;
-	cleanup: () => void;
-	seed: (files: Record<string, string>) => void;
-	seedAt: (relative: string, content: string) => void;
-	read: (name: string) => string;
-	readAt: (relative: string) => string;
-	existsAt: (relative: string) => boolean;
-	exists: (name: string) => boolean;
-	listAt: (relativeDir: string) => string[];
-	queue: () => string[];
+function scratchBank(): { paths: ReturnType<typeof bankPaths>; cleanup: () => void } {
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), "memory-impl-")));
+	const paths = bankPaths(dir);
+	ensureBankDirs(paths);
+	mkdirSync(join(paths.root, "knowledge"), { recursive: true });
+	return { paths, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-async function withBank<T>(run: (bank: Bank) => T | Promise<T>, options: { collision?: boolean } = {}): Promise<T> {
-	const root = mkdtempSync(join(tmpdir(), "memory-ext-"));
-	const agentDir = join(root, "agent");
-	const knowledge = join(root, "knowledge");
-	mkdirSync(knowledge, { recursive: true });
-	mkdirSync(join(agentDir, "extensions"), { recursive: true });
-	if (options.collision) mkdirSync(join(agentDir, "extensions", "memory"));
-
-	// The extension resolves these at load time, so pointing them here is what
-	// keeps every test off the live ~/.pi/memory.
-	const previous = { memory: process.env.PI_MEMORY_DIR, agent: process.env.PI_CODING_AGENT_DIR };
-	process.env.PI_MEMORY_DIR = root;
-	process.env.PI_CODING_AGENT_DIR = agentDir;
-
-	const bank: Bank = {
-		root,
-		agentDir,
-		knowledge,
-		cleanup: () => {
-			for (const [key, value] of [["PI_MEMORY_DIR", previous.memory], ["PI_CODING_AGENT_DIR", previous.agent]] as const) {
-				if (value === undefined) delete process.env[key];
-				else process.env[key] = value;
-			}
-			rmSync(root, { recursive: true, force: true });
-		},
-		seed: (files) => {
-			for (const [name, content] of Object.entries(files)) writeFileSync(join(knowledge, name), content, "utf8");
-		},
-		seedAt: (relative, content) => {
-			const target = join(root, relative);
-			mkdirSync(dirname(target), { recursive: true });
-			writeFileSync(target, content, "utf8");
-		},
-		readAt: (relative) => readFileSync(join(root, relative), "utf8"),
-		existsAt: (relative) => existsSync(join(root, relative)),
-		listAt: (relativeDir) => {
-			try {
-				return readdirSync(join(root, relativeDir));
-			} catch {
-				return [];
-			}
-		},
-		read: (name) => readFileSync(join(knowledge, name), "utf8"),
-		exists: (name) => {
-			try {
-				readFileSync(join(knowledge, name));
-				return true;
-			} catch {
-				return false;
-			}
-		},
-		queue: () => {
-			try {
-				return readdirSync(join(root, ".pending"));
-			} catch {
-				return [];
-			}
-		},
+function claim(key: string, overrides: Partial<Claim> = {}): Claim {
+	return {
+		key,
+		kind: "rule",
+		scope: "global",
+		asOf: "2026-01-01",
+		source: "a test",
+		body: `the rule about ${key}`,
+		aliases: [],
+		tags: [],
+		links: [],
+		origin: "agent",
+		state: "approved",
+		...overrides,
 	};
-
-	// Cleaned up even when the test fails: a failing test must not leave a
-	// bank-shaped directory behind for a later run to pick up.
-	try {
-		return await run(bank);
-	} finally {
-		bank.cleanup();
-	}
 }
 
-
-const UI = `# ui
-
-## ui.background
-- kind: preference
-- scope: global
-- asOf: 2026-10-02
-- source: design review
-- status: active
-Use dark grey for the UI background.
-
-## git.push
-- kind: rule
-- scope: global
-- asOf: 2026-10-12
-- status: active
-Never push without explicit confirmation.
-`;
-
-const WRITE_ARGS = {
-	file: "knowledge/appearance.md",
-	key: "ui.background",
-	scope: "global",
-	kind: "preference",
-	body: "Charcoal.",
-	asOf: "2026-11-01",
-	revision: "2026-11-01",
-};
-
-// ─── Registration and the guard ─────────────────────────────────────────────
-
-test("the extension registers its tools, its command and the injection hook", async () =>
-	withBank(() => {
-		const { pi, harness } = fakePi();
+function install(opts: { paths: ReturnType<typeof bankPaths>; mode?: "tui" | "print" | "rpc"; cwd?: string; select?: (title: string, choices: string[]) => Promise<string | undefined> } = { paths: undefined as never }): { harness: Harness; ctx: ExtensionCommandContext; selects: { title: string; options: string[] }[]; cleanup: () => void } {
+	const { pi, harness } = fakePi();
+	setBankForTesting(createBank({ paths: opts.paths, clock: CLOCK, git: async () => ({ root: "/repo/rl-pi-extensions", remote: "git@github.com:rlazoti/rl-pi-extensions.git" }) }));
+	try {
 		factory(pi);
+	} finally {
+		setBankForTesting(null);
+	}
+	const fake = fakeContext({ mode: opts.mode, cwd: opts.cwd, select: opts.select });
+	return { harness, ctx: fake.ctx, selects: fake.selects, cleanup: () => {} };
+}
+
+/** Tools take a richer context than a command does; tests hand them this. */
+function toolCtx(options: { mode?: "tui" | "print" | "rpc"; select?: (title: string, choices: string[]) => Promise<string | undefined> } = {}): ExtensionToolContext & { asks: { title: string; options: string[] }[] } {
+	const fake = fakeContext(options);
+	const ctx = fake.ctx as unknown as ExtensionToolContext & { asks: { title: string; options: string[] }[] };
+	ctx.asks = fake.selects;
+	return ctx;
+}
+
+function notificationsOf(ctx: ExtensionCommandContext): { message: string; level?: string }[] {
+	// The fake context's notify closure pushes into an array the harness shares.
+	return (ctx as unknown as { notifications: { message: string; level?: string }[] }).notifications ?? [];
+}
+
+test("component: a machine with no bank yet is silent, not broken", async () => {
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), "memory-nobank-")));
+	const paths = bankPaths(join(dir, "absent"));
+	try {
+		const { harness, ctx } = install({ paths, mode: "tui" });
+		await harness.hooks.get("session_start")!({ type: "session_start", reason: "new" }, ctx);
+		assert.deepEqual(notificationsOf(ctx), [], "nothing waits, nothing is said");
+		const injected = await harness.hooks.get("before_agent_start")!.call(undefined, { type: "before_agent_start", messageType: "user", prompt: "anything" }, ctx);
+		assert.equal(injected, undefined, "no claims, no block");
+		assert.deepEqual(readdirSync(paths.rules).concat(readdirSync(paths.facts)), [], "an empty bank gains no claims");
+		assert.ok(existsSync(paths.daily), "the first user turn creates the bank skeleton");
+
+		const notes: string[] = [];
+		const cmdCtx = {
+			...fakeContext({ mode: "print" }).ctx,
+			ui: { notify: (message: string) => notes.push(message), select: async () => undefined, editor: async () => undefined, input: async () => undefined, confirm: async () => true },
+			sessionManager: { getSessionId: () => "s" },
+		} as unknown as ExtensionCommandContext;
+		await harness.commands.get("memory")!.handler("status", cmdCtx);
+		assert.match(notes[0]!, /claims: 0 approved, 0 pending/);
+		await harness.commands.get("memory")!.handler("doctor", cmdCtx);
+		assert.match(notes[1]!, /the bank is well formed/);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("component: the tool names are exactly the spec's (R41)", () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		const { harness } = install({ paths });
 		assert.deepEqual(
 			[...harness.tools.keys()].sort(),
-			["memory_doctor", "memory_list", "memory_read", "memory_search", "memory_show", "memory_write"],
-			"memory_read and memory_list are the only way to reach core/ and history/",
+			["memory_archive", "memory_list", "memory_log", "memory_propose", "memory_read", "memory_search"],
 		);
+		for (const retired of ["memory_write", "memory_append", "memory_update", "memory_show", "memory_doctor", "memory_pending", "memory_resolve"]) {
+			assert.ok(!harness.tools.has(retired), `${retired} is not registered`);
+		}
 		assert.deepEqual([...harness.commands.keys()], ["memory"]);
-		assert.deepEqual([...harness.hooks.keys()], ["session_start", "before_agent_start"], "session_start owns the daily rollover");
-	}));
+	} finally {
+		cleanup();
+	}
+});
 
-test("it stands down when another memory extension is loaded, and says why", async () =>
-	withBank((bank) => {
-		assert.ok(bank.knowledge);
-		const { pi, harness } = fakePi();
-		factory(pi);
-		assert.deepEqual([...harness.tools.keys()], [], "no tools: two injectors and two memory_* sets would make the prompt unreproducible");
-		assert.deepEqual([...harness.commands.keys()], []);
-		assert.deepEqual([...harness.hooks.keys()], ["session_start"]);
+test("component: rules are context only — no tool_call handler is registered (R34)", () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		const { harness } = install({ paths });
+		assert.deepEqual([...harness.hooks.keys()].sort(), ["before_agent_start", "session_start"]);
+		assert.ok(!harness.hooks.has("tool_call"), "nothing blocks a tool call");
+		assert.ok(!harness.hooks.has("tool_result"));
+	} finally {
+		cleanup();
+	}
+});
 
-		const notices: Array<{ message: string; level?: string }> = [];
-		const ctx = { hasUI: true, ui: { notify: (message: string, level?: string) => notices.push({ message, level }) } } as unknown as ExtensionToolContext;
-		harness.hooks.get("session_start")!({ type: "session_start" }, ctx);
-		assert.equal(notices.length, 1);
-		assert.equal(notices[0]!.level, "warning");
-		assert.match(notices[0]!.message, /standing down — another memory extension is loaded at .*extensions\/memory/);
-	}, { collision: true }));
+test("component: a new session opens with the review notice; a resume does not (R20)", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		propose(paths, claim("git.flow", { state: "pending", body: "Merge with --no-ff." }), "2026-10-15");
+		propose(paths, claim("m.one", { state: "pending", origin: "migration", body: "migrated" }), "2026-10-14");
+		const { harness, ctx } = install({ paths, mode: "tui" });
+		const sessionStart = harness.hooks.get("session_start")!;
+		await sessionStart({ type: "session_start", reason: "new" }, ctx);
+		const notes = notificationsOf(ctx);
+		assert.equal(notes.length, 1);
+		assert.match(notes[0]!.message, /2 claims await review — 1 proposal from the agent; 1 migrated claim \(migration backlog\)/);
 
-// ─── daily rollover ─────────────────────────────────────────────────────────
+		const { harness: second, ctx: secondCtx } = install({ paths, mode: "tui" });
+		await second.hooks.get("session_start")!({ type: "session_start", reason: "resume" }, secondCtx);
+		assert.deepEqual(notificationsOf(secondCtx), []);
+	} finally {
+		cleanup();
+	}
+});
 
-const TODAY_ISO = new Date().toISOString().slice(0, 10);
-const STALE_DAILY = `- date: 2026-10-03
+test("component: with nothing waiting, a new session says nothing at all", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		upsertClaim(paths, claim("git.flow"));
+		const { harness, ctx } = install({ paths, mode: "tui" });
+		await harness.hooks.get("session_start")!({ type: "session_start", reason: "new" }, ctx);
+		assert.deepEqual(notificationsOf(ctx), []);
+	} finally {
+		cleanup();
+	}
+});
 
-## In Progress
-- verify the simulator build
-
-## Completed
-- wrote the spec
-`;
-
-function notifyingContext(): { ctx: ExtensionToolContext; notices: Array<{ message: string; level?: string }> } {
-	const notices: Array<{ message: string; level?: string }> = [];
-	const ctx = { hasUI: true, mode: "tui", cwd: "/repo/rl-pi-extensions", ui: { notify: (message: string, level?: string) => notices.push({ message, level }) } } as unknown as ExtensionToolContext;
-	return { ctx, notices };
-}
-
-test("session_start archives a stale daily file and carries open work into today", async () =>
-	withBank((bank) => {
-		bank.seedAt("core/dailyContext.md", STALE_DAILY);
-		const { pi, harness } = fakePi();
-		factory(pi);
-
-		const { ctx, notices } = notifyingContext();
-		harness.hooks.get("session_start")!({ type: "session_start" }, ctx);
-
-		assert.ok(bank.existsAt("history/daily/2026-10/2026-10-03-dailyContext.md"), "yesterday's file is kept as a record");
-		assert.equal(bank.readAt("history/daily/2026-10/2026-10-03-dailyContext.md"), STALE_DAILY, "archived verbatim");
-		const fresh = bank.readAt("core/dailyContext.md");
-		assert.match(fresh, /^- date: /m);
-		assert.match(fresh, new RegExp(`# Daily Context — ${TODAY_ISO}`));
-		assert.match(fresh, /verify the simulator build/);
-		assert.equal(fresh.includes("wrote the spec"), false, "settled work is archived, not carried");
-		assert.match(notices[0]!.message, /Rolled over daily context from 2026-10-03/);
-		assert.match(notices.map((notice) => notice.message).join(" "), /archived without being carried/);
-	}));
-
-test("an undated daily file is reported rather than assumed current forever", async () =>
-	withBank((bank) => {
-		bank.seedAt("core/dailyContext.md", "# Daily Context - Some Project\n\n## Completed\n- old work\n");
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const { ctx, notices } = notifyingContext();
-		harness.hooks.get("session_start")!({ type: "session_start" }, ctx);
-
-		// A file with no date field that was *just* touched is almost certainly
-		// today's, so it is not archived — it is reported, with the fix spelled out.
-		assert.deepEqual(bank.listAt("history/daily"), []);
-		assert.equal(notices.length, 1);
-		assert.equal(notices[0]!.level, "warning");
-		assert.match(notices[0]!.message, /has no `- date:` field/);
-		assert.match(notices[0]!.message, /assumed .* from its modification time/);
-	}));
-
-test("an undated open item is dated so it can age, without touching the archive path", async () =>
-	withBank((bank) => {
-		bank.seedAt("core/dailyContext.md", `- date: ${TODAY_ISO}\n\n## Next Steps\n- verify the simulator build\n`);
-		const { pi, harness } = fakePi();
-		factory(pi);
-
-		const { ctx, notices } = notifyingContext();
-		harness.hooks.get("session_start")!({ type: "session_start" }, ctx);
-
-		assert.match(bank.readAt("core/dailyContext.md"), /- \(2026-10-14\)|- \(\d{4}-\d{2}-\d{2}\) verify the simulator build/);
-		assert.match(notices.map((notice) => notice.message).join(" "), /dated 1 open item/);
-	}));
-
-test("the open work in a stale daily file is shown, with the caution attached", async () =>
-	withBank(async (bank) => {
-		bank.seedAt("core/dailyContext.md", STALE_DAILY);
-		const { pi, harness } = fakePi();
-		factory(pi);
-
-		const result = (await harness.hooks.get("before_agent_start")!({ type: "before_agent_start", prompt: "what should I work on?" }, fakeContext().ctx as never)) as { message: { content: string } };
-		// The store has nothing to say, so this block is the whole injection — and it is
-		// the work itself, not a notice that some work exists somewhere.
-		assert.match(result.message.content, /## Working state/);
-		assert.match(result.message.content, /verify the simulator build/);
-		assert.match(result.message.content, /2026-10-03/);
-		assert.match(result.message.content, /13 day\(s\) old/);
-		assert.match(result.message.content, /may no longer be true; say so rather than repeating them/);
-		assert.equal(result.message.content.includes("wrote the spec"), false, "settled work is not handed to the model as current");
-		assert.match(result.message.content, /not authorities/, "a hand-written status line must not read like an authority");
-	}));
-
-test("/memory daily reports the daily file and rolls it over on demand", async () =>
-	withBank(async (bank) => {
-		bank.seedAt("core/dailyContext.md", STALE_DAILY);
-		const { pi, harness } = fakePi();
-		factory(pi);
-
-		const { ctx, notices } = notifyingContext();
-		await harness.commands.get("memory")!.handler("daily", ctx as never);
-		const messages = notices.map((notice) => notice.message).join(" ");
-		assert.match(messages, new RegExp(`Daily context: ${TODAY_ISO}`), "after the rollover the file is current");
-		assert.match(messages, /Rolled over daily context from 2026-10-03/);
-		assert.ok(bank.existsAt("history/daily/2026-10/2026-10-03-dailyContext.md"));
-	}));
-
-// ─── memory_write ───────────────────────────────────────────────────────────
-
-test("memory_write writes an uncontested entry to disk", async () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI });
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const tool = harness.tools.get("memory_write")!;
-		const { ctx } = fakeContext();
-
-		const result = await tool.execute("t1", { ...WRITE_ARGS, key: "ui.foreground", body: "Off-white." }, undefined, undefined, ctx);
-		assert.equal(result.isError, false);
-		const text = (result.content[0] as { text: string }).text;
-		assert.match(text, /Created knowledge\/appearance\.md with ui\.foreground@2026-11-01\. Written: knowledge\/appearance\.md\./);
-		assert.match(bank.read("appearance.md"), /- asOf: 2026-11-01/);
-	}));
-
-test("memory_write refuses a rival, writes nothing, and hands back a conflictId to answer", async () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI });
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const tool = harness.tools.get("memory_write")!;
-		const { ctx } = fakeContext();
-
-		const refused = await tool.execute("t1", WRITE_ARGS, undefined, undefined, ctx);
-		const text = (refused.content[0] as { text: string }).text;
-		assert.equal((refused.details as { kind: string }).kind, "refused");
-		assert.match(text, /^CONFLICT ui\.background in scope global — nothing was written\./);
-		assert.match(text, /resolve: supersede \| merge \| withdraw \| keep-both-flagged \| discard and conflictId: [0-9a-f]{8}/);
-		assert.equal(bank.exists("appearance.md"), false);
-		assert.equal(bank.queue().length, 1, "the refusal is parked, not dropped");
-	}));
-
-test("the same write asked of a session with a UI goes to the human, in the call", async () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI });
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const tool = harness.tools.get("memory_write")!;
-
-		// Headless first: parked, and the caller is told how to answer.
-		const headless = await tool.execute("t1", WRITE_ARGS, undefined, undefined, fakeContext().ctx);
-		const conflictId = (headless.details as { conflictId: string }).conflictId;
-		assert.equal((headless.details as { kind: string }).kind, "refused");
-
-		// Same write, same store, UI available: the human decides instead.
-		const chosen = "discard — drop the new claim, the existing one stands";
-		const human = fakeContext({ hasUI: true, answers: { "Memory conflict": chosen, "Why (discard)?": "user prefers the reviewed grey" } });
-		const accepted = await tool.execute("t2", WRITE_ARGS, undefined, undefined, human.ctx);
-
-		assert.match((accepted.content[0] as { text: string }).text, /Incoming claim not written; ui\.background \(knowledge\/ui\.md\) remains the authority\./);
-		assert.deepEqual(bank.queue(), [], "answering through the dialog clears the record the headless attempt parked");
-		assert.equal(bank.exists("appearance.md"), false);
-		assert.ok(human.asked.some((entry) => entry.startsWith("select:Memory conflict")));
-		assert.ok(human.asked.some((entry) => entry.startsWith("input:Why (discard)?")));
-		assert.equal(conflictId.length, 8);
-	}));
-
-test("the conflict dialog shows both claims and the rule that refused the write", async () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI });
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const tool = harness.tools.get("memory_write")!;
-		const human = fakeContext({ hasUI: true, answers: { "Memory conflict": undefined } });
-
-		await tool.execute("t1", WRITE_ARGS, undefined, undefined, human.ctx);
-		const title = human.asked.find((entry) => entry.startsWith("select:"))!.slice("select:".length);
-
-		// Options alone are not something a person can choose between.
-		assert.match(title, /Use dark grey for the UI background\./, "the claim in the bank");
-		assert.match(title, /Charcoal\./, "the claim being written");
-		assert.match(title, /In the bank now:/);
-		assert.match(title, /Being written:/);
-		assert.match(title, /Why this is refused:/);
-		assert.match(title, /competes with/, "the reason, not just a refusal");
-		assert.match(title, /\/memory resolve [0-9a-f]{8}/, "how to answer later");
-		assert.match(title, /Nothing is written until you choose/);
-	}));
-
-test("no conflict dialog is on a timer", async () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI });
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const tool = harness.tools.get("memory_write")!;
-		const human = fakeContext({ hasUI: true, answers: { "Memory conflict": "merge — one claim replaces both, you supply the merged text", "Merge ui.background": "Charcoal, with dark grey kept as history." } });
-
-		const outcome = await tool.execute("t1", WRITE_ARGS, undefined, undefined, human.ctx);
-		assert.equal((outcome.details as { kind: string }).kind, "written", "the merge path completes: select, then the merged claim, then the reason");
-		assert.ok(human.asked.some((entry) => entry.startsWith("input:Merge ui.background")), "the merge question previews both sides");
-		assert.equal(human.dialogs.length, 3, "select + merged claim + why");
-		for (const dialog of human.dialogs) {
-			assert.equal((dialog as { timeout?: number })?.timeout, undefined, "a timer outranks the human: the dialog waits until they answer or cancel");
+test("component: outside a TUI the notice goes to the log, once (R20)", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		propose(paths, claim("git.flow", { state: "pending" }), "2026-10-15");
+		const { harness, ctx } = install({ paths, mode: "print" });
+		const warnings: string[] = [];
+		const original = console.warn;
+		console.warn = (text: string) => warnings.push(String(text));
+		try {
+			await harness.hooks.get("session_start")!({ type: "session_start", reason: "new" }, ctx);
+			await harness.hooks.get("session_start")!({ type: "session_start", reason: "fork" }, ctx);
+		} finally {
+			console.warn = original;
 		}
-		assert.match(bank.read("appearance.md"), /Charcoal, with dark grey kept as history\./);
-	}));
+		assert.equal(warnings.length, 1, "one log line, not one per session start");
+		assert.match(warnings[0]!, /1 proposal from the agent/);
+		assert.deepEqual(notificationsOf(ctx), []);
+	} finally {
+		cleanup();
+	}
+});
 
-test("two conflicting writes in one turn ask once and park the other", async () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI });
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const tool = harness.tools.get("memory_write")!;
-		const human = fakeContext({ hasUI: true, answers: { "Memory conflict": undefined } });
-		const rivalPush = { file: "knowledge/appearance.md", key: "git.push", scope: "global", kind: "rule", body: "Push freely after review.", asOf: "2026-11-02", revision: "2026-11-02" };
+test("component: injection is a user-run thing (R25)", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		upsertClaim(paths, claim("git.flow", { tags: ["always"], body: "Never push to GitHub without confirmation." }));
+		const { harness, ctx } = install({ paths, mode: "tui" });
+		const before = harness.hooks.get("before_agent_start")!;
 
-		// Pi gives extensions one dialog slot. A second ui.select replaces the first,
-		// and the write that asked the first question is then waiting on a dialog
-		// nobody can see — a session stuck with no visible reason.
-		const [first, second] = await Promise.all([tool.execute("t1", WRITE_ARGS, undefined, undefined, human.ctx), tool.execute("t2", rivalPush, undefined, undefined, human.ctx)]);
+		const custom = await before({ type: "before_agent_start", messageType: "custom", message: { customType: "nudge", content: "x" } }, ctx);
+		assert.equal(custom, undefined, "a run started by an extension message gets no injection");
 
-		assert.equal(human.asked.filter((entry) => entry.startsWith("select:")).length, 1, "one question at a time");
-		assert.equal((first.details as { kind: string }).kind, "refused");
-		assert.equal((second.details as { kind: string }).kind, "refused");
-		assert.match((second.content[0] as { text: string }).text, /another conflict is already on screen/);
-		assert.equal(bank.queue().length, 2, "both contests are parked: neither is lost while one is on screen");
-		assert.equal(bank.exists("appearance.md"), false);
-	}));
+		const user = (await before({ type: "before_agent_start", messageType: "user", prompt: "should I push?" }, ctx)) as { message: { customType: string; content: string; display: boolean } };
+		assert.equal(user.message.customType, "memory");
+		assert.equal(user.message.display, false);
+		assert.match(user.message.content, /^## Memory — rules and facts for this context \(project: github\.com\/rlazoti\/rl-pi-extensions\)/);
+		assert.match(user.message.content, /### Always-on rules\n- \[rule · global · 2026-01-01\] git\.flow: Never push to GitHub without confirmation\./);
+	} finally {
+		cleanup();
+	}
+});
 
-test("a write whose tool call is already cancelled never opens a dialog", async () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI });
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const tool = harness.tools.get("memory_write")!;
-		const human = fakeContext({ hasUI: true, answers: { "Memory conflict": "discard — drop the new claim, the existing one stands" } });
-		const cancelled = new AbortController();
-		cancelled.abort();
+test("component: every injected turn is measured, with no prompt text stored (R43)", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		upsertClaim(paths, claim("git.flow", { tags: ["always"] }));
+		const { harness, ctx } = install({ paths });
+		const before = harness.hooks.get("before_agent_start")!;
+		await before({ type: "before_agent_start", messageType: "user", prompt: "the quick brown fox asks about git" }, ctx);
+		const lines = readFileSync(join(paths.metrics, "turns.jsonl"), "utf8").trim().split("\n");
+		assert.equal(lines.length, 1);
+		const metric = JSON.parse(lines[0]!);
+		assert.ok(metric.tokens.total > 0);
+		assert.deepEqual(Object.keys(metric).sort(), ["at", "day", "dropped", "overrides", "session", "tokens"]);
+		assert.ok(!readFileSync(join(paths.metrics, "turns.jsonl"), "utf8").includes("quick brown fox"));
+	} finally {
+		cleanup();
+	}
+});
 
-		const outcome = await tool.execute("t1", WRITE_ARGS, cancelled.signal, undefined, human.ctx);
-		assert.deepEqual(human.asked, [], "nobody is waiting for an answer; opening a dialog here strands it");
-		assert.equal((outcome.details as { kind: string }).kind, "refused");
-		assert.equal(bank.queue().length, 1, "the contest is still parked, and the next turn says so");
-	}));
+test("component: damage inside the bank is reported, not swallowed, and a failed write fails the injection open (R30)", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		upsertClaim(paths, claim("git.flow", { tags: ["always"] }));
+		// A directory where a store file belongs: the store reports it and still
+		// injects what it can read.
+		mkdirSync(join(paths.rules, "broken.md"));
+		const { harness, ctx } = install({ paths, mode: "tui" });
+		const before = harness.hooks.get("before_agent_start")!;
+		const good = (await before({ type: "before_agent_start", messageType: "user", prompt: "git flow" }, ctx)) as { message: { content: string } };
+		assert.match(good.message.content, /### Always-on rules/);
 
-test("a write that already carries a resolution is applied without another dialog", async () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI });
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const tool = harness.tools.get("memory_write")!;
+		// The metrics write failing must not take the turn down with it.
+		chmodSync(paths.metrics, 0o000);
+		try {
+			const after = await before({ type: "before_agent_start", messageType: "user", prompt: "git flow" }, ctx);
+			assert.equal(after, undefined, "the injection was skipped, not thrown");
+			const searched = await harness.tools.get("memory_search")!.execute("t1", { query: "git.flow" }, undefined, undefined, toolCtx());
+			assert.match(searched.content[0]!.text, /\[claim\] git\.flow @ global/, "the store is still readable");
+			const again = await before({ type: "before_agent_start", messageType: "user", prompt: "git flow" }, ctx);
+			assert.equal(again, undefined);
+		} finally {
+			chmodSync(paths.metrics, 0o755);
+		}
+		const warnings = notificationsOf(ctx).filter((note) => note.level === "warning");
+		assert.equal(warnings.length, 1, "one warning, not one per turn");
+		assert.match(warnings[0]!.message, /memory: injection skipped/);
+	} finally {
+		cleanup();
+	}
+});
 
-		const refused = await tool.execute("t1", WRITE_ARGS, undefined, undefined, fakeContext().ctx);
-		const conflictId = (refused.details as { conflictId: string }).conflictId;
+test("component: memory_propose lands pending, and memory_log stamps the time (R15, R17)", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		const { harness, ctx } = install({ paths });
+		const proposeTool = harness.tools.get("memory_propose")!;
+		const refused = await proposeTool.execute("t1", { key: "git.flow", kind: "rule", scope: "global", asOf: "2026-10-16", source: "this session", body: "Merged 9fa1b7c on 2026-10-16 into main." }, undefined, undefined, toolCtx());
+		assert.equal(refused.isError, true);
+		assert.match(refused.content[0]!.text, /reads as project status/);
+		assert.match(refused.content[0]!.text, /use memory_log/);
 
-		const human = fakeContext({ hasUI: true, answers: { "Memory conflict": "supersede — the new claim wins, the old one becomes history" } });
-		const accepted = await tool.execute("t2", { ...WRITE_ARGS, resolve: "supersede", conflictId }, undefined, undefined, human.ctx);
+		const accepted = await proposeTool.execute("t2", { key: "git.flow", kind: "rule", scope: "global", asOf: "2026-10-16", source: "this session", body: "Never push without confirmation." }, undefined, undefined, toolCtx());
+		assert.notEqual(accepted.isError, true);
+		assert.match(accepted.content[0]!.text, /proposed git\.flow @ global \(pending, agent\)/);
 
-		assert.equal((accepted.details as { kind: string }).kind, "written");
-		assert.deepEqual(human.asked, [], "the decision was already made; asking twice invites a different answer");
-		assert.deepEqual(bank.queue(), []);
-		assert.match(bank.read("appearance.md"), /- supersedes: knowledge\/ui\.md#ui\.background/);
-	}));
+		const logTool = harness.tools.get("memory_log")!;
+		const logged = await logTool.execute("t3", { section: "in_progress", text: "Wire the injector." }, undefined, undefined, toolCtx());
+		assert.match(logged.content[0]!.text, /logged in_progress at 2026-10-16 21:30/);
+		const daily = readFileSync(join(paths.daily, "today.md"), "utf8");
+		assert.equal(daily, "# Daily log — 2026-10-16\n\n## in_progress\n- (2026-10-16 21:30) Wire the injector.\n");
+	} finally {
+		cleanup();
+	}
+});
 
-test("a dismissed dialog parks the refusal instead of writing", async () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI });
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const tool = harness.tools.get("memory_write")!;
-		const human = fakeContext({ hasUI: true, answers: { "Memory conflict": undefined } });
+test("component: with the inline conflict dialog on, the ask happens at the tool call (R19)", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		writeFileSync(join(paths.root, "config.json"), JSON.stringify({ inlineConflictDialog: true }));
+		upsertClaim(paths, claim("git.flow", { body: "Never push without confirmation." }));
+		const proposeTool = () => {
+			const { harness } = install({ paths, mode: "tui" });
+			return harness.tools.get("memory_propose")!;
+		};
 
-		const outcome = await tool.execute("t1", WRITE_ARGS, undefined, undefined, human.ctx);
-		assert.match((outcome.content[0] as { text: string }).text, /^CONFLICT/);
-		assert.equal(bank.queue().length, 1);
-		assert.equal(bank.exists("appearance.md"), false);
-	}));
+		const replace = toolCtx({ mode: "tui", select: async () => "replace with: Never force-push." });
+		const accepted = await proposeTool().execute("t1", { key: "git.flow", kind: "rule", scope: "global", asOf: "2026-10-16", source: "this session", body: "Never force-push." }, undefined, undefined, replace);
+		assert.equal(replace.asks.length, 1);
+		assert.match(replace.asks[0]!.title, /memory: git\.flow @ global — replace the approved claim\?/);
+		assert.match(replace.asks[0]!.options[0]!, /keep: Never push without confirmation\./);
+		assert.match(replace.asks[0]!.options[1]!, /replace with: Never force-push\./);
+		assert.match(accepted.content[0]!.text, /decided now: approved git\.flow @ global — the previous version is in/);
+		assert.equal(readFileSync(join(paths.rules, "git.md"), "utf8").includes("Never force-push."), true);
+		assert.ok(existsSync(join(paths.history, "git.flow.md")), "the claim it replaced was kept");
 
-test("memory_write refuses a malformed entry with the parser's own reasons", () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI });
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const tool = harness.tools.get("memory_write")!;
-		const { ctx } = fakeContext();
+		const keep = toolCtx({ mode: "tui", select: async () => "keep: Never force-push." });
+		const kept = await proposeTool().execute("t2", { key: "git.flow", kind: "rule", scope: "global", asOf: "2026-10-16", source: "another session", body: "Squash merge instead." }, undefined, undefined, keep);
+		assert.match(kept.content[0]!.text, /decided now: rejected git\.flow @ global/);
+		assert.match(readFileSync(join(paths.rules, "git.md"), "utf8"), /Never force-push\./);
 
-		const bad = await tool.execute("t1", { ...WRITE_ARGS, scope: "host:work" }, undefined, undefined, ctx);
-		assert.equal(bad.isError, true);
-		assert.match((bad.content[0] as { text: string }).text, /error \[bad-scope\]/);
-		assert.equal(bank.exists("appearance.md"), false);
+		const later = toolCtx({ mode: "tui", select: async () => undefined });
+		const deferred = await proposeTool().execute("t3", { key: "git.flow", kind: "rule", scope: "global", asOf: "2026-10-16", source: "a third session", body: "Rebase then merge." }, undefined, undefined, later);
+		assert.match(deferred.content[0]!.text, /left pending: it will show in \/memory review/);
+	} finally {
+		cleanup();
+	}
+});
 
-		const noDate = await tool.execute("t2", { ...WRITE_ARGS, asOf: "last tuesday" }, undefined, undefined, ctx);
-		assert.match((noDate.content[0] as { text: string }).text, /bad-asOf/);
-	}));
+test("component: the inline conflict dialog is off by default (R19, D3 defaults)", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		upsertClaim(paths, claim("git.flow", { body: "Never push without confirmation." }));
+		const { harness } = install({ paths, mode: "tui" });
+		const ctx = toolCtx({ mode: "tui", select: async () => "replace with: Never force-push." });
+		const outcome = await harness.tools.get("memory_propose")!.execute("t1", { key: "git.flow", kind: "rule", scope: "global", asOf: "2026-10-16", source: "this session", body: "Never force-push." }, undefined, undefined, ctx);
+		assert.equal(ctx.asks.length, 0, "no dialog: the default is the review queue");
+		assert.match(outcome.content[0]!.text, /It waits against the approved claim/);
+		assert.match(readFileSync(join(paths.rules, "git.md"), "utf8"), /Never push without confirmation\./);
+	} finally {
+		cleanup();
+	}
+});
 
-test("the tool teaches the protocol rather than hoping the model guesses it", async () =>
-	withBank(() => {
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const tool = harness.tools.get("memory_write")!;
-		assert.ok(tool.promptGuidelines?.some((line) => /never default it to today/i.test(line)));
-		assert.ok(tool.promptGuidelines?.some((line) => /do not pick a winner yourself/i.test(line)));
-		assert.match(tool.description, /refused — nothing is written/);
-	}));
-
-// ─── Reading ────────────────────────────────────────────────────────────────
-
-test("memory_show names the authority, the retired claims and the shadowing", async () =>
-	withBank(async (bank) => {
-		bank.seed({
-			"ui.md": `# ui\n\n## ui.background\n- kind: preference\n- scope: global\n- asOf: 2026-01-01\n- status: active\nDark grey.\n\n## ui.background@2025-06-14\n- kind: preference\n- scope: global\n- asOf: 2025-06-14\n- status: superseded\n- supersededBy: knowledge/ui.md#ui.background\nNavy.\n`,
-			"finance.md": `# finance\n\n## ui.background\n- kind: preference\n- scope: project:money-manager\n- asOf: 2026-02-01\n- status: active\nNavy for legibility.\n`,
-		});
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const tool = harness.tools.get("memory_show")!;
-
-		const here = await tool.execute("t1", { key: "ui.background" }, undefined, undefined, fakeContext({ cwd: "/repos/money-manager" }).ctx);
-		const hereText = (here.content[0] as { text: string }).text;
-		assert.match(hereText, /Authority for "ui\.background": knowledge\/finance\.md#ui\.background/);
-		assert.match(hereText, /ui\.background@2025-06-14 \[superseded\]/);
-		assert.match(hereText, /Shadowed for this context:\n- knowledge\/ui\.md#ui\.background: shadowed-by-scope \(by knowledge\/finance\.md#ui\.background\)/, "a global default and a project override must not both reach the model, and the reason is recorded");
-	}));
-
-test("memory_show reports a contested key as an error, not as an answer", async () =>
-	withBank(async (bank) => {
-		bank.seed({
-			"ui.md": `# ui\n\n## ui.background\n- kind: preference\n- scope: global\n- asOf: 2026-10-02\n- status: active\nDark grey.\n`,
-			"settings.md": `# settings\n\n## ui.background\n- kind: preference\n- scope: global\n- asOf: 2026-09-01\n- status: active\nNavy.\n`,
-		});
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const outcome = await harness.tools.get("memory_show")!.execute("t1", { key: "ui.background" }, undefined, undefined, fakeContext().ctx);
-		assert.equal(outcome.isError, true);
-		assert.match((outcome.content[0] as { text: string }).text, /CONTESTED: "ui\.background" has no authority/);
-	}));
-
-test("memory_search is explicit that a candidate is not an answer", async () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI });
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const outcome = await harness.tools.get("memory_search")!.execute("t1", { query: "push confirmation" }, undefined, undefined, fakeContext().ctx);
-		const text = (outcome.content[0] as { text: string }).text;
-		assert.match(text, /Candidates are not answers/);
-		assert.match(text, /knowledge\/ui\.md#git\.push \[active\] rule · global · 2026-10-12 — matched: push, confirmation/);
-	}));
-
-test("memory_doctor reports the problems, and only reports clean when it is clean", async () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI, "notes.md": "# notes\n\n## A prose heading\n- kind: fact\n- scope: global\n- asOf: 2026-01-01\nLegacy.\n" });
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const doctor = harness.tools.get("memory_doctor")!;
-
-		const dirty = await doctor.execute("t1", {}, undefined, undefined, fakeContext().ctx);
-		assert.equal(dirty.isError, true);
-		const text = (dirty.content[0] as { text: string }).text;
-		assert.match(text, /Headings that are not assertion keys:\n- knowledge\/notes\.md#A prose heading/);
-		assert.match(text, /Pending conflicts: none\./);
-
-		rmSync(join(bank.knowledge, "notes.md"));
-		const clean = await doctor.execute("t2", {}, undefined, undefined, fakeContext().ctx);
-		assert.equal(clean.isError, false);
-		assert.match((clean.content[0] as { text: string }).text, /No structural problems found\./);
-	}));
-
-// ─── The /memory command ────────────────────────────────────────────────────
-
-test("/memory pending and /memory doctor reach the user as notifications", async () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI });
-		const { pi, harness } = fakePi();
-		factory(pi);
+test("component: /memory migrate draft names the next file, a named file, or a batch (R38)", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		writeFileSync(
+			join(paths.root, "knowledge", "git-standards.md"),
+			"# Git standards\n\n## git-standards.push\n- kind: rule\n- scope: global\n- asOf: 2026-01-01\n- source: repo wiki\n\nNever push without confirmation.\n",
+		);
+		const { harness } = install({ paths });
+		const notes: string[] = [];
+		const ctx = { ...fakeContext({ mode: "print" }).ctx, ui: { notify: (message: string) => notes.push(message) }, sessionManager: { getSessionId: () => "s" } } as unknown as ExtensionCommandContext;
 		const command = harness.commands.get("memory")!;
 
-		const notices: Array<{ message: string; level?: string }> = [];
-		const ctx = { hasUI: true, ui: { notify: (message: string, level?: string) => notices.push({ message, level }), select: async () => undefined, input: async () => "", confirm: async () => true } } as unknown as ExtensionCommandContext;
+		await command.handler("migrate plan", ctx);
+		assert.match(notes[notes.length - 1]!, /planned 1 source files in waves: rules/);
+		await command.handler("migrate draft", ctx);
+		assert.match(notes[notes.length - 1]!, /no verified backup/);
 
-		await command.handler("pending", ctx);
-		assert.match(notices[0]!.message, /Pending conflicts: none\./);
+		await command.handler("migrate backup", ctx);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		assert.match(notes[notes.length - 1]!, /backup written and listed back/);
 
-		await harness.tools.get("memory_write")!.execute("t1", WRITE_ARGS, undefined, undefined, fakeContext().ctx);
-		await command.handler("pending", ctx);
-		assert.match(notices[1]!.message, /Pending conflicts: 1/);
-		assert.match(notices[1]!.message, /Suggested: supersede/);
+		await command.handler("migrate draft", ctx);
+		assert.match(notes[notes.length - 1]!, /Source: knowledge\/git-standards\.md \(wave rules, 1 claim to draft\)/);
+		assert.match(notes[notes.length - 1]!, /## git-standards\.push/);
+		await command.handler("migrate draft --batch 3", ctx);
+		assert.match(notes[notes.length - 1]!, /batch of 1 file\(s\), in wave order:\n  knowledge\/git-standards\.md/);
+		await command.handler("migrate draft --file git-standards", ctx);
+		assert.match(notes[notes.length - 1]!, /Source: knowledge\/git-standards\.md/);
+		await command.handler("migrate draft --file nope", ctx);
+		assert.match(notes[notes.length - 1]!, /not a file waiting to be drafted/);
+		await command.handler("migrate drafted knowledge/git-standards.md 1", ctx);
+		assert.match(notes[notes.length - 1]!, /drafted knowledge\/git-standards\.md \(1 proposals\)/);
+		await command.handler("migrate draft", ctx);
+		assert.match(notes[notes.length - 1]!, /every source file has been drafted/);
+	} finally {
+		cleanup();
+	}
+});
 
-		await command.handler("doctor", ctx);
-		assert.equal(notices[2]!.level, "info", "a structurally clean store is informational");
-		await command.handler("resolve", ctx);
-		assert.match(notices[3]!.message, /memory resolve <conflictId>/);
+test("component: the read tools work over the new layout (R41)", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		upsertClaim(paths, claim("git.flow", { body: "Never push without confirmation." }));
+		propose(paths, claim("m.one", { state: "pending", origin: "migration", body: "a migrated fact about push policy" }), "2026-10-14");
+		const { harness, ctx } = install({ paths });
+
+		const list = await harness.tools.get("memory_list")!.execute("t1", {}, undefined, undefined, toolCtx());
+		assert.match(list.content[0]!.text, /  claims\/rules\/git\.md \(1 approved, 0 pending, \d+ bytes\)/);
+		assert.match(list.content[0]!.text, /  claims\/rules\/m\.md \(0 approved, 1 pending, \d+ bytes\)/);
+
+		const read = await harness.tools.get("memory_read")!.execute("t2", { path: "claims/rules/git.md" }, undefined, undefined, toolCtx());
+		assert.match(read.content[0]!.text, /## git\.flow/);
+		const escape = await harness.tools.get("memory_read")!.execute("t3", { path: "../../../etc/passwd" }, undefined, undefined, toolCtx());
+		assert.equal(escape.isError, true);
+		assert.match(escape.content[0]!.text, /outside the bank/);
+
+		const search = await harness.tools.get("memory_search")!.execute("t4", { query: "push policy" }, undefined, undefined, toolCtx());
+		assert.match(search.content[0]!.text, /\[claim\] git\.flow @ global/);
+		assert.match(search.content[0]!.text, /\[pending:migration\] m\.one @ global/);
+	} finally {
+		cleanup();
+	}
+});
+
+test("component: /memory status, review and the migration gate", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		upsertClaim(paths, claim("git.flow", { body: "Never push without confirmation." }));
+		propose(paths, claim("git.flow", { state: "pending", body: "Never force-push." }), "2026-10-15");
+		const { harness } = install({ paths, mode: "print", cwd: "/repo/rl-pi-extensions" });
+		const command = harness.commands.get("memory")!;
+		const notes: string[] = [];
+		const ctx = {
+			...(fakeContext({ mode: "print", cwd: "/repo/rl-pi-extensions" }).ctx as object),
+			ui: { notify: (message: string) => notes.push(message), select: async () => undefined, editor: async () => undefined, input: async () => undefined, confirm: async () => true },
+			mode: "print",
+			hasUI: false,
+			signal: undefined,
+			cwd: "/repo/rl-pi-extensions",
+			sessionManager: { getSessionId: () => "s1" },
+		} as unknown as ExtensionCommandContext;
+
+		await command.handler("status", ctx);
+		assert.match(notes[0]!, /project: github\.com\/rlazoti\/rl-pi-extensions/);
+		assert.match(notes[0]!, /claims: 1 approved, 1 pending/);
+
+		await command.handler("review", ctx);
+		const review = notes[notes.length - 1]!;
+		assert.match(review, /1 claim waiting/);
+		assert.match(review, /replaces: Never push without confirmation\./);
+		assert.match(review, /No dialog UI here: act with \/memory approve\|reject\|defer\|edit <key>/);
+
+		await command.handler("approve git.flow global", ctx);
+		assert.match(notes[notes.length - 1]!, /approved git\.flow @ global — the previous version is in/);
+
+		await command.handler("migrate plan", ctx);
+		assert.match(notes[notes.length - 1]!, /planned 0 source files/);
+
+		await command.handler("migrate next", ctx);
+		assert.match(notes[notes.length - 1]!, /no verified backup/);
+
 		await command.handler("nonsense", ctx);
-		assert.match(notices[4]!.message, /Unknown subcommand "nonsense"/);
-	}));
+		assert.match(notes[notes.length - 1]!, /unknown \/memory subcommand "nonsense"/);
+	} finally {
+		cleanup();
+	}
+});
 
-test("/memory resolve <id> asks the human and applies their answer", async () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI });
-		const { pi, harness } = fakePi();
-		factory(pi);
+test("component: /memory review drives the TUI one claim at a time", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		upsertClaim(paths, claim("git.flow", { body: "Never push without confirmation." }));
+		propose(paths, claim("git.flow", { state: "pending", body: "Never force-push." }), "2026-10-15");
+		const asked: string[] = [];
+		const { harness, ctx, selects } = install({
+			paths,
+			mode: "tui",
+			select: async (title, choices) => {
+				asked.push(title);
+				return choices.includes("approve") ? "approve" : undefined;
+			},
+		});
+		await harness.commands.get("memory")!.handler("review", ctx);
+		assert.equal(asked.length, 1, "one dialog per claim, and the loop ends with the queue empty");
+		assert.match(selects[0]!.title, /Review git\.flow @ global/);
+		assert.deepEqual(selects[0]!.options, ["approve", "reject", "edit the wording", "defer", "stop here"]);
+		assert.ok(existsSync(join(paths.history, "git.flow.md")), "the approved claim it replaced is in history");
+	} finally {
+		cleanup();
+	}
+});
 
-		const refused = await harness.tools.get("memory_write")!.execute("t1", WRITE_ARGS, undefined, undefined, fakeContext().ctx);
-		const id = (refused.details as { conflictId: string }).conflictId;
+test("component: /memory preview shows the block and its cost", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		upsertClaim(paths, claim("git.flow", { tags: ["always"], body: "Never push without confirmation." }));
+		const { harness } = install({ paths });
+		const notes: string[] = [];
+		const ctx = { ...fakeContext({ mode: "print" }).ctx, ui: { notify: (message: string) => notes.push(message) }, sessionManager: { getSessionId: () => "s" } } as unknown as ExtensionCommandContext;
+		await harness.commands.get("memory")!.handler("preview should I push", ctx);
+		assert.match(notes[0]!, /^Injection — \d+ of 2000 tokens/);
+		assert.match(notes[0]!, /Always-on rules: \d+ tokens, 1 shown, 0 dropped/);
+	} finally {
+		cleanup();
+	}
+});
 
-		const notices: string[] = [];
-		const human = fakeContext({ hasUI: true, answers: { [`Resolve ${id}`]: "withdraw — stop asserting either; nothing new is claimed", "Why (withdraw)?": "nobody owns this claim any more" } });
-		const ctx = { ...human.ctx, ui: { ...human.ctx.ui, notify: (message: string) => notices.push(message) } } as unknown as ExtensionCommandContext;
-
-		await harness.commands.get("memory")!.handler(`resolve ${id}`, ctx);
-		assert.match(notices[0]!, /Withdrew ui\.background \(knowledge\/ui\.md\)\. Nothing new was claimed\. Written: knowledge\/ui\.md\./);
-		assert.match(bank.read("ui.md"), /- status: withdrawn\n- withdrawnOn: 2026-11-01/);
-		assert.deepEqual(bank.queue(), []);
-	}));
-
-test("/memory resolve without a UI needs an explicit --resolve, and guesses nothing", async () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI });
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const refused = await harness.tools.get("memory_write")!.execute("t1", WRITE_ARGS, undefined, undefined, fakeContext().ctx);
-		const id = (refused.details as { conflictId: string }).conflictId;
-
-		const notices: string[] = [];
-		const ctx = { hasUI: false, cwd: "/repo/x", ui: { notify: (message: string) => notices.push(message), select: async () => undefined, input: async () => "", confirm: async () => true } } as unknown as ExtensionCommandContext;
-
-		await harness.commands.get("memory")!.handler(`resolve ${id}`, ctx);
-		assert.match(notices[0]!, /[Pp]ass --resolve=<supersede\|merge\|withdraw\|keep-both-flagged\|discard> \(suggested: supersede\)/);
-		assert.equal(bank.queue().length, 1, "still pending: a suggestion is not an answer");
-
-		await harness.commands.get("memory")!.handler(`resolve ${id} --resolve=discard`, ctx);
-		assert.match(notices[1]!, /remains the authority/);
-		assert.deepEqual(bank.queue(), []);
-	}));
-
-// ─── Per-turn injection ─────────────────────────────────────────────────────
-
-test("the hook injects authorities, never candidates, and stays silent when there is nothing to say", async () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI });
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const hook = harness.hooks.get("before_agent_start")!;
-
-		const quiet = await hook({ type: "before_agent_start", messageType: "user", prompt: "what is the weather" }, fakeContext().ctx as never);
-		assert.equal(quiet, undefined, "no injection, no header, no tokens spent");
-
-		const result = (await hook({ type: "before_agent_start", messageType: "user", prompt: "may I push to github" }, fakeContext().ctx as never)) as { message: { content: string; display: boolean; customType: string } };
-		assert.equal(result.message.customType, "memory");
-		assert.equal(result.message.display, false);
-		assert.match(result.message.content, /\[rule · global · 2026-10-12\] git\.push: Never push without explicit confirmation\./);
-	}));
-
-test("the hook surfaces unanswered conflicts on every turn until they are answered", async () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI });
-		const { pi, harness } = fakePi();
-		factory(pi);
-		await harness.tools.get("memory_write")!.execute("t1", WRITE_ARGS, undefined, undefined, fakeContext().ctx);
-
-		const result = (await harness.hooks.get("before_agent_start")!({ type: "before_agent_start", messageType: "user", prompt: "unrelated question about the weather" }, fakeContext().ctx as never)) as { message: { content: string } };
-		assert.match(result.message.content, /## Memory conflicts awaiting a decision/);
-		assert.match(result.message.content, /\/memory resolve [0-9a-f]{8}/);
-	}));
-
-// ─── Working state in the prompt, and the read-only recall tools ─────────────
-
-const PROJECTS_FILE = `# Active Projects
-
-## rl-pi-extensions (~/Projects/Terminal/rl-pi-extensions)
-- Status: v1.4.1 released and pushed; 723 tests green
-- Next: fold the Unreleased section at the next release
-`;
-
-const text = (result: { content: unknown[] }): string => (result.content[0] as { text: string }).text;
-
-test("activeProjects.md reaches the prompt: it was always written, and used to be never read", async () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI });
-		bank.seedAt("core/activeProjects.md", PROJECTS_FILE);
-		const { pi, harness } = fakePi();
-		factory(pi);
-
-		const result = (await harness.hooks.get("before_agent_start")!({ type: "before_agent_start", prompt: "what should I do next" }, fakeContext().ctx as never)) as { message: { content: string } };
-		assert.match(result.message.content, /## Working state/);
-		assert.match(result.message.content, /v1\.4\.1 released and pushed/);
-		assert.match(result.message.content, /not entry stores and not authorities/, "a status line must not read like an authority");
-	}));
-
-test("memory_read opens the archives no other tool reaches, and reports its window", async () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI });
-		bank.seedAt("history/daily/2026-10/2026-10-14-dailyContext.md", "# Daily Context — 2026-10-14\n\n- date: 2026-10-14\n\n## Completed\n- shipped the entry store\n");
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const read = harness.tools.get("memory_read")!;
-
-		const outcome = await read.execute("t1", { file: "history/daily/2026-10/2026-10-14-dailyContext.md" }, undefined, undefined, fakeContext().ctx);
-		assert.equal(outcome.isError, false);
-		assert.match(text(outcome), /shipped the entry store/);
-		assert.match(text(outcome), /^history\/daily\/2026-10\/2026-10-14-dailyContext\.md — \d+ chars, showing 0-\d+/);
-
-		assert.ok(read.promptGuidelines?.some((line) => /evidence of what was written, not an authority/i.test(line)), "the tool teaches the distinction the prompt cannot fit");
-	}));
-
-test("a truncated read says where to continue, and continuing returns the rest", async () =>
-	withBank(async (bank) => {
-		bank.seedAt("core/activeProjects.md", "0123456789abcdefghij");
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const read = harness.tools.get("memory_read")!;
-
-		const first = await read.execute("t1", { file: "core/activeProjects.md", maxChars: 10 }, undefined, undefined, fakeContext().ctx);
-		assert.match(text(first), /_truncated: continue with offset 10\._/);
-		const rest = await read.execute("t2", { file: "core/activeProjects.md", offset: 10 }, undefined, undefined, fakeContext().ctx);
-		assert.match(text(rest), /abcdefghij/);
-		assert.equal(text(rest).includes("truncated"), false, "the tail is the tail: no more to read");
-	}));
-
-test("memory_read refuses the three ways a read can go wrong, each with the way out", async () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI });
-		bank.seedAt("core/activeProjects.md", PROJECTS_FILE);
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const read = harness.tools.get("memory_read")!;
-
-		const escape = await read.execute("t1", { file: "../.ssh/id_ed25519" }, undefined, undefined, fakeContext().ctx);
-		assert.equal(escape.isError, true);
-		assert.match(text(escape), /not inside the memory bank/);
-
-		const dir = await read.execute("t2", { file: "core" }, undefined, undefined, fakeContext().ctx);
-		assert.equal(dir.isError, true);
-		assert.match(text(dir), /is a directory — memory_read reads files; memory_list core shows its contents/);
-
-		const gone = await read.execute("t3", { file: "core/nope.md" }, undefined, undefined, fakeContext().ctx);
-		assert.equal(gone.isError, true);
-		assert.match(text(gone), /memory_list shows what is there/);
-	}));
-
-test("memory_list shows stores, working state and archives in one view", async () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI });
-		bank.seed({ "more.md": UI });
-		bank.seedAt("core/activeProjects.md", PROJECTS_FILE);
-		bank.seedAt("history/daily/2026-10/2026-10-14-dailyContext.md", "- date: 2026-10-14\n");
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const list = harness.tools.get("memory_list")!;
-
-		const all = await list.execute("t1", {}, undefined, undefined, fakeContext().ctx);
-		assert.equal(all.isError, false);
-		for (const path of ["knowledge/ui.md", "core/activeProjects.md", "history/daily/2026-10/2026-10-14-dailyContext.md"]) {
-			assert.ok(text(all).includes(path), `${path} is listed`);
-		}
-		assert.equal(text(all).includes(".pending"), false, "the queue is the doctor's business, not a file listing");
-
-		const narrow = await list.execute("t2", { dir: "knowledge", limit: 1 }, undefined, undefined, fakeContext().ctx);
-		assert.match(text(narrow), /List stopped at the entry limit/);
-		const escape = await list.execute("t3", { dir: ".." }, undefined, undefined, fakeContext().ctx);
-		assert.equal(escape.isError, true);
-	}));
-
-test("the doctor says how much of the working state the prompt could carry", async () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI });
-		bank.seedAt("core/activeProjects.md", PROJECTS_FILE);
-		bank.seedAt("core/dailyContext.md", `- date: 2026-09-30\n\n## In Progress\n- (2026-09-30) an old open item\n`);
-		const { pi, harness } = fakePi();
-		factory(pi);
-
-		const outcome = await harness.tools.get("memory_doctor")!.execute("t1", {}, undefined, undefined, fakeContext().ctx);
-		assert.match(text(outcome), /Working state \(injected, never authoritative\):/);
-		assert.match(text(outcome), /core\/activeProjects\.md: \d+\/\d+ lines shown/);
-		assert.match(text(outcome), /core\/dailyContext\.md: 1\/1 open items shown, \d+ tokens, 16 day\(s\) old/);
-	}));
-
-test("/memory files lists the whole bank, and says when a path is not one", async () =>
-	withBank(async (bank) => {
-		bank.seed({ "ui.md": UI });
-		bank.seedAt("core/activeProjects.md", PROJECTS_FILE);
-		bank.seedAt("history/daily/2026-10/2026-10-14-dailyContext.md", "- date: 2026-10-14\n");
-		const { pi, harness } = fakePi();
-		factory(pi);
-		const command = harness.commands.get("memory")!;
-
-		const notices: Array<{ message: string; level?: string }> = [];
-		const ctx = { hasUI: true, ui: { notify: (message: string, level?: string) => notices.push({ message, level }), select: async () => undefined, input: async () => "", confirm: async () => true } } as unknown as ExtensionCommandContext;
-
-		await command.handler("files", ctx);
-		for (const path of ["knowledge/ui.md", "core/activeProjects.md", "history/daily/2026-10/2026-10-14-dailyContext.md"]) {
-			assert.ok(notices[0]!.message.includes(path), `${path} is in the listing — a store listing hid the rest of the bank`);
-		}
-
-		await command.handler("files knowledge", ctx);
-		assert.match(notices[1]!.message, /^knowledge: \d+ entries/);
-
-		await command.handler("files ../outside", ctx);
-		assert.equal(notices[2]!.level, "error");
-		await command.handler("files knowledge/ui.md", ctx);
-		assert.match(notices[3]!.message, /memory_read knowledge\/ui\.md reads the file/);
-	}));
+test("component: Pi really exports the token estimator the budget and the baseline share", async () => {
+	const pi = await import("@earendil-works/pi-coding-agent");
+	assert.equal(typeof pi.estimateTokens, "function", "estimateTokens must exist in the Pi install the tests run against");
+	assert.equal(pi.estimateTokens({ role: "user", content: "abcdefgh" } as never), 2);
+});

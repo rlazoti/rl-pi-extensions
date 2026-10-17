@@ -1,351 +1,291 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseTopicFile, type TopicFile } from "./schema.ts";
-import { buildStore, type MemoryStore } from "./resolver.ts";
-import { decide, type EditPlan, type WriteRequest } from "./gate.ts";
-import { estimateTokens, inject, recall, tokenize } from "./inject.ts";
 
-// ─── Fixtures ───────────────────────────────────────────────────────────────
+import { buildInjection, dropNotice, formatClaim, formatPreview, selectEligible, tokensOf, headerFor } from "./inject.ts";
+import { parseDaily } from "./daily.ts";
+import { DEFAULT_CONFIG, type MemoryConfig } from "./config.ts";
+import type { Claim } from "./grammar.ts";
+import type { ScopeContext } from "./scope.ts";
 
-const UI = `# ui
+const ctx: ScopeContext = { projectId: "github.com/rlazoti/rl-pi-extensions", cwd: "/repo/x", rootPath: "/repo/x" };
+const TODAY = "2026-10-16";
 
-## ui.background
-- kind: preference
-- scope: global
-- asOf: 2026-10-02
-- status: active
-Use dark grey for the UI background.
-
-## ui.background@2026-06-14
-- kind: preference
-- scope: global
-- asOf: 2026-06-14
-- status: superseded
-Use navy for the UI background.
-
-## ui.foreground
-- kind: preference
-- scope: project:rl-pi-extensions
-- asOf: 2026-10-14
-- status: active
-Off-white for terminal text in this project.
-`;
-
-const GIT = `# git
-
-## git.push
-- kind: rule
-- scope: global
-- asOf: 2026-10-12
-- status: active
-Never push changes to GitHub without explicit confirmation.
-
-## test.gate
-- kind: procedure
-- scope: project:rl-pi-extensions
-- asOf: 2026-10-11
-- status: active
-Run npm test and npm run typecheck before any commit.
-`;
-
-const NOTES = `# notes
-
-## pi.scores
-- kind: fact
-- scope: global
-- asOf: 2026-10-10
-- status: active
-The old extension pushed whatever ranked highest, so three claims reached the model at once.
-`;
-
-const BROKEN = `# broken
-
-## bad.scope
-- kind: fact
-- scope: host:work
-- asOf: 2026-10-10
-- status: active
-A claim whose scope cannot be parsed, mentioning push confirmation github.
-
-## Free-form prose heading
-- kind: fact
-- scope: global
-- asOf: 2026-10-10
-- status: active
-An entry whose heading is not an assertion key, about push confirmation github.
-`;
-
-function storeOf(files: Record<string, string>): MemoryStore {
-	return buildStore(Object.entries(files).map(([path, text]) => parseTopicFile(text, path)));
+function claim(key: string, overrides: Partial<Claim> = {}): Claim {
+	return {
+		key,
+		kind: "rule",
+		scope: "global",
+		asOf: "2026-01-01",
+		source: "a test",
+		body: `the rule about ${key}`,
+		aliases: [],
+		tags: [],
+		links: [],
+		origin: "agent",
+		state: "approved",
+		...overrides,
+	};
 }
 
-const BANK = storeOf({ "knowledge/ui.md": UI, "knowledge/git.md": GIT, "knowledge/notes.md": NOTES });
-
-function keys(injected: Array<{ entry: { key: string } }>): string[] {
-	return injected.map((hit) => hit.entry.key).sort();
+function daily(text: string) {
+	return parseDaily(text, "daily/today.md");
 }
 
-// ─── Tokenize and recall ────────────────────────────────────────────────────
+const EMPTY_DAY = daily("# Daily log — 2026-10-16\n");
 
-test("tokenize lowercases, drops punctuation and drops stopwords", () => {
-	assert.deepEqual(tokenize("Never push changes to GitHub!"), ["never", "push", "changes", "github"]);
-	assert.deepEqual(tokenize("the a it"), []);
-	assert.deepEqual(tokenize("x y z"), [], "single characters are noise");
-});
-
-test("recall returns every entry that matches, not only the best one", () => {
-	const hits = recall(BANK, "github confirmation grey navy");
-	assert.equal(hits[0]!.entry.key, "git.push");
-	assert.ok(hits.some((hit) => hit.entry.key === "ui.background"), "other matches stay candidates; retrieval chooses candidates, the resolver chooses truth");
-	assert.deepEqual(hits[0]!.matched.sort(), ["confirmation", "github"]);
-});
-
-test("matching the assertion key outranks matching the same word in prose", () => {
-	const store = storeOf({
-		"knowledge/git.md": `# git\n\n## git.push\n- kind: rule\n- scope: global\n- asOf: 2026-10-12\nNever push without explicit confirmation.\n`,
-		"knowledge/notes.md": `# notes\n\n## notes.history\n- kind: fact\n- scope: global\n- asOf: 2026-10-10\nYears ago we would push constantly, before there were any rules at all.\n`,
+function inject(claims: Claim[], opts: { query?: string; config?: Partial<MemoryConfig>; daily?: string; ageOf?: (claim: Claim) => number } = {}) {
+	return buildInjection({
+		claims,
+		daily: opts.daily === undefined ? EMPTY_DAY : daily(opts.daily),
+		query: opts.query ?? "",
+		ctx,
+		config: { ...DEFAULT_CONFIG, ...opts.config },
+		today: TODAY,
+		ageOf: opts.ageOf,
 	});
-	const hits = recall(store, "push");
-	assert.equal(hits.length, 2);
-	assert.equal(hits[0]!.entry.key, "git.push");
-	assert.ok(hits[0]!.score > hits[1]!.score);
-});
+}
 
-test("a term in the heading outweighs the same term buried in a body", () => {
-	const store = storeOf({
-		"knowledge/a.md": `# a\n\n## ui.background\n- kind: preference\n- scope: global\n- asOf: 2026-01-01\nDark grey.\n`,
-		"knowledge/b.md": `# b\n\n## colors.palette\n- kind: fact\n- scope: global\n- asOf: 2026-01-01\nThe background colour of the palette is dark grey.\n`,
-	});
-	const hits = recall(store, "background");
-	assert.equal(hits.length, 2);
-	assert.equal(hits[0]!.entry.key, "ui.background", "matching the assertion key wins over matching the prose");
-});
-
-test("query terms are a set: repeating a word changes nothing", () => {
-	const once = recall(BANK, "push github");
-	const twice = recall(BANK, "push github push github push");
-	assert.deepEqual(twice.map((hit) => [hit.entry.key, hit.score]), once.map((hit) => [hit.entry.key, hit.score]));
-});
-
-test("metadata words do not drag unrelated entries into recall", () => {
-	assert.deepEqual(recall(BANK, "global rule active fact"), [], "kind, scope and status are not scored");
-});
-
-test("empty and unmatchable queries recall nothing", () => {
-	assert.deepEqual(recall(BANK, ""), []);
-	assert.deepEqual(recall(BANK, "the of and"), []);
-	assert.deepEqual(recall(BANK, "xylophone quokka"), []);
-	assert.deepEqual(recall(buildStore([]), "push"), []);
-});
-
-test("recall limit is respected and stale claims stay candidates", () => {
-	const hits = recall(BANK, "background navy grey", 2);
-	assert.equal(hits.length, 2);
-	assert.ok(hits.some((hit) => hit.entry.heading === "ui.background@2026-06-14"), "a superseded claim must still be recalled, or the redirect cannot fire");
-});
-
-test("equal scores order by key, not by scan order", () => {
-	const zFile = parseTopicFile(`# z\n\n## zulu.alpha\n- kind: fact\n- scope: global\n- asOf: 2026-01-01\nShared body text.\n`, "knowledge/z.md");
-	const aFile = parseTopicFile(`# a\n\n## alpha.alpha\n- kind: fact\n- scope: global\n- asOf: 2026-01-01\nShared body text.\n`, "knowledge/a.md");
-	const forward = recall(buildStore([zFile, aFile]), "shared body");
-	const reversed = recall(buildStore([aFile, zFile]), "shared body");
-	assert.deepEqual(forward.map((hit) => hit.entry.key), reversed.map((hit) => hit.entry.key));
-	assert.deepEqual(forward.map((hit) => hit.entry.key), ["alpha.alpha", "zulu.alpha"]);
-});
-
-// ─── What reaches the prompt ────────────────────────────────────────────────
-
-test("a matching rule is injected with the fields that decided it", () => {
-	const result = inject(BANK, { query: "may I push to github" });
-	assert.match(result.text, /^## Memory — authoritative for this context/);
-	assert.match(result.text, /- \[rule · global · 2026-10-12\] git\.push: Never push changes to GitHub without explicit confirmation\./);
-	assert.equal(result.tokens > 0, true);
-});
-
-test("output is byte-identical for the same store, query and context", () => {
-	const a = inject(BANK, { query: "background push" });
-	const b = inject(BANK, { query: "background push" });
-	assert.equal(a.text, b.text);
-	assert.equal(a.tokens, b.tokens);
-});
-
-test("presentation follows kind then key, not retrieval score", () => {
-	const result = inject(BANK, { query: "push github confirmation scores authority read" });
-	const order = result.injected.map((hit) => hit.entry.kind);
-	assert.deepEqual(order, [...order].sort((x, y) => kindIndex(x) - kindIndex(y)), "rules before procedures before facts, whatever recall scored");
-});
-
-test("one key produces exactly one line, no matter how many claims were recalled", () => {
-	const result = inject(BANK, { query: "background navy dark grey" });
-	const backgroundLines = result.text.split("\n").filter((line) => line.includes("] ui.background:"));
-	assert.equal(backgroundLines.length, 1, "the active claim and its superseded twin cannot both reach the model");
-	assert.match(backgroundLines[0]!, /Use dark grey/);
-});
-
-test("asking about a retired claim answers with the claim that replaced it", () => {
-	const result = inject(BANK, { query: "navy" });
+test("inject: an approved claim is injected (R28 row 1)", () => {
+	const result = inject([claim("git.flow", { body: "Merge with --no-ff." })], { query: "git flow merge" });
 	assert.equal(result.injected.length, 1);
-	assert.match(result.text, /\[preference · global · 2026-10-02\] ui\.background: Use dark grey for the UI background\. \(replaces knowledge\/ui\.md#ui\.background@2026-06-14\)/);
-	assert.deepEqual(result.redirected.map((pair) => pair.from.heading), ["ui.background@2026-06-14"]);
-	assert.equal(result.text.includes("navy"), false, "the retired wording is not quoted back");
+	assert.match(result.text, /- \[rule · global · 2026-01-01\] git\.flow: Merge with --no-ff\./);
+	assert.deepEqual(result.contested, []);
 });
 
-test("a contested identity injects nothing and tells the model to ask", () => {
-	const store = storeOf({
-		"knowledge/ui.md": UI,
-		"knowledge/appearance.md": `# appearance\n\n## ui.background\n- kind: preference\n- scope: global\n- asOf: 2026-09-01\n- status: active\nNavy blue background.\n`,
+test("inject: a pending change against an approved claim never displaces it (R28 row 2)", () => {
+	const result = inject([
+		claim("git.flow", { body: "Merge with --no-ff." }),
+		claim("git.flow", { body: "Squash instead.", state: "pending", origin: "agent", proposedAt: "2026-10-15" }),
+	], { query: "merge squash" });
+	assert.deepEqual(result.injected.map((entry) => entry.key), ["git.flow"]);
+	assert.equal(result.text.includes("Squash instead."), false);
+	assert.match(result.text, /Merge with --no-ff\./);
+	assert.ok(result.excluded.some((item) => /a change is pending against an approved claim/.test(item.reason)));
+});
+
+test("inject: a new-identity agent proposal is injected, labelled, and ranked below approved claims (R28 row 3)", () => {
+	const result = inject([
+		claim("a.approved", { body: "approved says git flow" }),
+		claim("b.proposed", { body: "proposed says git flow", state: "pending", origin: "agent", proposedAt: "2026-10-15" }),
+	], { query: "git flow" });
+	assert.equal(result.text.includes("[unapproved] b.proposed"), true);
+	const approvedAt = result.text.indexOf("a.approved");
+	const proposedAt = result.text.indexOf("b.proposed");
+	assert.ok(approvedAt >= 0 && proposedAt >= 0);
+	assert.ok(approvedAt < proposedAt, "the approved claim comes first");
+	assert.deepEqual(result.injected.find((entry) => entry.key === "b.proposed")!.label, "[unapproved]");
+});
+
+test("inject: a proposal older than the flag window stops being injected (R28 row 4, D13)", () => {
+	const old = claim("b.proposed", { body: "waiting since June", state: "pending", origin: "agent", proposedAt: "2026-06-01" });
+	const flagged = inject([old], { query: "waiting june", ageOf: () => 137 });
+	assert.equal(flagged.text.includes("waiting since June"), false);
+	assert.ok(flagged.excluded.some((item) => /pending 137 days, past the 14-day window/.test(item.reason)));
+	const fresh = inject([old], { query: "waiting june", ageOf: () => 3 });
+	assert.match(fresh.text, /waiting since June/);
+});
+
+test("inject: a migrated claim is not injected until it is approved (R28 row 5, D9)", () => {
+	const result = inject([claim("m.one", { body: "migrated text", state: "pending", origin: "migration", proposedAt: "2026-10-14" })], { query: "migrated text" });
+	assert.equal(result.text.includes("migrated text"), false);
+	assert.ok(result.excluded.some((item) => /migrated claim is not injected until it is approved/.test(item.reason)));
+});
+
+test("inject: two approved claims on one identity assert nothing, and say so (R12, R28 row 6)", () => {
+	const result = inject([claim("z.contest", { body: "first says git" }), claim("z.contest", { body: "second says git" })], { query: "git" });
+	assert.equal(result.text.includes("first says git"), false);
+	assert.equal(result.text.includes("second says git"), false);
+	assert.deepEqual(result.contested, [{ key: "z.contest", scope: "global" }], "one identity, named once");
+});
+
+test("inject: out-of-scope claims and shadowed ones are never injected (R9, R10)", () => {
+	const result = inject([
+		claim("a.b", { body: "global answer about git" }),
+		claim("a.b", { body: "path answer about git", scope: "path:extensions/**" }),
+		claim("c.d", { body: "another project about git", scope: "project:someone/else" }),
+	], { query: "git" });
+	assert.match(result.text, /path answer about git/);
+	assert.equal(result.text.includes("global answer"), false);
+	assert.equal(result.text.includes("another project"), false);
+	assert.ok(result.excluded.some((item) => item.reason === "shadowed by a narrower scope for the same key"));
+	assert.ok(result.excluded.some((item) => item.reason === "out of scope for this session"));
+});
+
+test("inject: only always-tagged rules sit in the core section, other rules come by rank (R27.1, R35)", () => {
+	const result = inject([
+		claim("r.always", { body: "always-on rule about git", tags: ["always"] }),
+		claim("r.conditional", { body: "conditional rule about git" }),
+	], { query: "git" });
+	assert.match(result.text, /### Always-on rules\n- \[rule · global · 2026-01-01\] r\.always: always-on rule about git/);
+	assert.match(result.text, /### Related claims/);
+	assert.equal(result.sections[0]!.title, "Always-on rules");
+	assert.equal(result.sections[0]!.text.includes("r.conditional"), false);
+	// With no related query, the conditional rule does not appear at all.
+	const quiet = inject([claim("r.conditional", { body: "conditional rule about git" })], { query: "totually unrelated topic" });
+	assert.equal(quiet.text.includes("conditional rule"), false);
+});
+
+test("inject: nothing is injected when there is nothing to say", () => {
+	const result = inject([]);
+	assert.equal(result.text, "");
+	assert.deepEqual(result.sections, []);
+	assert.deepEqual(result.tokens, { core: 0, daily: 0, retrieved: 0, total: 0 });
+});
+
+test("inject: the daily section carries open items and nothing else (R27.2)", () => {
+	const result = inject([], {
+		daily: `# Daily log — ${TODAY}
+
+## completed
+- (${TODAY} 09:00) finished work, not injected
+
+## in_progress
+- (${TODAY} 10:00) wire the injector
+
+## carry
+- (2026-10-15 17:30) inbox gc
+
+## decision
+- (${TODAY} 11:00) a decision, not open work
+`,
 	});
-	const result = inject(store, { query: "background" });
-	assert.equal(result.injected.filter((hit) => hit.entry.key === "ui.background").length, 0);
-	assert.equal(result.conflicts.length, 1);
-	assert.match(result.text, /Contested — the store holds two live claims/);
-	assert.match(result.text, /Ask the human which one stands; do not pick one\./);
+	assert.match(result.text, /### Open work today\n- \(2026-10-15 17:30\) inbox gc\n- \(\d{4}-\d{2}-\d{2} 10:00\) wire the injector/);
+	assert.equal(result.text.includes("finished work"), false);
+	assert.equal(result.text.includes("a decision, not open work"), false);
 });
 
-test("a contested identity is still reported when recall only found one side", () => {
-	const store = storeOf({
-		"knowledge/ui.md": UI,
-		"knowledge/appearance.md": `# appearance\n\n## ui.background\n- kind: preference\n- scope: global\n- asOf: 2026-09-01\n- status: active\nCharcoal wash on the panel chrome.\n`,
-	});
-	const hits = recall(store, "panel chrome");
-	assert.deepEqual(hits.map((hit) => hit.entry.path), ["knowledge/appearance.md"], "only the rival is recalled");
-	const result = inject(store, { query: "panel chrome" });
-	assert.equal(result.conflicts.length, 1, "authority is a property of the store, not of what retrieval happened to find");
+test("inject: the total never passes the budget, and the caps hold (R26, R27)", () => {
+	const claims: Claim[] = [];
+	for (let i = 0; i < 60; i++) {
+		claims.push(claim(`topic${i}.rule`, { body: `git flow rule number ${i} with some padding words to make it cost tokens`, tags: i % 2 === 0 ? ["always"] : [] }));
+	}
+	const config = { budgetTokens: 600, coreTokens: 200, dailyTokens: 100 };
+	const result = inject(claims, { query: "git flow rule", config });
+	assert.ok(result.tokens.total <= 600, `total ${result.tokens.total} exceeded the budget`);
+	assert.ok(result.tokens.core <= 200, `core ${result.tokens.core} exceeded its cap`);
+	assert.ok(result.tokens.daily <= 100, `daily ${result.tokens.daily} exceeded its cap`);
+	assert.ok(result.tokens.core + result.tokens.daily + result.tokens.retrieved <= 600);
+	assert.ok(result.text.includes("use memory_search to find them"), "the drop notice is part of the block (R29)");
 });
 
-test("broken entries are considered, reported and never injected", () => {
-	const store = storeOf({ "knowledge/git.md": GIT, "knowledge/broken.md": BROKEN });
-	const result = inject(store, { query: "push confirmation github" });
-	assert.equal(result.injected.some((hit) => hit.entry.path === "knowledge/broken.md"), false);
-	const dropped = result.dropped.filter((drop) => drop.entry?.path === "knowledge/broken.md");
-	assert.deepEqual(dropped.map((drop) => drop.reason).sort(), ["unkeyed", "unknown-identity"], "a keyed entry with an unusable scope is a different problem from a heading that is not a key at all");
-	assert.match(result.text, /- \[rule · global · 2026-10-12\] git\.push:/);
+test("inject: unused core and daily budget flows to retrieval (R27)", () => {
+	const claims: Claim[] = [];
+	for (let i = 0; i < 12; i++) claims.push(claim(`always.rule${i}`, { body: `an always rule about git flow number ${i} with padding`, tags: ["always"] }));
+	for (let i = 0; i < 12; i++) claims.push(claim(`other.rule${i}`, { body: `another related rule about git flow ${i}` }));
+	const fullCore = inject(claims, { query: "git flow", config: { budgetTokens: 500, coreTokens: 400, dailyTokens: 0 } });
+	const smallCore = inject(claims, { query: "git flow", config: { budgetTokens: 500, coreTokens: 80, dailyTokens: 0 } });
+	assert.ok(fullCore.tokens.core > smallCore.tokens.core, "the core section really is bigger");
+	assert.ok(smallCore.tokens.retrieved > fullCore.tokens.retrieved, "what the core section did not spend is spent on retrieval");
+	assert.ok(fullCore.tokens.total <= 500 && smallCore.tokens.total <= 500);
 });
 
-test("a project-scoped claim is out of scope outside that project", () => {
-	const inProject = inject(BANK, { query: "terminal text colour", context: { project: "rl-pi-extensions" } });
-	assert.deepEqual(inProject.injected.map((hit) => hit.entry.key), ["ui.foreground"]);
-
-	const elsewhere = inject(BANK, { query: "terminal text colour" });
-	assert.equal(elsewhere.injected.length, 0);
-	assert.deepEqual(elsewhere.outOfScope.map((drop) => drop.entry.key), ["ui.foreground"]);
-});
-
-test("a more specific scope shadows the global default instead of arguing with it", () => {
-	const store = storeOf({
-		"knowledge/ui.md": `# ui\n\n## ui.background\n- kind: preference\n- scope: global\n- asOf: 2026-01-01\nDark grey.\n`,
-		"knowledge/finance.md": `# finance\n\n## ui.background\n- kind: preference\n- scope: project:money-manager\n- asOf: 2025-12-01\nNavy, for financial legibility.\n`,
-	});
-	const result = inject(store, { query: "background", context: { project: "money-manager" } });
-	assert.deepEqual(result.injected.map((hit) => hit.entry.body), ["Navy, for financial legibility."]);
-	assert.ok(result.dropped.some((drop) => drop.entry?.key === "ui.background" && drop.reason === "shadowed-by-scope"));
-});
-
-test("the token budget drops the tail and says so instead of going silent", () => {
-	const result = inject(BANK, { query: "github confirmation grey off-white typecheck", context: { project: "rl-pi-extensions" }, budget: { total: 60 } });
-	assert.ok(result.injected.length >= 2, "the budget trims the tail, it does not silence everything");
-	assert.ok(result.entryTokens <= 60, `entry content stayed inside the budget (${result.entryTokens})`);
-	assert.ok(result.tokens >= result.entryTokens, "tokens reports the whole text honestly, notes included");
-	assert.ok(result.dropped.some((drop) => drop.reason === "budget"), "something was trimmed by the budget");
-	assert.match(result.text, /Not injected this turn \(token budget\)/);
-	const uncapped = inject(BANK, { query: "github confirmation grey off-white typecheck", context: { project: "rl-pi-extensions" } });
-	assert.ok(uncapped.injected.length > result.injected.length, "and it would have been said without the cap");
-});
-
-test("a per-kind cap pushes out rules only, leaving other kinds in", () => {
-	const uncapped = inject(BANK, { query: "push commit test typecheck npm", context: { project: "rl-pi-extensions" } });
-	assert.ok(uncapped.injected.some((hit) => hit.entry.kind === "rule"));
-
-	const capped = inject(BANK, { query: "push commit test typecheck npm", context: { project: "rl-pi-extensions" }, budget: { perKind: { rule: 0 } } });
-	assert.equal(capped.injected.some((hit) => hit.entry.kind === "rule"), false);
-	assert.ok(capped.injected.some((hit) => hit.entry.kind === "procedure"), "the procedure still fits");
-});
-
-test("the renderer adds no score — only the fields that actually decided", () => {
-	const result = inject(BANK, { query: "push github" });
-	for (const line of result.text.split("\n").filter((line) => line.startsWith("- ["))) {
-		assert.match(line, /^- \[[a-z]+ · [^·]+ · \d{4}-\d{2}-\d{2}\] [a-z][a-z0-9._-]*: /, "kind · scope · asOf, and nothing numeric but the date");
+test("inject: an entry is never cut in half (R29)", () => {
+	const long = claim("a.long", { body: `git flow policy ${"padding ".repeat(120)}` });
+	const short = claim("b.short", { body: "git flow policy is short" });
+	const result = inject([long, short], { query: "git flow policy", config: { budgetTokens: 200, coreTokens: 0, dailyTokens: 0 } });
+	for (const entry of result.injected) {
+		const body = result.text.match(new RegExp(`\\] ${entry.key}: (.*)$`, "m"))?.[1];
+		assert.ok(body !== undefined, `${entry.key} appears in the block with its body on one line`);
+		const original = [long, short].find((c) => c.key === entry.key)!.body;
+		assert.equal(body, original, "the body shown is the whole body");
 	}
 });
 
-test("a body too long for one line is collapsed, not truncated mid-word", () => {
-	const store = storeOf({ "knowledge/long.md": `# long\n\n## note.long\n- kind: fact\n- scope: global\n- asOf: 2026-01-01\n${"word ".repeat(200)}\n` });
-	const result = inject(store, { query: "word" });
-	assert.match(result.text, /\.\.\.\n$/);
-	assert.ok(result.injected[0]!.entry.body.length > 300);
+test("inject: the drop notice counts by kind and names memory_search (R29)", () => {
+	assert.equal(dropNotice(3, 2, 1, 4), "Not shown for the budget: 3 claims (2 rules, 1 fact), 4 open daily items — use memory_search to find them.");
+	const claims: Claim[] = [];
+	for (let i = 0; i < 30; i++) claims.push(claim(`t${i}.rule`, { kind: i % 3 === 0 ? "fact" : "rule", body: `git flow thing ${i}` }));
+	const result = inject(claims, { query: "git flow", config: { budgetTokens: 300, coreTokens: 0, dailyTokens: 0 } });
+	assert.ok(result.dropped.rule + result.dropped.fact > 0);
+	assert.equal(result.dropped.rule + result.dropped.fact, 30 - result.injected.length);
+	assert.match(result.text, new RegExp(`Not shown for the budget: ${result.dropped.rule + result.dropped.fact} claims \\(${result.dropped.rule} rules, ${result.dropped.fact} facts\\)`));
 });
 
-test("nothing matches, nothing is said", () => {
-	const result = inject(BANK, { query: "xylophone" });
-	assert.equal(result.text, "");
-	assert.equal(result.considered, 0);
-	assert.equal(result.tokens, 0);
+test("inject: daily items are dropped whole and counted (R29)", () => {
+	const many = ["09:00", "09:10", "09:20", "09:30", "09:40"].map((time) => `- (${TODAY} ${time}) an open item with a handful of words in it`).join("\n");
+	const result = inject([], { daily: `# Daily log — ${TODAY}\n\n## in_progress\n${many}\n`, config: { budgetTokens: 400, coreTokens: 0, dailyTokens: 80 } });
+	assert.ok(result.dropped.dailyItems > 0);
+	assert.equal(result.sections.find((section) => section.title === "Open work today")!.dropped, result.dropped.dailyItems);
+	assert.match(result.text, /1 open daily item — use memory_search/);
 });
 
-test("estimateTokens is a stated estimate, monotonic and zero for empty", () => {
-	assert.equal(estimateTokens(""), 0);
-	assert.equal(estimateTokens("abcd"), 1);
-	assert.equal(estimateTokens("abcde"), 2);
+test("inject: invariant sweep — 200 generated banks never break the budget", () => {
+	const kinds: Claim["kind"][] = ["rule", "fact"];
+	const scopes = ["global", "project:github.com/rlazoti/rl-pi-extensions", "path:extensions/**", "path:somewhere/else/**"];
+	let seed = 20261016;
+	const next = (limit: number): number => {
+		seed = (seed * 1103515245 + 12345) % 2147483648;
+		return seed % limit;
+	};
+	for (let store = 0; store < 200; store++) {
+		const claims: Claim[] = [];
+		const count = next(25);
+		for (let i = 0; i < count; i++) {
+			const state = next(4) === 0 ? "pending" : "approved";
+			claims.push(
+				claim(`k${i}.topic`, {
+					kind: kinds[next(2)]!,
+					scope: scopes[next(scopes.length)]!,
+					state,
+					origin: next(3) === 0 ? "migration" : "agent",
+					proposedAt: state === "pending" ? "2026-09-01" : undefined,
+					tags: next(3) === 0 ? ["always"] : [],
+					body: `${"word ".repeat(next(40))}git flow topic ${i}`.trim() || `git flow topic ${i}`,
+				}),
+			);
+		}
+		const config: MemoryConfig = { ...DEFAULT_CONFIG, budgetTokens: 200 + next(1800), coreTokens: next(400), dailyTokens: next(300) };
+		const ageOf = () => next(60);
+		const result = inject(claims, { query: "git flow topic", config, ageOf, daily: `# Daily log — ${TODAY}\n\n## in_progress\n- (${TODAY} 10:00) open item number one\n- (${TODAY} 11:00) open item number two\n` });
+		assert.ok(result.tokens.total <= config.budgetTokens, `store ${store}: ${result.tokens.total} > ${config.budgetTokens}`);
+		assert.ok(result.tokens.core <= config.coreTokens, `store ${store}: core ${result.tokens.core} > ${config.coreTokens}`);
+		assert.ok(result.tokens.daily <= config.dailyTokens, `store ${store}: daily ${result.tokens.daily} > ${config.dailyTokens}`);
+		// No half entries: every injected key appears with a complete line.
+		for (const entry of result.injected) {
+			const line = result.text.split("\n").find((candidate) => candidate.includes(`] ${entry.key}: `) || candidate.includes(`] [unapproved] ${entry.key}: `));
+			assert.ok(line !== undefined, `store ${store}: ${entry.key} is in the block without a whole line`);
+			const body = line!.slice(line!.indexOf(`${entry.key}: `) + entry.key.length + 2);
+			const source = claims.find((candidate) => candidate.key === entry.key && candidate.scope === entry.scope)!;
+			assert.equal(body, source.body, `store ${store}: ${entry.key} was cut`);
+		}
+		// Nothing out of scope is ever in the block.
+		for (const line of result.text.split("\n")) {
+			const scope = /- \[(?:rule|fact) · (\S+) ·/.exec(line)?.[1];
+			if (scope === undefined) continue;
+			if (scope.startsWith("project:")) assert.equal(scope, `project:${ctx.projectId}`, `store ${store}: ${scope} injected in the wrong project`);
+			if (scope === "path:somewhere/else/**") assert.fail(`store ${store}: an out-of-scope path claim was injected`);
+		}
+	}
 });
 
-// ─── The two halves agree: what the gate accepted, the prompt shows ─────────
-
-function applied(store: MemoryStore, plan: EditPlan): MemoryStore {
-	const touched = new Set(plan.files.map((file) => file.path));
-	const files: TopicFile[] = plan.files.map((file) => parseTopicFile(file.content, file.path));
-	for (const [path, file] of store.byPath) if (!touched.has(path)) files.push(file);
-	return buildStore(files);
-}
-
-test("an accepted resolution changes what the prompt says — end to end", () => {
-	const store = storeOf({
-		"knowledge/ui.md": UI,
-		"knowledge/appearance.md": `# appearance\n\n## ui.background\n- kind: preference\n- scope: global\n- asOf: 2026-09-01\n- status: active\nNavy blue background.\n`,
-	});
-	const before = inject(store, { query: "background" });
-	assert.match(before.text, /Contested/);
-
-	const refused = decide(store, {
-		file: "knowledge/ui.md",
-		key: "ui.background",
-		scope: "global",
-		kind: "preference",
-		body: "Charcoal.",
-		asOf: "2026-11-01",
-		revision: "2026-11-01",
-	} satisfies WriteRequest);
-	if (refused.kind !== "conflict") assert.fail("expected a conflict");
-
-	const accepted = decide(store, {
-		file: "knowledge/ui.md",
-		key: "ui.background",
-		scope: "global",
-		kind: "preference",
-		body: "Charcoal.",
-		asOf: "2026-11-01",
-		revision: "2026-11-01",
-		resolve: "supersede",
-		conflictId: refused.conflictId,
-		note: "user picked charcoal",
-	});
-	if (accepted.kind !== "plan") assert.fail("expected a plan");
-
-	const after = inject(applied(store, accepted.plan), { query: "background" });
-	assert.equal(after.conflicts.length, 0);
-	const line = after.text.split("\n").find((entry) => entry.includes("] ui.background:"))!;
-	assert.match(line, /Charcoal\./);
-	assert.equal(after.text.includes("Navy blue background."), false);
+test("inject: preview shows the block and the tokens per section (R31)", () => {
+	const result = inject([claim("r.always", { body: "an always rule about git", tags: ["always"] }), claim("a.b", { body: "git-related fact", kind: "fact" })], { query: "git" });
+	const preview = formatPreview(result);
+	assert.match(preview, /^Injection — \d+ of 2000 tokens/);
+	assert.match(preview, /Always-on rules: \d+ tokens, 1 shown, 0 dropped/);
+	assert.match(preview, /core \d+ \+ daily \d+ \+ retrieved \d+ = \d+/);
+	assert.match(preview, /--- the block a turn would receive ---/);
+	assert.ok(preview.includes(result.text));
+	const empty = formatPreview(inject([]));
+	assert.match(empty, /nothing would be injected/);
+	assert.match(empty, /\(nothing to inject\)/);
 });
 
-function kindIndex(kind: string): number {
-	return ["rule", "procedure", "decision", "preference", "gotcha", "fact"].indexOf(kind);
-}
+test("inject: the header names the project and the estimator is Pi's", () => {
+	assert.equal(headerFor("github.com/rlazoti/rl-pi-extensions"), "## Memory — rules and facts for this context (project: github.com/rlazoti/rl-pi-extensions)");
+	// Pi's estimator is chars/4 rounded up, which is also what the baseline uses.
+	assert.equal(tokensOf("abcd"), 1);
+	assert.equal(tokensOf("abcde"), 2);
+	assert.equal(tokensOf(""), 0);
+	assert.equal(formatClaim(claim("a.b", { body: "x" })), "- [rule · global · 2026-01-01] a.b: x");
+});
 
-test("the memoised corpus cannot change an answer", () => {
-	const first = recall(BANK, "background grey");
-	const second = recall(BANK, "background grey");
-	const rebuilt = storeOf({ "knowledge/ui.md": UI, "knowledge/git.md": GIT, "knowledge/notes.md": NOTES });
-	const fresh = recall(rebuilt, "background grey");
-	assert.deepEqual(second.map((hit) => [hit.entry.key, hit.score]), first.map((hit) => [hit.entry.key, hit.score]));
-	assert.deepEqual(fresh.map((hit) => [hit.entry.key, hit.score]), first.map((hit) => [hit.entry.key, hit.score]));
+test("inject: selectEligible keeps one answer per key and reports the rest", () => {
+	const selected = selectEligible(
+		[claim("a.b", { body: "approved" }), claim("a.b", { body: "pending", state: "pending", proposedAt: "2026-10-15" }), claim("c.d", { body: "two pendings", state: "pending", proposedAt: "2026-10-15" }), claim("c.d", { body: "two pendings too", state: "pending", proposedAt: "2026-10-15" })],
+		ctx,
+		{ pendingFlagDays: 14, ageOf: () => 1 },
+	);
+	assert.deepEqual(selected.candidates.map((candidate) => candidate.claim.body), ["approved"]);
+	assert.ok(selected.excluded.some((item) => /two pending claims for one identity/.test(item.reason)));
 });

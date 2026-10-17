@@ -1,337 +1,300 @@
 /**
- * Candidate recall and prompt injection (Phase 4).
+ * Injection: what a turn is told, under a hard budget (R25-R31, R35).
  *
- * Retrieval picks candidates. It does **not** decide what is true: authority
- * belongs to `resolver.ts`, and this module only chooses which entries are worth
- * asking about, then asks the resolver about them. That split is the whole point
- * of the component — the old memory bank injected whatever ranked highest, which
- * made three indistinguishable files all reach the model at once.
+ * Three sections, in this order, with the caps from `config`:
  *
- * Pure again: no filesystem, no clock, no pi. Byte-identical output for a given
- * store + query + context, which is what makes the golden-text tests here mean
- * something.
+ *  1. always-on rules the human tagged `always`;
+ *  2. today's open daily items (`in_progress` and `carry`);
+ *  3. whatever else the ranker relates to the request.
  *
- * Why the scorer is in this file and not a package: the real bank measures 8
- * files / 24 KB / ~22 knowledge headings, so "indexing" here means scanning a few
- * hundred entries in about a third of a millisecond. A real inverted index would
- * buy latency we do not need and add a cache that can go stale — the same failure
- * class this component exists to remove. MiniSearch (used by the live extension)
- * and qmd (1–2 s hybrid search, already too slow for per-turn injection there)
- * are both larger commitments than a sub-millisecond scan with a documented
- * scoring function. `scripts/bench-recall.mjs` prints the measured curve rather
- * than asserting it: 50 / 200 / 1000 / 5000 entries.
+ * Budget is spent on the *rendered* text and measured with Pi's own estimator, so
+ * the number the trial reports is the number that was injected, and the trial and
+ * the 14-day baseline are counted with one ruler (R43, R47). The header and the
+ * drop notice are part of the cost: the ceiling is the ceiling (R26).
+ *
+ * Nothing is cut silently. Entries are dropped whole, and the block ends with a
+ * line naming how many, of which kind, and how to find them (R29).
  */
 
-import {
-	ENTRY_KINDS,
-	scopeKey,
-	type EntryKind,
-	type MemoryEntry,
-} from "./schema.js";
-import {
-	planInjection,
-	type AuthorityResolution,
-	type DroppedEntry,
-	type InjectionHit,
-	type MemoryStore,
-	type ScopeContext,
-	type ShadowedEntry,
-	type ShadowReason,
-} from "./resolver.js";
+import { estimateTokens } from "@earendil-works/pi-coding-agent";
 
-// ─── Recall: BM25 over entries ──────────────────────────────────────────────
+import { identityOf, isAlwaysRule, type Claim } from "./grammar.js";
+import { resolveIdentity, type ScopeContext } from "./scope.js";
+import { BM25_RANKER, type Ranker } from "./rank.js";
+import { OPEN_SECTIONS, formatItem, type DailyItem, type DailyLog } from "./daily.js";
+import type { MemoryConfig } from "./config.js";
 
-/** BM25 parameters, pinned rather than tuned per query. */
-const K1 = 1.2;
-const B = 0.75;
-/** A term in the heading/key counts this much more than a term in the body: the
- *  heading *is* the assertion, so matching it is stronger evidence of relevance
- *  than finding the word somewhere in the prose. */
-const HEADING_WEIGHT = 3;
-
-const STOPWORDS: ReadonlySet<string> = new Set([
-	"a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "do", "does",
-	"for", "from", "has", "have", "how", "i", "if", "in", "is", "it", "its",
-	"me", "my", "of", "on", "or", "so", "that", "the", "their", "them", "then",
-	"there", "these", "they", "this", "to", "too", "up", "us", "was", "we",
-	"were", "what", "when", "where", "which", "who", "why", "will", "with", "you",
-	"your",
-]);
-
-/** Lowercase, split on anything that is not a word character, stopword-free.
- *  Deliberately no stemming: a wrong stem is invisible in the output. */
-export function tokenize(text: string): string[] {
-	return text
-		.toLowerCase()
-		.split(/[^a-z0-9_]+/)
-		.filter((term) => term.length > 1 && !STOPWORDS.has(term));
-}
-
-interface DocStats {
-	tf: Map<string, number>;
-	length: number;
-}
-
-interface Corpus {
-	docs: DocStats[];
-	df: Map<string, number>;
-	averageLength: number;
-}
-
-/**
- * Corpus statistics are memoised against the store object itself: a new store is
- * a new key, so there is no invalidation rule to get wrong and no on-disk index
- * to go stale — the failure class this component exists to remove. Measured cost
- * without it: ~0.4 ms per turn at 50 entries, ~1.3 ms at 200, ~6.6 ms at 1000.
- */
-const corpusCache = new WeakMap<MemoryStore, Corpus>();
-
-function corpusOf(store: MemoryStore): Corpus {
-	const cached = corpusCache.get(store);
-	if (cached) return cached;
-	const docs = store.entries.map((entry) => docStats(entry));
-	const df = new Map<string, number>();
-	for (const doc of docs) {
-		for (const term of doc.tf.keys()) df.set(term, (df.get(term) ?? 0) + 1);
-	}
-	const averageLength = docs.reduce((sum, doc) => sum + doc.length, 0) / docs.length;
-	const corpus = { docs, df, averageLength };
-	corpusCache.set(store, corpus);
-	return corpus;
-}
-
-function docStats(entry: MemoryEntry): DocStats {
-	const tf = new Map<string, number>();
-	const add = (term: string, weight: number): void => {
-		tf.set(term, (tf.get(term) ?? 0) + weight);
-	};
-
-	for (const term of tokenize(`${entry.key} ${entry.heading}`)) add(term, HEADING_WEIGHT);
-	for (const term of tokenize(entry.body)) add(term, 1);
-
-	let length = 0;
-	for (const weight of tf.values()) length += weight;
-	return { tf, length };
+/** Pi's estimator, applied to text — the same ruler `/memory trial baseline` uses. */
+export function tokensOf(text: string): number {
+	return estimateTokens({ role: "user", content: text } as never);
 }
 
 export interface Candidate {
-	entry: MemoryEntry;
-	score: number;
-	/** Query terms this entry matched — the answer to "why was this injected?". */
-	matched: string[];
+	claim: Claim;
+	/** `[unapproved]` for a new-identity agent proposal the human has not seen (R28). */
+	label?: string;
+}
+
+export interface ExcludedClaim {
+	key: string;
+	scope: string;
+	reason: string;
+}
+
+export interface InjectionInput {
+	claims: Claim[];
+	daily: DailyLog;
+	query: string;
+	ctx: ScopeContext;
+	config: MemoryConfig;
+	today: string;
+	ranker?: Ranker<Claim>;
+	/** Age of a pending claim in days; the queue owns the dating rules. */
+	ageOf?: (claim: Claim) => number;
+}
+
+export interface InjectionSection {
+	title: string;
+	text: string;
+	tokens: number;
+	included: number;
+	dropped: number;
+}
+
+export interface InjectionResult {
+	text: string;
+	sections: InjectionSection[];
+	tokens: { core: number; daily: number; retrieved: number; total: number };
+	dropped: { rule: number; fact: number; dailyItems: number; total: number };
+	/** Why a claim was not injected or not eligible, for `/memory preview`. */
+	excluded: ExcludedClaim[];
+	/** Identities with rival approved claims: nothing was asserted for them (R12). */
+	contested: { key: string; scope: string }[];
+	injected: { key: string; scope: string; state: Claim["state"]; label?: string }[];
+	budget: number;
+}
+
+export function headerFor(project: string): string {
+	return `## Memory — rules and facts for this context (project: ${project})`;
+}
+
+export function formatClaim(claim: Claim, label?: string): string {
+	const tag = label ? ` ${label}` : "";
+	return `- [${claim.kind} · ${claim.scope} · ${claim.asOf}]${tag} ${claim.key}: ${claim.body}`;
+}
+
+/** The line that reports what did not fit (R29). Reserved in the budget up front. */
+export function dropNotice(droppedClaims: number, rules: number, facts: number, droppedItems: number): string {
+	const parts: string[] = [];
+	const plural = (count: number, word: string): string => `${count} ${word}${count === 1 ? "" : "s"}`;
+	if (droppedClaims > 0) parts.push(`${plural(droppedClaims, "claim")} (${plural(rules, "rule")}, ${plural(facts, "fact")})`);
+	if (droppedItems > 0) parts.push(`${plural(droppedItems, "open daily item")}`);
+	return `Not shown for the budget: ${parts.join(", ")} — use memory_search to find them.`;
 }
 
 /**
- * BM25 over the store's entries. Query terms are treated as a **set**: repeating
- * a word in a prompt must not make an entry look more relevant.
- *
- * Metadata words (`rule`, `global`, `active`, dates) are not scored, so a scope
- * or status string cannot drag an unrelated entry into the prompt.
+ * Decide which claims may speak (R28) and which one answers for a key (R10).
+ * Approved and pending claims are resolved separately: an approved claim and a
+ * proposal waiting against it are not rivals, they are the same identity at two
+ * stages (R11).
  */
-export function recall(store: MemoryStore, query: string, limit = 12): Candidate[] {
-	const queryTerms = [...new Set(tokenize(query))];
-	if (queryTerms.length === 0 || store.entries.length === 0 || limit <= 0) return [];
-
-	const { docs, df: documentFrequency, averageLength } = corpusOf(store);
-	const docCount = docs.length;
+export function selectEligible(claims: Claim[], ctx: ScopeContext, opts: { pendingFlagDays: number; ageOf: (claim: Claim) => number }): {
+	candidates: Candidate[];
+	excluded: ExcludedClaim[];
+	contested: { key: string; scope: string }[];
+} {
+	const byKey = new Map<string, Claim[]>();
+	for (const claim of claims) {
+		const list = byKey.get(claim.key) ?? [];
+		list.push(claim);
+		byKey.set(claim.key, list);
+	}
 
 	const candidates: Candidate[] = [];
-	for (let index = 0; index < store.entries.length; index++) {
-		const doc = docs[index]!;
-		let score = 0;
-		const matched: string[] = [];
-		for (const term of queryTerms) {
-			const tf = doc.tf.get(term);
-			if (!tf) continue;
-			const df = documentFrequency.get(term) ?? 1;
-			const idf = Math.log(1 + (docCount - df + 0.5) / (df + 0.5));
-			score += idf * ((K1 + 1) * tf) / (tf + K1 * (1 - B + B * (doc.length / averageLength)));
-			matched.push(term);
+	const excluded: ExcludedClaim[] = [];
+	const contested: { key: string; scope: string }[] = [];
+
+	for (const [key, all] of [...byKey.entries()].sort()) {
+		const approved = all.filter((claim) => claim.state === "approved");
+		const pending = all.filter((claim) => claim.state === "pending");
+
+		const approvedResolved = resolveIdentity(key, approved, ctx);
+		const pendingResolved = resolveIdentity(key, pending, ctx);
+		for (const claim of approvedResolved.outOfScope) excluded.push({ key: claim.key, scope: claim.scope, reason: "out of scope for this session" });
+		for (const claim of pendingResolved.outOfScope) excluded.push({ key: claim.key, scope: claim.scope, reason: "out of scope for this session" });
+		for (const claim of approvedResolved.shadowed) excluded.push({ key: claim.key, scope: claim.scope, reason: "shadowed by a narrower scope for the same key" });
+		for (const claim of pendingResolved.shadowed) excluded.push({ key: claim.key, scope: claim.scope, reason: "shadowed by a narrower scope for the same key" });
+
+		if (approvedResolved.contested.length > 0) {
+			// R12: two approved claims for one identity. Nothing is asserted.
+			const seen = new Set<string>();
+			for (const claim of approvedResolved.contested) {
+				if (seen.has(identityOf(claim))) continue;
+				seen.add(identityOf(claim));
+				contested.push({ key: claim.key, scope: claim.scope });
+			}
+			for (const claim of pending) excluded.push({ key: claim.key, scope: claim.scope, reason: "the identity it proposes is contested" });
+			continue;
 		}
-		if (score > 0) candidates.push({ entry: store.entries[index]!, score, matched });
+		if (approvedResolved.winner) {
+			candidates.push({ claim: approvedResolved.winner });
+			for (const claim of pending) {
+				excluded.push({ key: claim.key, scope: claim.scope, reason: "a change is pending against an approved claim; only the approved claim is asserted" });
+			}
+			continue;
+		}
+		if (pendingResolved.contested.length > 0) {
+			for (const claim of pendingResolved.contested) excluded.push({ key: claim.key, scope: claim.scope, reason: "two pending claims for one identity: the store holds one proposal per identity (R11)" });
+			continue;
+		}
+		const proposal = pendingResolved.winner;
+		if (!proposal) continue;
+		if (proposal.origin === "migration") {
+			excluded.push({ key: proposal.key, scope: proposal.scope, reason: "a migrated claim is not injected until it is approved" });
+			continue;
+		}
+		const age = opts.ageOf(proposal);
+		if (age > opts.pendingFlagDays) {
+			excluded.push({ key: proposal.key, scope: proposal.scope, reason: `pending ${age} days, past the ${opts.pendingFlagDays}-day window` });
+			continue;
+		}
+		candidates.push({ claim: proposal, label: "[unapproved]" });
 	}
 
-	// Deterministic: score, then key, then heading, then path. A scorer tweak can
-	// shuffle relevance order, but never produce a different store of the same
-	// scores.
-	candidates.sort(
-		(a, b) =>
-			b.score - a.score ||
-			a.entry.key.localeCompare(b.entry.key) ||
-			a.entry.heading.localeCompare(b.entry.heading) ||
-			a.entry.path.localeCompare(b.entry.path),
-	);
-	return candidates.slice(0, limit);
+	return { candidates, excluded, contested };
 }
 
-// ─── Token budget ───────────────────────────────────────────────────────────
-
-/** Characters / 4, rounded up. An estimate, stated as one, never a tokenizer. */
-export function estimateTokens(text: string): number {
-	return Math.ceil(text.length / 4);
-}
-
-export interface Budget {
-	total: number;
-	perKind: Partial<Record<EntryKind, number>>;
+interface Filled {
+	section: InjectionSection;
+	leftOver: Candidate[];
+	chosen: Candidate[];
 }
 
 /**
- * Kind order decides presentation, retrieval order decides consideration. Rules
- * first because they are the entries that change what the agent does; facts last
- * because they are the entries the model is most likely to survive without.
+ * Fill a section without ever splitting an entry: add a candidate, measure the
+ * rendered section, and send the candidate on to the next section if the cap is
+ * reached.
  */
-export const PRESENTATION_ORDER: readonly EntryKind[] = ["rule", "procedure", "decision", "preference", "gotcha", "fact"] as const;
-
-export const DEFAULT_BUDGET: Budget = {
-	total: 900,
-	perKind: { rule: 260, procedure: 160, decision: 160, preference: 160, gotcha: 140, fact: 120 },
-};
-
-// ─── Injection ──────────────────────────────────────────────────────────────
-
-/** Why a considered entry did not make it into the prompt. */
-export type DropReason = "budget" | DroppedEntry["reason"] | ShadowReason;
-
-export interface InjectionOptions {
-	query: string;
-	context?: ScopeContext;
-	budget?: Partial<Budget>;
-	/** How many candidates recall may consider. */
-	limit?: number;
-}
-
-export interface Injection {
-	/** The prompt text. Empty string when there is nothing worth saying. */
-	text: string;
-	injected: Array<{ entry: MemoryEntry; matched: string[] }>;
-	redirected: Array<{ from: MemoryEntry; to: MemoryEntry }>;
-	/** Identities with no answer because the store holds two live claims. */
-	conflicts: AuthorityResolution[];
-	/** Everything considered and not injected, with the real reason. */
-	dropped: Array<{ entry: MemoryEntry | null; reason: DropReason }>;
-	/** Real authorities that exist but do not apply in this context. */
-	outOfScope: ShadowedEntry[];
-	considered: number;
-	/** Tokens spent on entry content — the part the budget governs. */
-	entryTokens: number;
-	/** Tokens of the whole rendered text, notes and header included. */
-	tokens: number;
-}
-
-export function inject(store: MemoryStore, options: InjectionOptions): Injection {
-	const budget: Budget = { total: options.budget?.total ?? DEFAULT_BUDGET.total, perKind: { ...DEFAULT_BUDGET.perKind, ...options.budget?.perKind } };
-	const candidates = recall(store, options.query, options.limit ?? 12);
-	const plan = planInjection(store, candidates.map((candidate) => candidate.entry), options.context ?? {});
-	const matched = new Map<string, string[]>();
-	for (const candidate of candidates) matched.set(`${candidate.entry.path}#${candidate.entry.heading}`, candidate.matched);
-
-	// Presentation order: kind, then key. Retrieval order decides what is
-	// considered; it never decides the order the model reads them in.
-	const ordered = [...plan.inject].sort((a, b) => kindRank(a.entry.kind) - kindRank(b.entry.kind) || a.entry.key.localeCompare(b.entry.key));
-
-	const injected: Injection["injected"] = [];
+function fillSection(opts: { title: string; candidates: Candidate[]; cap: number; label?: boolean }): Filled {
+	const title = `### ${opts.title}`;
 	const lines: string[] = [];
-	const dropped: Injection["dropped"] = [];
-	const usedPerKind = new Map<EntryKind, number>();
-	let used = 0;
-
-	const overBudget: InjectionHit[] = [];
-	for (const hit of ordered) {
-		// Cost the line exactly as it will be rendered, budget note included.
-		const line = renderLine(hit);
-		const cost = estimateTokens(line);
-		const kindCap = budget.perKind[hit.entry.kind];
-		const kindUsed = usedPerKind.get(hit.entry.kind) ?? 0;
-		// Skip what does not fit, keep looking: one long rule must not silently
-		// delete every shorter entry behind it.
-		if (used + cost > budget.total || (kindCap !== undefined && kindUsed + cost > kindCap)) {
-			dropped.push({ entry: hit.entry, reason: "budget" });
-			overBudget.push(hit);
+	const chosen: Candidate[] = [];
+	const leftOver: Candidate[] = [];
+	for (const candidate of opts.candidates) {
+		const line = formatClaim(candidate.claim, opts.label ? candidate.label : undefined);
+		const withLine = tokensOf(`${title}\n${[...lines, line].join("\n")}`);
+		if (withLine > opts.cap) {
+			leftOver.push(candidate);
 			continue;
 		}
-		used += cost;
-		usedPerKind.set(hit.entry.kind, kindUsed + cost);
-		injected.push({ entry: hit.entry, matched: matched.get(`${hit.entry.path}#${hit.entry.heading}`) ?? [] });
 		lines.push(line);
-		// A redirected-from claim is already reported by the resolver as a
-		// suppression; reporting it twice would make the count of "what was
-		// considered" disagree with itself.
+		chosen.push(candidate);
 	}
-
-	for (const entry of plan.suppressed) dropped.push({ entry: entry.entry, reason: entry.reason });
-	for (const entry of plan.shadowed) dropped.push({ entry: entry.entry, reason: entry.reason });
-
-	const text = renderText(lines, plan.conflicts, overBudget, plan.shadowed, options.context);
+	const text = lines.length === 0 ? "" : `${title}\n${lines.join("\n")}`;
 	return {
-		text,
-		injected,
-		redirected: plan.inject.filter((hit) => hit.redirectedFrom).map((hit) => ({ from: hit.redirectedFrom!, to: hit.entry })),
-		conflicts: plan.conflicts,
-		dropped,
-		outOfScope: plan.shadowed.filter((entry) => entry.reason === "out-of-scope"),
-		considered: candidates.length,
-		entryTokens: used,
-		tokens: estimateTokens(text),
+		section: { title: opts.title, text, tokens: text === "" ? 0 : tokensOf(text), included: chosen.length, dropped: leftOver.length },
+		leftOver,
+		chosen,
 	};
 }
 
-function kindRank(kind: EntryKind): number {
-	const index = PRESENTATION_ORDER.indexOf(kind);
-	return index === -1 ? ENTRY_KINDS.length + ENTRY_KINDS.indexOf(kind) : index;
-}
+export function buildInjection(input: InjectionInput): InjectionResult {
+	const ranker = input.ranker ?? BM25_RANKER;
+	const ageOf = input.ageOf ?? (() => 0);
+	const selected = selectEligible(input.claims, input.ctx, { pendingFlagDays: input.config.pendingFlagDays, ageOf });
 
-// ─── Rendering ──────────────────────────────────────────────────────────────
+	// 1. always-on rules (R27.1, R35). Ranking only decides which of them fit when
+	// there are too many: an `always` rule is meant to be there every turn, so the
+	// least related ones are the ones that fall out.
+	const always = selected.candidates.filter((candidate) => candidate.claim.state === "approved" && isAlwaysRule(candidate.claim));
+	const rankedAlways = ranker
+		.rank(input.query, always.map((candidate) => candidate.claim))
+		.map((hit) => always.find((candidate) => identityOf(candidate.claim) === identityOf(hit.entry))!);
+	const unrankedAlways = always.filter((candidate) => !rankedAlways.includes(candidate));
+	const coreFill = fillSection({ title: "Always-on rules", candidates: [...rankedAlways, ...unrankedAlways], cap: input.config.coreTokens });
 
-/**
- * One line per authority: `kind · scope · asOf` — the fields that actually
- * decided — and never a score. The old `(score: 2176)` labels read as authority
- * and measured nothing of the kind.
- */
-export function renderLine(hit: InjectionHit): string {
-	const entry = hit.entry;
-	const parts = [
-		`- [${entry.kind} · ${scopeKey(entry.scope)}`,
-		entry.asOf ? ` · ${entry.asOf}]` : "]",
-		` ${entry.key}: ${collapse(entry.body)}`,
+	// 2. open daily items (R27.2). Newest first when space is short, rendered
+	// oldest first so the day still reads in order.
+	const open = input.daily.items.filter((item: DailyItem) => OPEN_SECTIONS.includes(item.section));
+	const dailyLines: string[] = [];
+	let kept = 0;
+	for (const item of [...open].sort((a, b) => (a.stamp === b.stamp ? 0 : a.stamp < b.stamp ? 1 : -1))) {
+		const trial = [...dailyLines, formatItem(item)];
+		if (tokensOf(`### Open work today\n${trial.join("\n")}`) > input.config.dailyTokens) continue;
+		dailyLines.push(formatItem(item));
+		kept++;
+	}
+	const dailyText = dailyLines.length === 0 ? "" : `### Open work today\n${dailyLines.reverse().join("\n")}`;
+	const dailySection: InjectionSection = {
+		title: "Open work today",
+		text: dailyText,
+		tokens: dailyText === "" ? 0 : tokensOf(dailyText),
+		included: kept,
+		dropped: open.length - kept,
+	};
+
+	// 3. retrieved claims (R27.3), with the caps of 1 and 2 flowing through.
+	const coreChosen = new Set(coreFill.chosen.map((candidate) => identityOf(candidate.claim)));
+	const pool = selected.candidates.filter((candidate) => !coreChosen.has(identityOf(candidate.claim)));
+	const header = headerFor(input.ctx.projectId);
+	const reserve = tokensOf(header) + tokensOf(dropNotice(pool.length, 0, 0, open.length));
+	const retrievedCap = Math.max(0, input.config.budgetTokens - coreFill.section.tokens - dailySection.tokens - reserve);
+	// An unapproved proposal ranks below every approved claim (R28).
+	const approvedPool = pool.filter((candidate) => candidate.claim.state === "approved");
+	const pendingPool = pool.filter((candidate) => candidate.claim.state !== "approved");
+	const ranked = [
+		...ranker.rank(input.query, approvedPool.map((candidate) => candidate.claim)).map((hit) => approvedPool.find((candidate) => identityOf(candidate.claim) === identityOf(hit.entry))!),
+		...ranker.rank(input.query, pendingPool.map((candidate) => candidate.claim)).map((hit) => pendingPool.find((candidate) => identityOf(candidate.claim) === identityOf(hit.entry))!),
 	];
-	if (hit.redirectedFrom) parts.push(` (replaces ${hit.redirectedFrom.path}#${hit.redirectedFrom.heading})`);
-	return parts.join("");
+	const retrievedFill = fillSection({ title: "Related claims", candidates: ranked, cap: retrievedCap, label: true });
+
+	// What did not fit, whole (R29).
+	const droppedCandidates = [...coreFill.leftOver, ...retrievedFill.leftOver];
+	const droppedByKind = { rule: 0, fact: 0 };
+	for (const candidate of droppedCandidates) droppedByKind[candidate.claim.kind] += 1;
+	const notice: string[] = [];
+	if (droppedCandidates.length > 0 || dailySection.dropped > 0) {
+		notice.push(dropNotice(droppedCandidates.length, droppedByKind.rule, droppedByKind.fact, dailySection.dropped));
+	}
+
+	const blocks = [coreFill.section, dailySection, retrievedFill.section].filter((section) => section.text !== "");
+	const text = blocks.length === 0 ? "" : [header, ...blocks.map((section) => section.text), ...notice].join("\n\n");
+
+	return {
+		text,
+		sections: blocks,
+		tokens: {
+			core: coreFill.section.tokens,
+			daily: dailySection.tokens,
+			retrieved: retrievedFill.section.tokens,
+			total: text === "" ? 0 : tokensOf(text),
+		},
+		dropped: { rule: droppedByKind.rule, fact: droppedByKind.fact, dailyItems: dailySection.dropped, total: droppedCandidates.length + dailySection.dropped },
+		excluded: selected.excluded,
+		contested: selected.contested,
+		injected: [
+			...coreFill.chosen.map((candidate) => ({ key: candidate.claim.key, scope: candidate.claim.scope, state: candidate.claim.state, label: candidate.label })),
+			...retrievedFill.chosen.map((candidate) => ({ key: candidate.claim.key, scope: candidate.claim.scope, state: candidate.claim.state, label: candidate.label })),
+		],
+		budget: input.config.budgetTokens,
+	};
 }
 
-function renderText(
-	injectedLines: readonly string[],
-	conflicts: AuthorityResolution[],
-	overBudget: readonly InjectionHit[],
-	shadowed: ShadowedEntry[],
-	context: ScopeContext = {},
-): string {
-	if (injectedLines.length === 0 && conflicts.length === 0) return "";
-
-	const lines = [`## Memory — authoritative for this context${context.project ? ` (project: ${context.project})` : ""}`];
-	lines.push(...injectedLines);
-
-	if (conflicts.length > 0) {
-		lines.push("");
-		lines.push("Contested — the store holds two live claims, so nothing was injected for these:");
-		for (const conflict of conflicts) {
-			const where = conflict.dropped.map((drop) => `${drop.entry.path}#${drop.entry.heading}`).join(", ");
-			lines.push(`- ${conflict.key} in scope ${scopeKey(conflict.scope)} (${where}). Ask the human which one stands; do not pick one.`);
-		}
+/** The exact block a turn would receive, with tokens per section (R31). */
+export function formatPreview(result: InjectionResult): string {
+	const lines = [`Injection — ${result.tokens.total} of ${result.budget} tokens`];
+	if (result.sections.length === 0) lines.push("  nothing would be injected");
+	for (const section of result.sections) {
+		lines.push(`  ${section.title}: ${section.tokens} tokens, ${section.included} shown, ${section.dropped} dropped`);
 	}
-
-	if (overBudget.length > 0) {
-		lines.push("");
-		lines.push(`Not injected this turn (token budget): ${overBudget.map((drop) => drop.entry?.key ?? "(unknown)").join(", ")}.`);
+	lines.push(`  core ${result.tokens.core} + daily ${result.tokens.daily} + retrieved ${result.tokens.retrieved} = ${result.tokens.total}`);
+	if (result.dropped.total > 0) lines.push(`  dropped: ${result.dropped.rule} rules, ${result.dropped.fact} facts, ${result.dropped.dailyItems} daily items`);
+	if (result.contested.length > 0) lines.push(`  contested: ${result.contested.map((entry) => `${entry.key} @ ${entry.scope}`).join(", ")}`);
+	if (result.excluded.length > 0) {
+		lines.push("  not injected:");
+		for (const item of result.excluded.slice(0, 20)) lines.push(`    ${item.key} @ ${item.scope}: ${item.reason}`);
+		if (result.excluded.length > 20) lines.push(`    …and ${result.excluded.length - 20} more`);
 	}
-	if (shadowed.length > 0) {
-		lines.push(`Shadowed by a more specific scope: ${shadowed.map((drop) => `${drop.entry.key} (${drop.reason})`).join(", ")}.`);
-	}
-
-	return `${lines.join("\n")}\n`;
-}
-
-function collapse(body: string): string {
-	const oneLine = body.replace(/\s+/g, " ").trim();
-	return oneLine.length > 300 ? `${oneLine.slice(0, 297)}...` : oneLine;
+	lines.push("", "--- the block a turn would receive ---", result.text === "" ? "(nothing to inject)" : result.text);
+	return lines.join("\n");
 }

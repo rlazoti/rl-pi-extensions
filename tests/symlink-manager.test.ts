@@ -18,6 +18,7 @@ import {
 	getAvailableExtensions,
 	getEnabledExtensions,
 	getExtensionStatus,
+	getForeignLink,
 	getExtensionsDir,
 	getMonorepoRoot,
 	isExtensionEnabled,
@@ -90,6 +91,39 @@ test("getExtensionsDir stays absolute when HOME is empty or unset", () => {
 	}
 });
 
+test("getForeignLink reports a live link this manager did not create, and nothing else (R42)", () => {
+	withExtensionsDir(({ extensionsDir, srcDir }) => {
+		const ownRoot = join(srcDir, "checkout");
+		mkdirSync(join(ownRoot, "extensions", "memory"), { recursive: true });
+
+		// No link at all.
+		assert.equal(getForeignLink("memory", ownRoot), undefined);
+
+		// Our own link, pointing inside this checkout.
+		symlinkSync(join(ownRoot, "extensions", "memory"), join(extensionsDir, "memory"), "dir");
+		assert.equal(getForeignLink("memory", ownRoot), undefined);
+
+		// A stale link of ours (target gone): nothing to protect, the manager repairs it.
+		rmSync(join(extensionsDir, "memory"), { force: true });
+		const gone = join(ownRoot, "extensions", "memory");
+		symlinkSync(gone, join(extensionsDir, "memory"), "dir");
+		rmSync(gone, { recursive: true, force: true });
+		assert.equal(getExtensionStatus("memory"), "broken");
+		assert.equal(getForeignLink("memory", ownRoot), undefined);
+
+		// Someone else's live link: the name is theirs.
+		const foreign = makeExt(srcDir, "other-component");
+		rmSync(join(extensionsDir, "memory"), { force: true });
+		symlinkSync(foreign, join(extensionsDir, "memory"), "dir");
+		assert.equal(resolve(getForeignLink("memory", ownRoot) ?? ""), resolve(foreign));
+
+		// A non-symlink entry is not a link at all.
+		rmSync(join(extensionsDir, "memory"), { force: true });
+		mkdirSync(join(extensionsDir, "memory"));
+		assert.equal(getForeignLink("memory", ownRoot), undefined);
+	});
+});
+
 function withExtensionsDir(fn: (ctx: { extensionsDir: string; srcDir: string }) => void): void {
 	const root = join(tmpdir(), `rl-pi-symlink-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 	mkdirSync(root, { recursive: true });
@@ -128,8 +162,11 @@ test("getAvailableExtensions returns the 6 managed extensions under the given ro
 	assert.equal(exts[3].description, "Insert predefined text snippets into the prompt");
 	assert.equal(exts[4].description, "Source-region and Magit diff-line feedback from Emacs");
 	// The description is what the picker shows before someone enables a live
-	// component: it says what the thing does, not where its migration is up to.
-	assert.match(exts[5].description, /one authority per claim/);
+	// component: it says what the thing does — the three kinds it owns, and that
+	// approval is a human's — never where its migration or release is up to.
+	assert.match(exts[5].description, /rules and facts/);
+	assert.match(exts[5].description, /daily log/);
+	assert.doesNotMatch(exts[5].description, /in development|not ready|migration|standalone/i);
 	for (const ext of exts) {
 		assert.equal(resolve(ext.path), resolve("/fake/path", "extensions", ext.name));
 	}

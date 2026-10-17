@@ -131,7 +131,7 @@ export function getAvailableExtensions(monorepoRoot: string): ExtensionDescripto
 		{
 			name: "memory",
 			label: "memory",
-			description: "Entry-keyed memory bank: one authority per claim, rival claims refused, working state injected",
+			description: "Budgeted memory: approved rules and facts, the daily log, and claims you approve",
 			path: join(monorepoRoot, "extensions", "memory"),
 		},
 	];
@@ -187,6 +187,25 @@ export function getEnabledExtensions(): string[] {
 	} catch {
 		return [];
 	}
+}
+
+/**
+ * A live symlink at `<extensionsDir>/<name>` whose target exists but lives
+ * outside `ownRoot` — a link this manager did not create.
+ *
+ * `enableExtension()` deliberately repairs stale links from another checkout, so
+ * that safety belongs to the caller that must not take over someone else's name:
+ * memory's cutover (spec R42) requires the picker to report a taken name, name the
+ * manual step, and stop. Broken links are not foreign: there is nothing to protect.
+ * Returns the resolved target, or undefined when the name is free or ours.
+ */
+export function getForeignLink(name: string, ownRoot: string): string | undefined {
+	const linkPath = join(getExtensionsDir(), name);
+	const stat = lstatOrNull(linkPath);
+	if (!stat || !stat.isSymbolicLink()) return undefined;
+	const target = resolve(dirname(linkPath), readlinkSync(linkPath));
+	if (!existsSync(target)) return undefined;
+	return target === ownRoot || target.startsWith(`${ownRoot}${process.platform === "win32" ? "\\" : "/"}`) ? undefined : target;
 }
 
 /**

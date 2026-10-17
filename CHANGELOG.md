@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **memory: rewritten to `extensions/memory/design/spec.md` (R1–R47, D1–D15).** The component is now three kinds of memory and nothing else — approved **rules**, **facts**, and the **daily log**. Reads keep their names (`memory_read`, `memory_search`, `memory_list`); writes are only `memory_log` (one daily item, date and time stamped by the extension, never by the agent) and `memory_propose` (a **pending** claim — the agent can no longer write an approved one), plus `memory_archive` for prose that is neither. `memory_write`, `memory_update`, `memory_show`, `memory_doctor`, `memory_pending` and `memory_resolve` are not registered: the rename table and the manual cutover checklist are in `extensions/memory/README.md`.
+- **Injection became budgeted and eligible-by-rule.** `before_agent_start` injects for user-started runs only, into one 2000-token block: `always`-tagged approved rules (600), the daily log's open items (500), BM25-retrieved claims with the remainder, unused budget flowing down. A pending change to an existing identity never injects; a pending claim for a new identity injects as `[unapproved]` below the approved ones and stops at 14 days; `origin: migration` never injects until approved; two approved claims for one identity is *contested* and injects nothing. Nothing is cut mid-entry, and drops are counted and named. `session_start` opens with one review notice (agent proposals, migration backlog, contested identities, stale pendings) and says nothing when the queue is empty.
+- **Rules are context, not enforcement.** No `tool_call` handler is registered and nothing is blocked; a test pins that the hook set is exactly `session_start` + `before_agent_start`.
+- **picker: it no longer touches a link it did not create.** Enabling or disabling a name held by a live symlink pointing outside this checkout is refused with the manual step named, and the link is left alone (`getForeignLink()` in `symlink-manager.ts`, the guard in the picker's apply loop). The manager's own repair of stale/broken links is unchanged.
+
+### Added
+
+- **Write-time gate**: bodies that read as project status (commit SHAs, PR/issue/run numbers, CI URLs, a date next to *merged/pushed/deployed/published/ran/passed/failed*) are refused and redirected to `memory_log`; `source` and `links` stay exempt; `overrideStatusCheck` needs a reason, is stored on the claim, and is counted in the trial. Supersession prose in a body is refused for the same reason — the store moves the old claim itself, into `history/<key>.md`, byte for byte.
+- **`/memory` subcommands**: `status · preview · review [--wave …] · approve · reject · defer · edit · doctor · config · paths · flag <key> stale|rival · flags · trial [baseline] · migrate backup|plan|status|draft|drafted|cutover`. `inlineConflictDialog` (default off) asks inside the tool call, one dialog at a time.
+- **A measured success bar instead of a guess**: `metrics/turns.jsonl` (one line per injected turn, no prompt text), `metrics/flags.jsonl`, and `/memory trial baseline`, which measures the previous extension's injected block from real Pi session files with the same estimator and writes nothing when the marker is not found. Go: median ≤ 25% of baseline with zero stale/rival flags.
+- **Migration under a backup gate**: `/memory migrate backup` writes a tarball and verifies it by listing it back; every other step refuses without it. Waves come from the files that really exist (rules first, then facts a domain at a time), state is resumable, retired entries are archived rather than proposed, and cutover archives sources instead of deleting them. Rehearsed read-only against the live bank: 25 source files, **71 claim entries** to draft (against the 1,734 proposals the automatic migration produced), 4 retired, 2 working-state files becoming daily items. `extensions/memory/cutover-callers.md` is the read-only caller inventory, including the baseline measured from 159 session blocks (median 880 tokens for `# Memory Bank Context`, 512 for the block the current component injects).
+- **`tests/jiti-load.test.ts`**: every component is loaded the way Pi loads it (jiti → CommonJS) and must export a factory that registers something; the previous suite only ever loaded them through node's type stripping, which is not Pi's path.
+
+642 tests repo-wide (165 in this component, one file per module), `npm run typecheck` clean.
+
 ## [1.5.0] - 2026-10-16
 
 ### Added

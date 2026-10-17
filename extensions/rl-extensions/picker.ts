@@ -6,6 +6,7 @@ import { fit, fillRows, frameLines, panelLine } from "../panel.js";
 
 import {
 	getAvailableExtensions,
+	getForeignLink,
 	getMonorepoRoot,
 	enableExtension,
 	disableExtension,
@@ -30,6 +31,10 @@ const PICKER_HEIGHT_PERCENT = 60;
 const EXTENSIONS: ExtensionDescriptor[] = getAvailableExtensions(getMonorepoRoot());
 
 const SEARCH_PLACEHOLDER = "name or description";
+
+function linkName(name: string): string {
+	return `~/.pi/agent/extensions/${name}`;
+}
 
 export class ExtensionPicker implements Component, Focusable {
 	private readonly tui: TUI;
@@ -171,6 +176,15 @@ export class ExtensionPicker implements Component, Focusable {
 			}).length;
 			for (const [name, enabled] of this.pendingChanges) {
 				try {
+					// Never touch a link this picker did not create — taking over the
+					// name, or removing it, both belong to the person who made it. The
+					// memory cutover (spec R40.2, R42) expects a report naming the
+					// manual step, not a silent takeover of `memory`.
+					const takenBy = getForeignLink(name, getMonorepoRoot());
+					if (takenBy !== undefined) {
+						errors.push(`${name}: ${linkName(name)} already points at ${takenBy}, which this picker did not create — remove it by hand (${linkName(name)}), then toggle it here`);
+						continue;
+					}
 					if (enabled) {
 						const ext = EXTENSIONS.find((e) => e.name === name);
 						if (!ext) {

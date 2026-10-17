@@ -1,252 +1,269 @@
-# memory
+# memory — budgeted, governed memory for Pi
 
-An entry-keyed memory bank for [pi](https://github.com/earendil-works/pi-coding-agent): one keyed claim per assertion, one authoritative claim per context, and a write that would create a second claim on the same assertion is **refused until a human decides** which one stands.
+Durable **rules**, domain **facts**, and the **daily log**. Nothing else. It is a
+live component: enabled by a symlink at `~/.pi/agent/extensions/memory` (the
+rl-extensions picker creates it).
 
-It replaces the usual "memory" arrangement — append a bullet to a prose block, inject the whole block, hope the model reconciles it — with a store that can be queried, adjudicated and audited.
+Design inputs: [`design/intent.md`](design/intent.md) and
+[`design/spec.md`](design/spec.md) (requirements `R1…R47`, decisions `D1…D15`).
+This README is the operating contract: what injects, what waits, what is refused,
+and what is deliberately not done.
 
-## Why this exists
+---
 
-The bank this component replaced had three files, each asserting something about the UI background, each written months apart. All three were injected every turn. They produced the same prompt fragment, so **the model could not see that it was being handed a contradiction**, let alone resolve it. Nothing in the arrangement made one of those claims the authority, and nothing recorded which claim replaced which.
+## What it does
 
-The invariant this component enforces:
+| Surface | Name | Notes |
+|---|---|---|
+| Read | `memory_read(path)` | Files inside the bank. A cut is announced, never silent. |
+| Read | `memory_list(dir)` | Every file, its size, and how many claims it holds. |
+| Read | `memory_search(query)` | BM25 over claims, **pending** claims, history, the daily archive and the migration archive. Each hit is labelled with where it came from. A candidate list, not an answer. |
+| Write | `memory_log(section, text)` | One daily item. The extension stamps the date and time; the agent cannot set them. |
+| Write | `memory_propose(…)` | A **pending** claim. The agent can never write an approved claim. |
+| Write | `memory_archive(name, text)` | Read-only archive for prose that is neither a claim nor a daily item. |
+| Command | `/memory …` | `status · preview · review · approve · reject · defer · edit · doctor · config · paths · flag · flags · trial · migrate` |
+| Hook | `session_start` | One review notice when anything waits. Never blocks. |
+| Hook | `before_agent_start` | The budgeted injection, for user-started runs only. |
 
-> For every **assertion key**, exactly one **active** entry per **scope** can ever reach the model — enforced at write time, verified at read time, auditable across time.
+### Rename table (old callers)
 
-Three parts make that hold: `schema.ts` makes identity computable, `resolver.ts` enforces it on the read path, and `gate.ts` makes a rival unenterable on the write path. Recall (`inject.ts`) picks candidates; **the resolver picks truth**.
-
-## Requirements and enable
-
-- pi (interactive, print, json and rpc modes are all supported — dialogs only in interactive).
-- The bank: `~/.pi/memory` (override with `PI_MEMORY_DIR`). Never one file per claim — that shape is what makes collisions structurally inevitable.
-- One runtime dependency of its own: **`minimatch`**, for `path:` scopes. Glob edge cases (dotfile paths, `**` crossing segments, `!`/`#`) misclassify a scope silently, which is exactly the failure class this component exists to remove.
-- Enabled with `/rl-extensions` (it creates the symlink at `~/.pi/agent/extensions/memory`). If a **real directory** named `memory` is found there — another memory extension — this one registers nothing and says why at `session_start`: two injectors and two `memory_*` tool sets make the prompt unreproducible.
-
-## What you get
-
-| Surface | What it does |
+| Old name | Now |
 |---|---|
-| `memory_write` | Add or amend an entry. Clean write, amendment in place, or refusal with a `conflictId`. |
-| `memory_show` | Every claim for one key: which is authoritative *here*, which are retired, which are shadowed by a narrower scope, and whether the key is contested (reported as an error, not as an answer). |
-| `memory_search` | Ranked **candidates**, explicitly labelled as not answers. |
-| `memory_read` | Any file in the bank — `core/activeProjects.md`, an archived daily in `history/daily/`, a store — with its size and the offset to continue from. Read-only, and the answer says it is evidence, not an authority. |
-| `memory_list` | The whole bank (stores, working files, archives) with sizes and dates, in one view. |
-| `memory_doctor` | Entries by status, malformed entries, contested identities, headings that are not keys, unreadable files, empty stores, unanswered conflicts, leftover temp files, how much of the working state actually got injected, daily-file freshness. `isError` when anything is wrong. |
-| `/memory` | `doctor` \| `pending` \| `resolve <id>` \| `show <key>` \| `files [dir]` (the whole bank) \| `daily` |
-| `before_agent_start` | Injects the authorities that apply to this prompt and context, plus any unanswered conflict, plus the working state. Silent — no message, no tokens — when there is nothing to say. |
+| `memory_append` | `memory_log` — the date is stamped for you |
+| `memory_write`, `memory_update` | `memory_propose` — **one claim per call** |
+| `memory_show` | `/memory status`, `/memory review`, `memory_read`, `memory_list` |
+| `memory_doctor` | `/memory doctor` |
+| `memory_pending`, `memory_resolve` | `/memory review` |
+| auto-persist / session-summary lines, `core/` status files | gone; `memory_log` and the daily log |
+| `# Memory Bank Context` injection | `## Memory — rules and facts for this context (project: …)` |
 
-### What lands in the prompt
+`memory_read`, `memory_search` and `memory_list` keep their names and read
+behaviour. The extension never edits `AGENTS.md` or skills: updating callers is a
+manual cutover step (see [Cutover](#cutover)).
 
-```markdown
-## Memory — authoritative for this context (project: memory)
-- [rule · global · 2026-10-14] pi-extension-runtime.one-dialog-slot: …
-- [preference · project:.terminal · 2026-09-30] dotfiles.tmux-status-bar: …
+---
 
-Not injected this turn (token budget): ui.background, git.push.
-Shadowed by a more specific scope: dotfiles.tmux-status-bar (out-of-scope).
-```
+## Authority, in one place
 
-- Recall is **BM25** over entries (`k1 = 1.2`, `b = 0.75`, key/heading terms ×3), with query terms treated as a set and `kind`/`scope`/`status` values never scored — so the words `rule`, `global` and `active` cannot drag an unrelated entry into your prompt. Measured with `scripts/bench-recall.mjs`: ~0.1 ms at 22 entries, 0.5 ms at 1 000, 2.6 ms at 5 000. That is why there is no search dependency and no on-disk index; corpus statistics are memoised against the store object, so there is no invalidation rule to get wrong.
-- Budget: **900 tokens** of entry content by default (`tokens = ceil(chars / 4)`, an estimate, stated as one), with per-kind caps (`rule` 260, `procedure`/`decision`/`preference` 160, `gotcha` 140, `fact` 120) so a pile of facts cannot crowd out a rule. Entries that do not fit are **skipped, never truncated** — a truncated rule is a new rule — and named, so a missing memory is visible rather than silently absent.
-- A hit on a **stale** claim is answered with the claim that replaced it, not with the dead rule; a claim that lost to a narrower scope is reported as shadowed rather than dropped. Nothing is discarded on the way to the prompt without being named.
-- Presentation is canonical: kind, then key. Retrieval order decides what is *considered*, never what the model reads first, so output is byte-identical for a given store + query + context. Lines carry the fields that actually decided (`kind · scope · asOf`) and never a score.
+1. **Approved claims inject.** One approved claim per identity (`key` + `scope`).
+2. **A pending change to an existing identity never injects.** The approved claim
+   stays in force until Rodrigo approves the replacement; the old one then moves
+   word for word to `history/<key>.md` with a `supersededAt` date. Nothing is
+   deleted.
+3. **A pending claim for a new identity injects as `[unapproved]`**, below the
+   approved ones, until it is older than `pendingFlagDays` (14) — then it stops
+   injecting but is never dropped.
+4. **A pending claim with `origin: migration` never injects** until approved
+   (D9): a migrated bank cannot silently become the truth.
+5. **Two approved claims for one identity is *contested*: nothing injects for it**
+   (fail closed). It is listed in the session-start notice and in `/memory review`.
+6. **Scope shadows scope**: `path:` > `project:` > `global`. One question, one
+   answer. Out-of-scope claims never inject.
+7. **History and archives are searchable and readable, never injected** (D12).
 
-### …and the working state
-
-The authority block answers *what is true*. The bank's other two files answer *what was happening*, and until now nothing read them: `core/activeProjects.md` was written by hand and by file tools and never reached a prompt, and `core/dailyContext.md` was only rewritten at rollover — so the open work in it was invisible except as an "N day(s) old" warning.
-
-```markdown
-## Working state — hand-maintained files, not entry stores and not authorities
-
-### core/activeProjects.md
-# Active Projects
-## rl-pi-extensions (~/Projects/Terminal/rl-pi-extensions)
-- Status: v1.4.1 released and pushed…
-
-### core/dailyContext.md — open work (2026-10-16)
-**Next Steps**
-- (2026-10-16) Decide the pending conflict 4fee6f92…
-- (2026-10-14) Run app in simulator and verify all screens…
-_13 further open item(s) did not fit this turn — the rest with memory_read core/dailyContext.md._
-```
-
-- `activeProjects.md` is **verbatim** prose — the extension has no parser for someone else's file — cut on whole **lines** from the top, never mid-line, with the file named so `memory_read` gets the rest.
-- `dailyContext.md` is injected as the **open items** its headings hold, and the filter is the rollover's own classifier (`OPEN_HEADING` / `isCarriedForward` in `rollover.ts`), not a second one: if the file is unreadable by the rollover, that is a bug to fix in one place, not to re-implement here.
-- Selection when it does not fit: **undated first** (an item stamped today by its author outranks a guess), then **newest first**, then source order, and the carried line reports how many were dropped. Same rule as the entry budget: skip and name, never truncate.
-- Both caps are separate from the 900-token authority budget, and are module parameters in the same stance as the ageing knobs (`DEFAULT_STATE_BUDGET` in `workingState.ts`, not a settings file — a test pins the numbers, so retuning one is a deliberate edit); the doctor reports what got in: `core/dailyContext.md: 8/9 open items shown, 493 tokens`.
-- **This block is never an authority.** It carries no key, no scope and no `asOf`, says so in its own heading, and cannot win a `memory_show` or a gate decision. A status line is evidence of what was written, and the tools that read it say the same thing.
-
-## The bank on disk
-
-```text
-~/.pi/memory/
-├── knowledge/*.md        entry stores — the authority surface
-├── core/dailyContext.md  the day's working file (see Daily rollover)
-├── core/activeProjects.md hand-maintained status; injected verbatim, never parsed
-├── history/daily/        archived daily files, never overwritten
-└── .pending/*.json       unanswered conflicts
-```
-
-An entry is a `##` heading whose text is the **assertion key** (`^[a-z0-9][a-z0-9._-]*$`), followed by metadata lines and a body:
+A rule tagged `always` is injected every turn in the core section. Every other
+rule is injected only when the request relates to it. **Rules are context, not
+enforcement** (D3): the extension registers no `tool_call` handler and blocks
+nothing. It ships no built-in rules — these two are examples you may add
+yourself:
 
 ```markdown
-# UI
-
-## ui.background                        ← key: identity, not prose
-- kind: preference                      ← rule | preference | decision | fact | procedure | gotcha
-- scope: global                         ← global | project:<name> | path:<glob>
-- asOf: 2026-10-02                      ← when the claim became true; never invented
-- source: PR review rl-pi-extensions    ← who said it, where
-- status: active                        ← active | superseded | withdrawn
-Use dark grey for the UI background.
-
-## ui.background@2026-06-14             ← revision suffix: same key, same identity
-- kind: preference
+## git.no-push-without-approval
+- kind: rule
 - scope: global
-- asOf: 2026-06-14
-- status: superseded
-- supersededBy: knowledge/ui.md#ui.background
-- supersedes: knowledge/palette.md#ui.background@2026-05-01
-Use navy for the UI background.
+- asOf: 2026-10-16
+- source: Rodrigo, in session
+- tags: always
+
+Never push to a remote, or open a pull request, without Rodrigo's explicit
+confirmation in this session.
+
+## files.no-user-files-in-tmp
+- kind: rule
+- scope: global
+- asOf: 2026-10-16
+- source: Rodrigo, in session
+- tags: always
+
+Never create user-facing files under /tmp. Scratch files are fine; deliverables
+are not.
 ```
 
-Identity is **key + scope** (the revision suffix is ignored). One topic file holding an active entry plus its supersede chain is the healthy shape. References are qualified `path#heading`, because two files can hold the same heading — that collision is part of what broke the old bank — and an ambiguous one is reported, not guessed.
+---
 
-**Identity- and authority-bearing fields are never silently normalized:**
+## Bank layout (`~/.pi/memory/`)
 
-| Field | Bad value → | Why |
-|---|---|---|
-| `key` | error `bad-key`, not injectable | a heading that isn't a key cannot be compared for conflicts |
-| `scope` | error `bad-scope` — `host:work` does **not** become `global` | defaulting would silently merge two scopes |
-| `status` | error `bad-status` | a typo must not resurrect a retired rule |
-| `asOf` | error if malformed; **warning** if missing (sorts last) | a wrong date silently outranks a real one |
-| `kind`, `source` | warning | annotation only |
-
-Parsing never throws: a corrupt file still yields a report the doctor and the migration can act on, unknown fields are preserved verbatim, and a malformed sibling does **not** make a clean claim look duplicated.
-
-## How a winner is chosen
-
-Two gates, because an identity-level gate alone is not enough:
-
-1. **Within one identity (key + scope).** Stale and malformed entries never surface. If the store genuinely holds two well-formed active claims on one identity, that identity **fails closed**: nothing is injected for it, and it is reported as a conflict for a human. Guessing the newest one would reproduce the ambiguity this component exists to remove — the top-ranked claim travels with the report as `bestCandidate`, a suggestion, never an answer.
-2. **Across scopes for one key.** A `project:` or `path:` rule *shadows* the `global` default, so one question gets one answer for this context rather than a rule plus an override the model has to referee. Non-applicable scopes are reported `out-of-scope`, never dropped.
-
-`compareAuthority` is total and deterministic — no similarity term appears in it:
-
-1. scope specificity: `project` > `path` > `global`
-2. `asOf` descending (an explicit date always beats a missing one)
-3. key ascending, then heading ascending — independent of scan order
-
-Nothing is dropped on the way to the prompt without a reason: a suppressed candidate is reported with the real cause (`superseded`, `withdrawn`, `invalid`, `conflict`, `unkeyed`). `resolveKey(key, context)` answers "what is the authority for this key *here*?" and reports everything it shadowed or excluded, so "why wasn't my note used?" is answerable from data.
-
-## Conflicts: what happens, and how to answer
-
-A write **amends in place** when its heading matches an entry in the target file — ordinary authoring, never gated. It is a **conflict** when the heading differs while `key` + `scope` match and a live claim exists in this file **or any other**; the check is store-wide. Rewording what you own is authoring; adding a second claim on one assertion is the act that breaks a memory bank, and that is what gets gated. An incoming entry whose own `status` is not `active` asserts nothing and cannot contest anything.
-
-On a conflict: **nothing is written**, the refusal carries a `conflictId` derived from the identity, the live claims and the incoming text, and resolution is a second, explicit call carrying that id. If the store moved on in between, the id no longer matches and the write is refused again rather than applied to a state nobody reviewed.
-
-| Resolve | Effect (and the provenance it writes) |
-|---|---|
-| `supersede` | incoming wins; rivals become `status: superseded` with `supersedes`/`supersededBy` — rewritten in **every file holding a rival**, applied together |
-| `merge` | needs `mergedBody`; one claim replaces both, rivals superseded |
-| `withdraw` | neither side asserts anything; `status: withdrawn`, `withdrawnOn` |
-| `keep-both-flagged` | both stay live and the identity **goes dark** — nothing is injected for it — with `contestedWith` recorded and the doctor reporting it |
-| `discard` | incoming dropped; nothing changes on disk |
-
-`+ note` on any of them is recorded as `resolution:` provenance — how a contest was settled and why.
-
-**In the terminal** the human is asked inside the same call, and the dialog opens with the whole contest — what the bank says now, what is being written, and the rule that refused it — before the five resolutions, each labelled with what it does. `merge` shows both claims while you type the replacement. The same rendering backs `/memory pending`, the tool result and the per-turn notice, so no surface is better informed than another.
-
-**No timer.** A dialog that needs your decision waits as long as you need. Esc, or cancelling the tool call, says "not now".
-
-**The contest is parked before the question is asked** (`~/.pi/memory/.pending/`), because the question can be lost: you step away, another extension's dialog takes the slot, the call is cancelled, the session ends. Answering clears the entry; everything else leaves it, and it is surfaced every turn until answered. A malformed answer is the opposite case — the question *was* answered — so the entry is cleared and the caller is told what was missing.
-
-**One question at a time.** pi gives extensions a single dialog slot. A second `ui.select` displaces the first and can leave its caller awaiting a dialog nobody can see, so a second concurrent conflict is parked and reported instead of asked. Every dialog carries the tool call's abort signal, so cancelling the call closes the dialog rather than stranding it.
-
-**Without a UI** (`pi -p`, json, rpc) the refusal is parked and the caller is told how to answer it: re-invoke with `resolve` + `conflictId`, or run `/memory resolve <id> --resolve=<…>` — which prints the full contest first, because choosing a resolution blind is not choosing. The refusal tells the agent not to retry the write and not to pick a winner.
-
-## Daily rollover
-
-At `session_start` (and via `/memory daily`, or `scripts/daily-rollover.mjs --force`) a `core/dailyContext.md` from an earlier day is archived to `history/daily/<YYYY-MM>/<date>-dailyContext.md` — byte-identical, never overwritten — and today's file is started with the open work carried forward. What was carried, what was not, and why are reported; a stale daily file is injected as a caveat rather than handed over as current fact.
-
-```markdown
-# Daily Context — 2026-10-16
-
-- date: 2026-10-16
-- carried from: 2026-10-15
-
-## In Progress
-
-### <project or origin grouping> — <source heading>
-
-_(carried from 2026-10-15 — 1 day old)_
-
-- (2026-10-15) verify the simulator build
-
-## Completed
-
-## Key Decisions
-
-## Notes
+```
+claims/rules/*.md, claims/facts/*.md     approved + pending entries (pending carry state: pending)
+history/<key>.md                         superseded and rejected claims, append-only
+daily/today.md, daily/archive/YYYY-MM/   the daily log; rolled over once per session
+archive/                                 read-only migrated prose and status text
+migration/state.json                     resumable migration progress, plus the verified backup
+metrics/turns.jsonl, flags.jsonl, baseline.json   trial metrics (never any prompt text)
+config.json                              the settings below
 ```
 
-- The `- date:` field is authoritative; an undated file is dated from its modification time and **labelled as inferred**, and the missing field is reported. A missing date is never a reason to do nothing.
-- Archives are never overwritten, but a name collision is not always a duplicate: two files can legitimately be about the same day (an undated one whose day was inferred, plus the file started for that day), so the second is archived as `2026-10-14-dailyContext-2.md` and the notice says so. Identical bytes are the one true duplicate — the day is already recorded, and nothing is written twice. Blocking on the collision instead left a real bank's daily file stale and unarchivable for two days.
-- Open work is recognised by meaning (`Next Steps`, `In Progress`, `Handoff`, `Blocked`, `Todo`…), not by exact heading match — and **by position too**: anything under an open heading is open work, whether or not its own name is a known alias (`## In Progress` → `### Money Manager`). A heading with children groups rather than swallowing them, so the rollover's own compound titles (`### Money Manager — Handoff`) read back as group plus section on the next pass. Settled work is reported rather than carried — durable things belong in `knowledge/`.
-- **Items carry their own date** (`- (2026-10-15) …`). An undated item is stamped with the day *the file claims*, never today: dating Monday's intention on Tuesday launders it into fresh work.
-- Ageing is per item: past `retireAfterDays` (default **21**) an item stops being carried, and a per-section cap (default **30**, newest survive) bounds a runaway list. **Undated items are never retired** — unknown age is not grounds to drop work. Every drop is counted in the notice and remains in the archive.
-- The shape above is a contract: other tools (including pi's own memory tools) append under those top-level headings, so a format only the rollover can read would make the day's work unreadable to whatever writes it.
+`write → read → write` is byte-stable for every file this component writes, and a
+hand edit that breaks the grammar is reported with file and line while only that
+entry is excluded.
 
-## Configuration
+---
 
-| Setting | Where | Default |
-|---|---|---|
-| Bank root | `PI_MEMORY_DIR` | `~/.pi/memory` |
-| Extensions dir | `PI_CODING_AGENT_DIR` / `HOME` | `~/.pi/agent/extensions` |
-| Injection budget | `inject(store, { budget })` | 900 tokens of entry content |
-| Working-state caps | `renderWorkingState({ budget: { activeProjects, daily } })` | 600 / 500 tokens of file content, each estimated, each reported by the doctor |
-| Ageing | `rollDaily({ retireAfterDays, maxItems })` | 21 days, 30 items per section |
+## Injection
 
-The ageing knobs are **module parameters, not settings**: the extension calls `rollDaily()` with no options, so retuning them means editing the defaults in `dailyItems.ts`. They are deliberately not a settings file until observed rollovers say what they should be.
+`before_agent_start` for **user-started runs only** (R25) — a run started by an
+extension message is not a question, so it gets nothing.
 
-## Module map
+Budget `budgetTokens` (default **2000**), and the total never exceeds it:
 
-`implementation.ts` is an adapter — tools, the command, the hook, the dialogs — that decides nothing about memory beyond *who can be asked* and *whether to load at all*. `service.ts` holds the behaviour without pi types.
+1. **Always-on core** — approved, in-scope rules tagged `always`, at most `coreTokens` (600).
+2. **Daily open items** — `in_progress` and `carry`, at most `dailyTokens` (500).
+3. **Retrieved claims** — the remainder, BM25-ranked against the prompt.
 
-| Module | Role |
-|---|---|
-| `schema.ts` | entry grammar, validation that never silently defaults, `compareAuthority`, render↔parse idempotence |
-| `markdown.ts` | one parser shared by the migration and the rollover (two parsers is how one format grows two meanings) |
-| `resolver.ts` | the two gates, authority plan, shadowing, violation reporting |
-| `gate.ts` | `decide(store, request)` — the only way an entry gets in; pure, no clock, no fs |
-| `inject.ts` | BM25 recall, budget, canonical text |
-| `fs-store.ts` | bank paths, atomic write-beside-then-rename, the collision guard |
-| `pending.ts` | the conflict queue (JSON, because it must replay to the gate verbatim) and `formatContest` |
-| `dailyItems.ts` / `rollover.ts` | item grammar, stamping, ageing; archive + reported carry |
-| `workingState.ts` | the injection the authority machinery cannot answer: verbatim `activeProjects.md`, open daily items, per-file budgets |
-| `migrate.ts` | prose → entries: proposals, cues, and what gets skipped |
-| `service.ts` | use cases over all of it |
+Unused budget from 1 and 2 flows to 3. Nothing is cut silently: an entry is never
+split, and if anything is dropped the block ends with how many, of which kind,
+and to use `memory_search`. A read error **fails open**: no injection, one
+visible warning, the turn proceeds.
 
-Scripts (`node --experimental-strip-types --import ./test-support/register.mjs scripts/…`, as each one's header says — they import the component's `.ts` sources): `scripts/migrate-report.mjs` (dry run, one proposal per line), `scripts/migrate-apply.mjs` (`--only id,id`), `scripts/daily-rollover.mjs` (`--force` for a file whose mtime is today while its content is not — a human says so, the code never infers it; it calls the same `service.rollDaily` the extension uses at session start, because a second rollover implementation is how the two grow different rules), `scripts/bench-recall.mjs`.
+`/memory preview [prompt]` prints the exact block a turn would get, with tokens
+per section and what was dropped.
 
-## Limits, and what this deliberately is not
+---
 
-- **Not semantic search, and not a conflict detector for paraphrase.** Two claims about the same thing under different keys are two entries; the gate cannot see them as rivals. Keys are how you tell it what a claim is *about*.
-- **No embeddings, no re-ranking, no auto-merge.** A similarity threshold is the same guess as an LLM "reconciling" the text — the old bank's three files produced an identical snippet, so nothing downstream could even see the contradiction.
-- **The model never resolves a conflict.** It is told the identity is contested and to ask you.
-- **Daily items written by other tools arrive undated** and get their date at the next session start, so their age is one day coarse. Closing that means owning the daily append path or agreeing the item grammar with whatever writes it.
-- **The daily selection is a heuristic, not a parse.** `OPEN_HEADING` decides what is open by matching heading words; a heading it does not recognise is dropped and counted, never silently merged. Judge the classifier in real use, not in tests.
-- **The working-state block is not memory.** It is a rendering of two hand-maintained files, re-read every turn, and it deliberately has no keys, no authority and no retrieval. Recall for *facts* goes through `memory_show` / `memory_search`; `memory_read` is for the file itself.
-- **Migration is a judgement call, made visible rather than automatic.** It proposes, the gate simulates each proposal, and `scripts/migrate-apply.mjs --only <id>` applies the ones you choose. The live bank's prose migration is done (23 claims, run 2026-10-14; the run log is in the CHANGELOG, not here).
-- `asOf` is never defaulted, by anyone. A claim without a date sorts last and says so.
+## Writes, and the status redirect
 
-## Testing
+`memory_propose` refuses bodies that read as project status — commit SHAs (7–40
+hex), PR/issue/run numbers, CI or build URLs, or a date next to *merged, pushed,
+deployed, published, ran, passed, failed* — and points at `memory_log` instead
+(D2). The detector reads the **body only**; `source` and `links` may carry
+evidence. A proposal containing supersession prose ("superseded", "historical",
+"no longer", "replaced by") is refused for the same reason: propose the new claim
+for the key and let the store move the old one.
 
-284 colocated tests (`npm test` discovers them recursively). The load-bearing ones: parse↔render byte-idempotence with nothing dropped; authority total-order and four invariant sweeps over 200 generated stores; injection determinism and per-kind budgets; the gate's rival check across files, and a resolution applying only to the state its `conflictId` was derived from; the queue replaying to the same `conflictId`; the rollover round trip (a file the rollover wrote is understood by the next rollover); atomic writes with no temp-file leftovers and no path escape; the working-state budgets (a line is never cut in half, dropped items are counted, an unreadable daily file still gets its warning); reads contained to the bank — `..`, absolute paths, and a **symlink inside the bank pointing outside it** all refused; windows counted in graphemes so a ZWJ emoji is never split; and the Pi adapter driven through pi's own surface — dialog content, no timer, one dialog at a time, cancelled tool calls parking rather than hanging.
+A genuine false positive can be resubmitted with `overrideStatusCheck: true` plus
+`overrideReason`; the override is stored on the claim, shown in review, and
+counted in the trial metrics so the detector's strictness is measurable.
 
-## History and rollback
+`asOf` and `source` are never filled in for you. A claim without either is
+malformed: reported, not injected.
 
-Shipped in **v1.4.0**. It replaced the standalone memory extension: the old one is parked at `~/.pi/agent/extensions-disabled/memory`, and this one is a symlink. Roll back with `rm ~/.pi/agent/extensions/memory && mv ~/.pi/agent/extensions-disabled/memory ~/.pi/agent/extensions/memory`. The bank backup from before the content migration is `~/.pi/backups/memory-2026-10-14T19-14-41.tar.gz`.
+---
 
-## License
+## Review
 
-[MIT](../../LICENSE)
+`session_start` for a new session shows **one** notice when anything waits —
+agent proposals, the migration backlog (counted separately), contested identities,
+and claims pending longer than `pendingFlagDays` — naming `/memory review`. With
+nothing waiting, nothing is shown; outside the TUI it is logged once. Claims are
+never dropped automatically, however long they wait.
+
+`/memory review` walks the queue. In the TUI it opens **one dialog at a time**
+(Pi has a single dialog slot): approve, reject, edit the wording, defer, stop.
+Anywhere else it lists the queue and the exact commands to act on it.
+
+`inlineConflictDialog` (default `false`): when `true`, a proposal that would
+replace an approved claim opens a dialog right away, inside the tool call, so
+cancelling the call cancels the ask. Anything other than an explicit choice
+leaves the claim pending.
+
+---
+
+## Config (`~/.pi/memory/config.json`)
+
+```json
+{
+  "budgetTokens": 2000,
+  "coreTokens": 600,
+  "dailyTokens": 500,
+  "pendingFlagDays": 14,
+  "inlineConflictDialog": false,
+  "ranker": "bm25",
+  "searchLimit": 12
+}
+```
+
+Unknown or mistyped keys fall back to the default **with a warning**, never
+silently. `ranker` accepts only implemented rankers: `bm25`. The `Ranker`
+interface (`rank(query, entries) → scored[]`) is the only hook for a future one;
+this component deliberately builds no semantic ranker.
+
+---
+
+## Trial
+
+The component is measured, not assumed (D6):
+
+- every injected turn appends one line to `metrics/turns.jsonl` — timestamp,
+  tokens per section, entries dropped, status-check overrides. **No prompt text.**
+- `/memory flag <key> stale|rival` records what the injection got wrong.
+- `/memory trial baseline [--days 14] [--marker "# Memory Bank Context"] [--sessions-dir path]`
+  measures the *previous* extension's injected block per user turn from Pi session
+  files, with the same token estimator, and writes the median to
+  `metrics/baseline.json`. If the block is not found it says so and writes
+  nothing — the baseline is measured, never estimated.
+- `/memory trial [days]` reports the median against the baseline and the flag
+  count. **Go: median ≤ 25% of baseline, and zero stale/rival flags.**
+
+Not measured, by decision (R46): recall (missing notes) and a head-to-head with
+rl memory.
+
+---
+
+## Migration and cutover
+
+```
+/memory migrate backup                     tarball of the bank, listed back to prove it
+/memory migrate plan                       waves from the files that really exist, rules first
+/memory migrate status                     progress, resumable
+/memory migrate draft [--wave w] [--file f] [--batch n]   the next source file, verbatim, with instructions
+/memory migrate drafted <file> <n>         record one file as drafted
+/memory migrate cutover                    archive the sources — never delete them
+```
+
+Every step except `backup` refuses to run without a verified backup. Source files
+are untouched until cutover. Migration claims carry `origin: migration` and never
+inject until approved; review them as their own batch
+(`/memory review --wave migration`).
+
+### Cutover
+
+The order is fixed (R40). The read-only caller inventory is
+[`cutover-callers.md`](cutover-callers.md): every caller found in the agent
+configuration, the memory feature it uses, and the exact change needed. It edits
+nothing — the edits are Rodrigo's.
+
+1. Make every change in the inventory, including the new tool names.
+2. Remove any `~/.pi/agent/extensions/memory` link the picker did not create.
+3. Enable `memory` in the picker.
+4. Rollback is the reverse: remove the link, restore the old one.
+
+The picker **never replaces or removes a symlink it did not create**: a taken
+name is reported with the manual step named, and the link is left alone (R42).
+
+---
+
+## Deliberate non-goals
+
+- No sync, no multi-machine logic, no sync-specific checks (D8: one machine).
+- No project list stored or injected; a claim may link to a project (R2).
+- No semantic/LLM ranker, no embedding store, no reranker.
+- No automatic approval, no automatic drop, no auto-persist or session-summary
+  lines, no writing of `AGENTS.md` or skills.
+- No tool-call blocking or policy enforcement (D3).
+- No replay benchmark; the trial measures what the injection costs (D6).
+
+## Dependencies
+
+`minimatch` is the only runtime dependency: `path:<glob>` scopes (R8–R10) need a
+glob matcher whose semantics are pinned by tests — `dot: true` (a scope must see
+`.terminal/`), `nonegate: true` and `nocomment: true` (a glob that starts with
+`!` or `#` is a scope, not an option). Node has none.
+
+## Tests
+
+165 tests, one file per module (`time · grammar · scope · store · queue · gate ·
+daily · rank · inject · notice · config · trial · migrate · index`). `index.test.ts`
+drives the real Pi surface — tool registrations, both hooks, `/memory` — against a
+scratch bank with an injected clock and git probe, so no test touches
+`~/.pi/memory`. `bank.ts` is the use-case layer between the modules and that
+adapter, which is why every decision above is testable without a Pi process.

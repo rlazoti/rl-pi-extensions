@@ -1,570 +1,437 @@
 /**
- * Pi adapter for the memory component: tools, the `/memory` command, and the
- * per-turn injection hook. Nothing here decides anything about memory — the gate,
- * the resolver and the injector do (see gate.ts, resolver.ts, inject.ts). This
- * file translates between Pi's shapes and `service.ts`.
+ * The Pi adapter: tools, the `/memory` command, and the two hooks. Nothing here
+ * decides anything about memory — `bank.ts` and the modules behind it do. This
+ * file only translates between Pi's shapes and the bank, and owns the two things
+ * that are Pi facts rather than memory facts:
  *
- * Two decisions live here because they are Pi facts, not memory facts:
- *   • who can be asked (mode + dialog availability), and
- *   • whether this extension should be loaded at all next to another memory
- *     extension.
+ *  - who can be asked (mode and dialog availability), and
+ *  - which runs get an injected block (only runs a user started, R25).
  */
 
-import type { AgentToolResult, ExtensionAPI, ExtensionContext, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
+import { existsSync } from "node:fs";
+
+import type { AgentToolResult, ExtensionAPI, ExtensionCommandContext, ExtensionContext, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { basename } from "node:path";
 
-import { formatIdentity } from "./schema.js";
-import { describeAge } from "./rollover.js";
-import { ACTIVE_PROJECTS_FILE, DAILY_FILE } from "./workingState.js";
-import type { ScopeContext } from "./resolver.js";
-import { memoryPaths, type BankListing, type BankListingResult, type BankRead } from "./fs-store.js";
-import { collisionReport, createService, RESOLUTIONS, type AskFn, type ResolutionChoice, type WriteOutcome } from "./service.js";
-import { clip, formatContest, renderConflict } from "./pending.js";
-import type { ContestSide } from "./pending.js";
-import type { Resolution, WriteRequest } from "./gate.js";
-import type { Candidate, DailyStatus, DoctorReport, KeyReport } from "./service.js";
-import type { PendingConflict, PendingList } from "./pending.js";
+import { createBank, type Bank, type Outcome } from "./bank.js";
+import { createNoticeSink, type NoticeSink } from "./notice.js";
+import { DAILY_SECTIONS } from "./daily.js";
+import { bankExists, describePaths } from "./store.js";
 
-const RESOLUTION_LABELS: Record<string, string> = {
-	supersede: "supersede — the new claim wins, the old one becomes history",
-	merge: "merge — one claim replaces both, you supply the merged text",
-	withdraw: "withdraw — stop asserting either; nothing new is claimed",
-	"keep-both-flagged": "keep both — contested on purpose; nothing will be injected for it",
-	discard: "discard — drop the new claim, the existing one stands",
-};
+const KIND = Type.String({ description: "rule | fact. A rule says how Rodrigo works; a fact says what is true." });
+const SCOPE = Type.String({
+	description: '"global", "project:<id>" (the id is shown by /memory status), or "path:<glob>" rooted at the repo.',
+});
+const ASOF = Type.String({ description: "YYYY-MM-DD — the date this became true. Never invented, never defaulted to today." });
+const KEY = Type.String({ description: "Lowercase dotted slug, e.g. git.flow." });
+const BODY = Type.String({ description: "The claim itself: one paragraph, at most 600 characters, no status text." });
+const LIST = Type.Optional(Type.Array(Type.String(), { description: 'Values are plain words; ";" is the separator when written to the file.' }));
+
+function toolResult(text: string, details: unknown, isError = false): AgentToolResult<unknown> {
+	return { content: [{ type: "text", text }], details, isError } as AgentToolResult<unknown>;
+}
 
 /**
- * No timer. A human who is not at the keyboard is not on a clock: the earlier
- * version auto-dismissed after two minutes, which discarded an answer nobody had
- * had time to give and left the turn in a half-answered state. The dialog waits.
- * Esc, or cancelling the tool call, is how to say "not now" — and the refusal is
- * already parked by then, so walking away costs nothing.
+ * Overrides recorded in this process, reported per injected turn so the trial can
+ * tell whether the status detector is too strict (R24, R43).
  */
+let overridesThisSession = 0;
 
 /**
- * Pi's interactive UI gives extensions one dialog slot: the editor area. A second
- * `ui.select` replaces the first, and whoever asked the first question can be left
- * awaiting a dialog that is no longer on screen — a session hanging with no visible
- * reason. So this extension asks one question at a time: a second concurrent
- * conflict is parked and reported instead of asked, and answered right after the
- * first. The tool call's own abort signal is passed to every dialog, so cancelling
- * the call closes the dialog rather than stranding it.
+ * One notice channel per extension instance and mode, so "once per process"
+ * really means once: two session_starts in one session do not repeat the notice.
  */
-let questionInFlight = false;
+let sink: NoticeSink | undefined;
+let sinkMode: string | undefined;
 
-const DATE = Type.String({ description: "YYYY-MM-DD — the date this claim became true. Never invented, never defaulted to today." });
-const CONFLICT_ID = Type.String({ pattern: "^[0-9a-f]{8}$", description: "The conflictId from a refusal. Required with resolve." });
+function noticeSinkFor(ctx: ExtensionContext): NoticeSink {
+	if (!sink || sinkMode !== ctx.mode) {
+		sink = createNoticeSink({
+			isTui: ctx.mode === "tui",
+			notify: (text) => ctx.ui.notify(text, "info"),
+			log: (text) => console.warn(text),
+		});
+		sinkMode = ctx.mode;
+	}
+	return sink;
+}
+
+/**
+ * Test seam (the repo's null-gated pattern, because Pi extensions are loaded by
+ * jiti and Node has no ESM module mocking): a test hands in a `Bank` pointed at a
+ * scratch bank with its own clock and git probe, so no test ever reads or writes
+ * the live `~/.pi/memory`.
+ */
+let bankForTesting: Bank | undefined;
+
+export function setBankForTesting(bank: Bank | null): void {
+	bankForTesting = bank ?? undefined;
+}
 
 export default function memoryExtension(pi: ExtensionAPI): void {
-	const paths = memoryPaths();
+	const bank: Bank = bankForTesting ?? createBank();
+	let warnedAbout = "";
 
-	// Two memory extensions in one session means two injectors and two sets of
-	// memory_* tools: an unreproducible prompt and names competing for the same
-	// call. The live bank's extension is a real directory, not a symlink, so it is
-	// detectable — and standing down is the only safe response.
-	const collision = collisionReport(paths);
-	if (collision !== null) {
-		pi.on("session_start", (_event, ctx) => {
-			ctx.ui.notify(`memory: standing down — another memory extension is loaded at ${collision}. Remove it (or symlink this component) to enable this one.`, "warning");
-		});
-		return;
-	}
-
-	const scopeContext = (ctx: ExtensionContext): ScopeContext => ({ project: basename(ctx.cwd) || undefined });
-
-	// The day changes without asking. A stale daily file is archived and today's is
-	// started with the open work carried forward — and the carry is reported, because
-	// the version of this behaviour that shipped before silently dropped every
-	// heading it did not recognise.
-	pi.on("session_start", (_event, ctx) => {
-		const service = createService(paths);
-		// Rollover first, so the archive records the file as it was written. Carrying
-		// already dates the items it carries. Stamping the live file is only for the
-		// case where nothing rolled over: an undated item can never be aged, so it
-		// would be carried forever.
-		const rollover = service.rollDaily();
-		if (!rollover.performed) {
-			const stamped = service.stampDaily();
-			if (stamped.stamped > 0) ctx.ui.notify(`memory: dated ${stamped.stamped} open item(s) in core/dailyContext.md (${stamped.date}) so they can age in a later rollover.`, "info");
-		}
-		if (rollover.performed) {
-			ctx.ui.notify(rollover.notice, "info");
-			if (rollover.notCarried > 0) ctx.ui.notify(`memory: ${rollover.notCarried} section(s) were archived without being carried — run /memory daily to see them.`, "info");
-			return;
-		}
-		if (rollover.reason.startsWith("archive ")) ctx.ui.notify(`memory: ${rollover.reason}`, "warning");
-		else if (rollover.status.freshness.needsDate && rollover.status.exists) {
-			ctx.ui.notify(`memory: core/dailyContext.md has no \`- date:\` field; assumed ${rollover.status.freshness.date?.date ?? "today"} from its modification time. Add the field so rollover is exact.`, "warning");
-		}
-	});
-
-	const askFactory = (ctx: ExtensionToolContext | ExtensionContext, signal?: AbortSignal): AskFn => async (refusal, request) => {
-		if (!ctx.hasUI) return null;
-		// The caller has already gone away, or a question is already on screen. Do not
-		// open a second dialog: `service.ts` parked this contest before calling, so
-		// returning null is a clean "ask later", not a lost write.
-		if (signal?.aborted === true || questionInFlight) return null;
-		questionInFlight = true;
-		try {
-			const shown = RESOLUTIONS.map((resolution) => RESOLUTION_LABELS[resolution] ?? resolution);
-			const picked = await ctx.ui.select(contestTitle(`Memory conflict — ${formatIdentity(refusal.identity)}`, refusal.incoming, refusal.candidates, refusal.explanation, refusal.conflictId, refusal.suggested), shown, { signal: signal ?? ctx.signal });
-			if (picked === undefined) return null;
-			const resolution = RESOLUTIONS[shown.indexOf(picked)];
-			if (resolution === undefined) return null;
-
-			let mergedBody: string | undefined;
-			if (resolution === "merge") {
-				const typed = await ctx.ui.input(`Merge ${refusal.incoming.key} — type the one claim that replaces both`, sidesPreview(refusal.incoming, refusal.candidates), { signal: signal ?? ctx.signal });
-				if (!typed?.trim()) return null;
-				mergedBody = typed.trim();
-			}
-
-			const why = await ctx.ui.input(`Why (${resolution})?`, "one line, recorded as provenance — blank to skip", { signal: signal ?? ctx.signal });
-			return { resolution, ...(mergedBody ? { mergedBody } : {}), ...(why?.trim() ? { note: why.trim() } : {}) };
-		} finally {
-			questionInFlight = false;
-		}
+	const warnOnce = (ctx: ExtensionContext, message: string): void => {
+		if (warnedAbout === message) return;
+		warnedAbout = message;
+		ctx.ui.notify(message, "warning");
 	};
 
+	const bankDamage = (): string[] => {
+		const damage: string[] = [];
+		if (!bankExists(bank.paths)) damage.push(`no memory bank yet at ${bank.paths.root}`);
+		return damage;
+	};
+
+	// ── Hooks ────────────────────────────────────────────────────────────────
+
+	pi.on("session_start", async (event, ctx) => {
+		// A resumed session has been told already; a reload is not a new session.
+		if (event.reason !== "new" && event.reason !== "startup" && event.reason !== "fork") return;
+		if (!existsSync(bank.paths.root)) return;
+		const rolled = bank.rollover();
+		if (rolled.archivedTo && ctx.mode === "tui") ctx.ui.notify(`memory: yesterday's log is archived (${rolled.archivedTo}), ${rolled.carried} open item(s) carried`, "info");
+		const notice = await bank.notice(ctx.cwd, { bankDamage: bankDamage() });
+		if (notice.text === "") return;
+		noticeSinkFor(ctx).deliver(notice.text);
+	});
+
 	pi.on("before_agent_start", async (event, ctx) => {
-		// Only prompt-driven runs carry a query to inject for.
-		if (!("prompt" in event) || typeof event.prompt !== "string") return;
-
-		const service = createService(paths);
-		const injection = service.injection(event.prompt, scopeContext(ctx));
-		const queue = service.pending();
-		const working = service.workingState();
-		if (injection.text === "" && queue.conflicts.length === 0 && queue.corrupt.length === 0 && working.text === "") return;
-
-		const parts = [injection.text];
-		if (queue.conflicts.length > 0) {
-			parts.push(
-				`## Memory conflicts awaiting a decision\n${queue.conflicts.map(describePendingForPrompt).join("\n")}`,
-			);
-		}
-		if (queue.corrupt.length > 0) {
-			parts.push(`## Memory queue damage\n${queue.corrupt.map((problem) => `- ${problem.file}: ${problem.error}`).join("\n")}`);
-		}
-		// Working state goes last and says what it is: the authorities above decide what
-		// is true, and a hand-written status line must not read like one. Open work is
-		// shown with its own dates and the staleness caution attached to it, so a stale
-		// intention is still not handed over as current fact — it is just no longer
-		// invisible.
-		parts.push(working.text);
-
-		return { message: { customType: "memory", content: parts.filter((part) => part !== "").join("\n\n"), display: false } };
-	});
-
-	// ── Tools ────────────────────────────────────────────────────────────────
-
-	pi.registerTool({
-		name: "memory_write",
-		label: "Memory Write",
-		description:
-			"Add or amend an entry in the memory bank's entry store (knowledge/<topic>.md). " +
-			"A write that would put two live claims on one assertion key and scope is refused — nothing is written. " +
-			`A refusal returns a conflictId; answer it by re-invoking with resolve (${RESOLUTIONS.join(" | ")}) and that conflictId.`,
-		promptSnippet: "Add or amend a memory entry (keyed claim with scope, kind and date); rival claims are refused until resolved",
-		promptGuidelines: [
-			"asOf is the date the claim became true. Never invent it and never default it to today: authority between claims is decided by date, so a wrong date silently outranks a real one.",
-			"scope: global only for a claim that is true everywhere. A rule for one repository belongs in project:<name>, a rule for part of a tree in path:<glob>.",
-			"file is knowledge/<topic>.md. Entries live in topic files — never one file per claim, which is what makes collisions unavoidable.",
-			"Writing the same heading again amends that entry. Using a different revision (key@YYYY-MM-DD) creates a second claim on the same assertion, which is a conflict.",
-			"If the result is CONFLICT, do not pick a winner yourself: ask the human which claim stands, then re-invoke the same write with resolve and conflictId.",
-		],
-		parameters: Type.Object({
-			file: Type.String({ description: 'Topic file, e.g. "knowledge/ui.md".' }),
-			key: Type.String({ description: 'Assertion key, e.g. "ui.background". Lowercase dotted slug.' }),
-			scope: Type.String({ description: '"global", "project:<name>", or "path:<glob>".' }),
-			kind: Type.String({ description: "rule | preference | decision | fact | procedure | gotcha" }),
-			body: Type.String({ description: "The claim itself, in one or two sentences." }),
-			asOf: DATE,
-			source: Type.Optional(Type.String({ description: "Who said it, where: PR review, Slack thread, user request." })),
-			revision: Type.Optional(Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$", description: "Heading suffix key@YYYY-MM-DD, for a claim with an explicit history." })),
-			status: Type.Optional(Type.String({ description: "active (default) | superseded | withdrawn. Only write tombstones when replacing or retiring a claim." })),
-			resolve: Type.Optional(Type.String({ description: `${RESOLUTIONS.join(" | ")} — only in the second call, answering a refusal.` })),
-			conflictId: Type.Optional(CONFLICT_ID),
-			mergedBody: Type.Optional(Type.String({ description: "Required with resolve: merge. The single claim that replaces both." })),
-			note: Type.Optional(Type.String({ description: "One line on why this decision was made. Recorded as provenance." })),
-			fields: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Extra fields kept verbatim; this schema does not read them." })),
-		}),
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			const request: WriteRequest = {
-				file: params.file,
-				key: params.key,
-				scope: params.scope,
-				kind: params.kind,
-				body: params.body,
-				asOf: params.asOf,
-				...(params.source ? { source: params.source } : {}),
-				...(params.revision ? { revision: params.revision } : {}),
-				...(params.status ? { status: params.status } : {}),
-				...(params.resolve ? { resolve: params.resolve as WriteRequest["resolve"] } : {}),
-				...(params.conflictId ? { conflictId: params.conflictId } : {}),
-				...(params.mergedBody ? { mergedBody: params.mergedBody } : {}),
-				...(params.note ? { note: params.note } : {}),
-				...(params.fields ? { fields: params.fields } : {}),
+		// Only a user-started run carries a prompt to answer (R25). A run started
+		// by an extension message gets no injection: it is not a question.
+		if (event.messageType !== "user") return;
+		try {
+			bank.rollover();
+			const { result, warnings } = await bank.injection(event.prompt, ctx.cwd, ctx.sessionManager.getSessionId(), {
+				overridesRecorded: overridesThisSession,
+			});
+			for (const warning of warnings) warnOnce(ctx, `memory: ${warning}`);
+			if (result.contested.length > 0) warnOnce(ctx, `memory: ${result.contested.length} contested identity(ies) — nothing is asserted for them; /memory review`);
+			if (result.text === "") return;
+			return {
+				message: { customType: "memory", content: result.text, display: false },
 			};
-			const service = createService(paths, ctx.hasUI ? { ask: askFactory(ctx, signal) } : {});
-			const outcome = await service.write(request);
-			return toolResult(formatOutcome(outcome), outcome, outcome.kind === "rejected");
-		},
+		} catch (error) {
+			// Fail open (R30): one visible warning, and the turn proceeds without memory.
+			warnOnce(ctx, `memory: injection skipped — ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
 	});
 
-	pi.registerTool({
-		name: "memory_show",
-		label: "Memory Show",
-		description: "Every claim for one assertion key — which one is authoritative in this context, which are retired, which are shadowed by a narrower scope, and whether the key is contested.",
-		promptSnippet: "Show all claims for a memory key and which one currently wins",
-		parameters: Type.Object({ key: Type.String({ description: 'Assertion key, e.g. "ui.background".' }) }),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const report = createService(paths).show(params.key, scopeContext(ctx));
-			return toolResult(formatKeyReport(report), report, report.contested);
-		},
-	});
-
-	pi.registerTool({
-		name: "memory_search",
-		label: "Memory Search",
-		description: "Candidate entries for a query, ranked. Candidates only: authority is decided by the store, so a hit is not an answer and the current claim may differ.",
-		promptSnippet: "Find candidate memory entries for a query (candidates, not authorities)",
-		parameters: Type.Object({
-			query: Type.String({ description: "Words to match against entry keys and bodies." }),
-			limit: Type.Optional(Type.Number({ description: "Max candidates, default 12." })),
-		}),
-		async execute(_toolCallId, params) {
-			const hits = createService(paths).search(params.query, params.limit ?? 12);
-			return toolResult(formatCandidates(hits), hits);
-		},
-	});
-
-	pi.registerTool({
-		name: "memory_doctor",
-		label: "Memory Doctor",
-		description: "Health of the entry store: entry counts by status, malformed entries, contested identities, dangling or ambiguous supersede references, unreadable files, and the queue of unanswered conflicts.",
-		promptSnippet: "Report memory store problems: contested keys, malformed entries, dangling references, pending conflicts",
-		parameters: Type.Object({}),
-		async execute() {
-			const service = createService(paths);
-			const report = service.doctor();
-			const queue = service.pending();
-			const unhealthy = report.violations.length + report.contested.length + report.unreadable.length + report.corruptQueue.length + report.unkeyed.length + report.tempFiles.length > 0;
-			const daily = service.daily();
-			return toolResult(`${formatDoctor(report)}\n\n${formatDaily(daily)}\n\n${formatQueue(queue)}`, { report, queue, daily }, unhealthy || daily.freshness.stale);
-		},
-	});
-
-	// ── Read-only recall over the whole bank ──────────────────────────────
-	//
-	// `knowledge/` is the authority surface, and the injector summarises it entry by
-	// entry. `core/` and `history/` are prose the gate will not write and the injector
-	// can only shorten. Without these two tools, the archived history and the dropped
-	// half of a working-state file were unreachable to the model however useful they were.
+	// ── Read tools (names unchanged, R41) ────────────────────────────────────
 
 	pi.registerTool({
 		name: "memory_read",
 		label: "Memory Read",
 		description:
-			"Read a file inside the memory bank, including core/ working state and history/daily archives — " +
-			"which no other tool reaches. Read-only: nothing here is an authority, and memory_write refuses these files on purpose.",
-		promptSnippet: "Read a memory-bank file (core/ working state, history/ archives) that injection only summarises",
-		promptGuidelines: [
-			"This is how you see what the prompt dropped: the working-state block names the file and counts the lines or items it could not show.",
-			"core/ and history/ are prose, not entry stores. Do not try to correct a stale status file with memory_write — it refuses them, and a status file is meant to go stale.",
-			"A file in the bank is evidence of what was written, not an authority for what is true now. Use memory_show for the authority on a claim.",
-		],
+			"Read a file inside the memory bank by bank-relative path — claims/, history/, daily/, archive/, metrics/. " +
+			"History and archives are searchable and readable but never injected.",
+		promptSnippet: "Read a memory-bank file by path (claims, history, daily archive, migration archive)",
 		parameters: Type.Object({
-			file: Type.String({
-				description: 'Bank-relative path, e.g. "core/activeProjects.md" or "history/daily/2026-10/2026-10-14-dailyContext.md".',
-			}),
-			offset: Type.Optional(Type.Number({ description: "Character offset to start at (default 0)." })),
-			maxChars: Type.Optional(Type.Number({ description: "Maximum characters to return (default 20000, capped at 100000)." })),
+			path: Type.String({ description: 'Bank-relative path, e.g. "claims/rules/git.md" or "history/git.flow.md".' }),
+			maxBytes: Type.Optional(Type.Number({ description: "Cut-off in characters, default 20000. A cut is reported, never silent." })),
 		}),
-		async execute(_toolCallId, params) {
-			const maxChars = Math.min(100_000, Math.max(1, Math.floor(params.maxChars ?? 20_000)));
-			const offset = Math.max(0, Math.floor(params.offset ?? 0));
-			const outcome = createService(paths).readFile(params.file, { offset, maxChars });
-			if (outcome.kind === "outside") {
-				return toolResult<BankRead>(`Refused: "${params.file}" is not inside the memory bank (${paths.root}). Pass a bank-relative path such as core/activeProjects.md.`, outcome, true);
-			}
-			if (outcome.kind === "directory") {
-				return toolResult<BankRead>(`"${params.file}" is a directory — memory_read reads files; memory_list ${params.file} shows its contents.`, outcome, true);
-			}
-			if (outcome.kind === "missing") {
-				return toolResult<BankRead>(`No "${params.file}" in the bank (${paths.root}). memory_list shows what is there.`, outcome, true);
-			}
-			const slice = outcome.slice;
-			const header = `${params.file} — ${slice.totalChars} chars, showing ${slice.offset}-${slice.offset + slice.shownChars}${slice.modified ? `, modified ${slice.modified}` : ""}`;
-			const footer = slice.truncated ? `\n_truncated: continue with offset ${slice.offset + slice.shownChars}._` : "";
-			return toolResult<BankRead>(`${header}\n\n${slice.text}${footer}`, outcome);
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const outcome = bank.read(params.path, { maxBytes: params.maxBytes });
+			return toolResult(outcome.text, outcome, !outcome.ok);
 		},
 	});
 
 	pi.registerTool({
 		name: "memory_list",
 		label: "Memory List",
-		description:
-			"List the memory bank's files with sizes and dates: entry stores under knowledge/, working state under core/, " +
-			"and archived daily files under history/daily/. Read-only; the .pending queue is not listed here (memory_doctor reports it).",
-		promptSnippet: "List memory-bank files (knowledge stores, core working state, history archives)",
-		parameters: Type.Object({
-			dir: Type.Optional(Type.String({ description: 'Bank-relative directory, e.g. "history/daily". Default: the bank root.' })),
-			limit: Type.Optional(Type.Number({ description: "Max entries (default 200)." })),
-		}),
-		async execute(_toolCallId, params) {
-			const outcome = createService(paths).listFiles(params.dir, params.limit);
-			if (outcome.kind === "outside") {
-				return toolResult<BankListingResult>(`Refused: "${params.dir}" is not inside the memory bank (${paths.root}).`, outcome, true);
-			}
-			if (outcome.kind === "not-a-directory") {
-				return toolResult<BankListingResult>(`"${params.dir}" is not a directory — memory_read reads files.`, outcome, true);
-			}
-			if (outcome.kind === "missing") {
-				return toolResult<BankListingResult>(`No "${params.dir}" in the bank (${paths.root}).`, outcome, true);
-			}
-			const listing = outcome.listing;
-			if (listing.entries.length === 0) return toolResult<BankListingResult>(`${outcome.dir}: empty.`, outcome);
-			const lines = listing.entries.map((entry) =>
-				entry.directory ? entry.path : `${entry.path}  ${entry.chars ?? "?"} chars${entry.modified ? `  ${entry.modified}` : ""}`,
-			);
-			const note = listing.truncated
-				? `\n_List stopped at the ${listing.truncatedBecause === "limit" ? "entry limit" : "directory depth limit"} — pass a narrower directory._`
-				: "";
-			return toolResult<BankListingResult>(`${outcome.dir}: ${listing.entries.length} entries\n${lines.join("\n")}${note}`, outcome);
+		description: "List what is in the memory bank: claim stores, history, daily archive, migration archive, metrics.",
+		promptSnippet: "List the memory bank's files",
+		parameters: Type.Object({ dir: Type.Optional(Type.String({ description: 'Bank-relative directory, default the bank root ("").' })) }),
+		async execute(_id, params) {
+			const outcome = bank.list(params.dir ?? "");
+			return toolResult(outcome.text, outcome, !outcome.ok);
 		},
 	});
 
-	// ── Command ──────────────────────────────────────────────────────────────
+	pi.registerTool({
+		name: "memory_search",
+		label: "Memory Search",
+		description:
+			"Rank matches over approved claims, pending claims (including the migration backlog), history, the daily archive and the migration archive. " +
+			"Each hit is labelled with where it came from. A candidate list: authority is decided by the store, so a hit is not an answer.",
+		promptSnippet: "Find memory entries by words across claims, history and archives (candidates, not authorities)",
+		parameters: Type.Object({
+			query: Type.String({ description: "Words to match against keys, aliases, tags and bodies." }),
+			limit: Type.Optional(Type.Number({ description: "Max hits, default from config (12)." })),
+		}),
+		async execute(_id, params) {
+			const outcome = bank.search(params.query, params.limit ?? 0);
+			return toolResult(outcome.text, outcome, !outcome.ok);
+		},
+	});
+
+	// ── Write tools (the only two write names, R41) ─────────────────────────
+
+	pi.registerTool({
+		name: "memory_log",
+		label: "Memory Log",
+		description:
+			"Append one item to today's daily log — the only place project status belongs. " +
+			"The extension stamps the date and time; the agent cannot set them.",
+		promptSnippet: "Log one daily item (completed | in_progress | carry | decision | note); the date is stamped for you",
+		promptGuidelines: [
+			"Commit SHAs, PR/issue/run numbers, CI links and dated status verbs belong in memory_log, never in a claim body.",
+			"Sections: completed, in_progress, carry, decision, note. carry is work that follows the day over.",
+		],
+		parameters: Type.Object({
+			section: Type.String({ description: DAILY_SECTIONS.join(" | ") }),
+			text: Type.String({ description: "One item, plain prose." }),
+		}),
+		async execute(_id, params) {
+			const outcome = bank.log({ section: params.section, text: params.text });
+			return toolResult(outcome.text, outcome, !outcome.ok);
+		},
+	});
+
+	pi.registerTool({
+		name: "memory_propose",
+		label: "Memory Propose",
+		description:
+			"Propose a rule or a fact. It lands as a PENDING claim: the agent can never write an approved claim. " +
+			"A proposal against an existing claim waits in the queue beside it, and only the approved claim injects until Rodrigo reviews.",
+		promptSnippet: "Propose a rule or fact (pending; a human approves it)",
+		promptGuidelines: [
+			"asOf is the date the claim became true. Never invent it and never default it to today — a wrong date silently outranks a real one.",
+			"scope: global only for a claim true everywhere; project:<id> for one repository (the id is in /memory status); path:<glob> for part of a tree.",
+			"One claim per call. A change to an existing key is a new proposal for that same key: never write 'superseded' or 'no longer' in a body.",
+			"A body that reads as status (SHAs, PR numbers, CI URLs, dated verbs) is refused and pointed at memory_log; overrideStatusCheck needs a reason.",
+			"Tag a rule 'always' only when it must be injected every turn; every other rule is injected when the request relates to it.",
+		],
+		parameters: Type.Object({
+			key: KEY,
+			kind: KIND,
+			scope: SCOPE,
+			asOf: ASOF,
+			source: Type.String({ description: "Where this came from: a person, a thread, a decision. Never filled in for you." }),
+			body: BODY,
+			aliases: LIST,
+			tags: LIST,
+			links: LIST,
+			origin: Type.Optional(Type.String({ description: "agent (default) | migration. Migration claims are never injected until approved." })),
+			overrideStatusCheck: Type.Optional(Type.Boolean({ description: "Insist the body is a rule or a fact after a status refusal." })),
+			overrideReason: Type.Optional(Type.String({ description: "Required with overrideStatusCheck; stored on the claim and shown in review." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const outcome = bank.proposeClaim(params as Parameters<Bank["proposeClaim"]>[0]);
+			if (params.overrideStatusCheck && outcome.ok) overridesThisSession++;
+			const against = outcome.data?.against;
+			if (outcome.ok && against !== undefined && bank.config().config.inlineConflictDialog && ctx.mode === "tui" && ctx.hasUI) {
+				// R19: one dialog, right away, beside the claim it would replace. It is
+				// awaited inside the tool call, so cancelling the call cancels the ask.
+				const decision = await decideNow(ctx, String(params.key), String(params.scope), against.body, String(params.body));
+				return toolResult(`${outcome.text}\n${decision}`, outcome, false);
+			}
+			return toolResult(outcome.text, outcome, !outcome.ok);
+		},
+	});
+
+	pi.registerTool({
+		name: "memory_archive",
+		label: "Memory Archive",
+		description:
+			"Move text that is neither a claim nor a daily item — leftover status prose from migration — into the read-only archive. " +
+			"Nothing is deleted: archives stay, are searchable, and are never injected.",
+		promptSnippet: "Archive leftover prose as read-only (searchable, never injected)",
+		parameters: Type.Object({
+			name: Type.String({ description: 'File name for the archive entry, e.g. "status-2026-W42".' }),
+			text: Type.String({ description: "The prose, as it was written." }),
+		}),
+		async execute(_id, params) {
+			const outcome = bank.archive(params.name, params.text);
+			return toolResult(outcome.text, outcome, !outcome.ok);
+		},
+	});
+
+	// ── The /memory command ──────────────────────────────────────────────────
 
 	pi.registerCommand("memory", {
-		description: "Memory bank: doctor | pending | resolve <id> | show <key> | files [dir] | daily",
+		description: "Memory: status, review, preview, doctor, trial, migration",
 		handler: async (args, ctx) => {
-			const service = createService(paths, ctx.hasUI ? { ask: askFactory(ctx) } : {});
-			const [subcommand, ...rest] = args.trim().split(/\s+/);
-
-			switch (subcommand) {
-				case undefined:
-				case "help":
-					return ctx.ui.notify("memory doctor | pending | resolve <id> | show <key> | files [dir] | daily", "info");
-				case "doctor": {
-					const report = service.doctor();
-					return ctx.ui.notify(`${formatDoctor(report)}\n\n${formatQueue(service.pending())}`, report.violations.length > 0 ? "warning" : "info");
-				}
-				case "pending":
-					return ctx.ui.notify(formatQueue(service.pending()), "info");
-				case "daily": {
-					const status = service.daily();
-					const rollover = service.rollDaily();
-					const extra = rollover.performed ? `\n\n${rollover.notice}` : rollover.reason === "the daily file is already current" ? "" : `\n\nNot rolled over: ${rollover.reason}`;
-					return ctx.ui.notify(`${formatDaily(service.daily())}${extra}`, rollover.performed ? "info" : "warning");
-				}
-				case "files": {
-					// The whole bank, not only the entry stores: a store listing answered
-					// "what is in the bank" with a list that hid half of it.
-					const outcome = service.listFiles(rest[0]);
-					if (outcome.kind === "outside") return ctx.ui.notify(`not inside the memory bank: ${rest[0] ?? ""}`, "error");
-					if (outcome.kind === "not-a-directory") return ctx.ui.notify(`not a directory: ${rest[0]} — memory_read ${rest[0]} reads the file`, "error");
-					if (outcome.kind === "missing") return ctx.ui.notify(`no such directory in the bank: ${rest[0]}`, "error");
-					return ctx.ui.notify(formatBankListing(outcome.listing, outcome.dir), "info");
-				}
-				case "show": {
-					if (!rest[0]) return ctx.ui.notify("memory show <key>", "error");
-					return ctx.ui.notify(formatKeyReport(service.show(rest[0], scopeContext(ctx))), "info");
-				}
-				case "resolve": {
-					const id = rest[0];
-					if (!id) return ctx.ui.notify("memory resolve <conflictId>", "error");
-					const queued = service.pending().conflicts.find((conflict) => conflict.id === id);
-					if (!queued) return ctx.ui.notify(`No pending conflict ${id}.`, "error");
-					const choice = ctx.hasUI ? await askNow(ctx, queued) : askByFlag(rest, queued);
-					if (choice === null) {
-						// No UI means no dialog, so the answer has to be spelled out here —
-						// and the contest has to be readable, or the flag is a blind choice.
-						const hint = ctx.hasUI
-							? ""
-							: `${renderConflict(queued)}\nPass --resolve=<${RESOLUTIONS.join("|")}>${queued.suggested ? ` (suggested: ${queued.suggested})` : ""}, optionally --merged=<text> and --note=<why>.`;
-						return ctx.ui.notify([`Left open. ${id} is still pending — nothing was written.`, hint].filter(Boolean).join("\n\n"), "warning");
-					}
-					const outcome = await service.resolveQueued(id, choice);
-					return ctx.ui.notify(formatOutcome(outcome), outcome.kind === "rejected" ? "error" : "info");
-				}
-				default:
-					return ctx.ui.notify(`Unknown subcommand "${subcommand}". Try: doctor | pending | resolve <id> | show <key> | files [dir] | daily`, "error");
-			}
+			const parts = args.trim().split(/\s+/).filter((part) => part !== "");
+			const sub = parts[0] ?? "status";
+			const rest = parts.slice(1);
+			const outcome = await dispatch(sub, rest, ctx);
+			if (outcome.text !== "") ctx.ui.notify(outcome.text.split("\n").slice(0, 40).join("\n"), outcome.ok ? "info" : "warning");
 		},
 	});
-}
 
-// ─── Asking, in the two ways Pi allows it ───────────────────────────────────
-
-async function askNow(ctx: ExtensionContext, conflict: PendingConflict, signal?: AbortSignal): Promise<ResolutionChoice | null> {
-	if (questionInFlight || signal?.aborted === true) return null;
-	questionInFlight = true;
-	try {
-		const shown = RESOLUTIONS.map((resolution) => RESOLUTION_LABELS[resolution] ?? resolution);
-		const picked = await ctx.ui.select(contestTitle(`Resolve ${conflict.id} — ${formatIdentity(conflict.identity)}`, conflict.incoming, conflict.candidates, conflict.explanation, conflict.id, conflict.suggested), shown, { signal: signal ?? ctx.signal });
-		if (picked === undefined) return null;
-		const resolution = RESOLUTIONS[shown.indexOf(picked)];
-		if (resolution === undefined) return null;
-
-		let mergedBody: string | undefined;
-		if (resolution === "merge") {
-			const typed = await ctx.ui.input(`Merge ${conflict.request.key} — type the one claim that replaces both`, sidesPreview(conflict.incoming, conflict.candidates), { signal: signal ?? ctx.signal });
-			if (!typed?.trim()) return null;
-			mergedBody = typed.trim();
+	async function dispatch(sub: string, rest: string[], ctx: ExtensionCommandContext): Promise<Outcome> {
+		switch (sub) {
+			case "status":
+				return bank.status(ctx.cwd);
+			case "help":
+				return { ok: true, text: HELP };
+			case "preview":
+				return bank.preview(rest.join(" "), ctx.cwd);
+			case "review":
+				return review(rest, ctx);
+			case "approve":
+			case "reject":
+			case "defer":
+			case "edit":
+				return reviewAction(sub, rest);
+			case "doctor":
+				return bank.doctor();
+			case "config":
+				return { ok: true, text: `config file: ${bank.paths.config}\n${describeConfigValue(bank)}` };
+			case "flag":
+				return bank.flag(rest[0] ?? "", (rest[1] ?? "stale") as "stale" | "rival", ctx.sessionManager.getSessionId());
+			case "flags":
+				return bank.flagsList();
+			case "trial":
+				return trial(rest);
+			case "migrate":
+				return migrate(rest, ctx);
+			case "paths":
+				return { ok: true, text: describePaths(bank.paths) };
+			default:
+				return { ok: false, text: `unknown /memory subcommand "${sub}" — try /memory help` };
 		}
-		const why = await ctx.ui.input(`Why (${resolution})?`, "one line, recorded as provenance — blank to skip", { signal: signal ?? ctx.signal });
-		return { resolution, ...(mergedBody ? { mergedBody } : {}), ...(why?.trim() ? { note: why.trim() } : {}) };
-	} finally {
-		questionInFlight = false;
+	}
+
+	function describeConfigValue(bank: Bank): string {
+		const { config, warnings } = bank.config();
+		const lines = [
+			`budget ${config.budgetTokens} tokens (core ${config.coreTokens}, daily ${config.dailyTokens}, retrieved the rest)`,
+			`pending claims are flagged after ${config.pendingFlagDays} days; inline conflict dialog ${config.inlineConflictDialog ? "on" : "off"}; ranker ${config.ranker}`,
+		];
+		for (const warning of warnings) lines.push(`warning: ${warning}`);
+		return lines.join("\n");
+	}
+
+	async function review(rest: string[], ctx: ExtensionCommandContext): Promise<Outcome> {
+		const wave = rest[0] === "--wave" ? (rest[1] as "agent" | "migration") : undefined;
+		const listed = bank.reviewList(wave === "agent" || wave === "migration" ? { wave } : {});
+		if (ctx.mode !== "tui" || !ctx.hasUI) {
+			return { ok: true, text: `${listed.text}\n\nNo dialog UI here: act with /memory approve|reject|defer|edit <key> [scope].` };
+		}
+		if (listed.pending.length === 0) return { ok: true, text: listed.text };
+
+		// One dialog at a time: Pi has a single dialog slot, and a second question
+		// opened over the first leaves the first awaiting a dialog that is gone.
+		const acted: string[] = [];
+		for (const entry of listed.pending) {
+			const title = `${entry.claim.key} @ ${entry.claim.scope}`;
+			// Pi's select has no signal parameter in this version; the loop still ends
+			// as soon as the dialog returns nothing (dismissed or aborted).
+			const choice = await ctx.ui.select(`Review ${title}`, ["approve", "reject", "edit the wording", "defer", "stop here"]);
+			if (choice === undefined || choice === "stop here") {
+				return { ok: true, text: `${acted.length > 0 ? acted.join("\n") : "Review stopped."}\n\n${listed.text}` };
+			}
+			let body: string | undefined;
+			if (choice === "edit the wording") {
+				const edited = await ctx.ui.editor(`Edit ${title}`, entry.claim.body);
+				if (edited === undefined) continue;
+				body = edited;
+			}
+			const action = choice === "approve" ? "approve" : choice === "reject" ? "reject" : choice === "defer" ? "defer" : "edit";
+			const outcome = bank.review(action, entry.claim.key, entry.claim.scope, body);
+			acted.push(outcome.text);
+		}
+		return { ok: true, text: acted.join("\n") };
+	}
+
+	function reviewAction(action: "approve" | "reject" | "defer" | "edit", rest: string[]): Outcome {
+		const key = rest[0] ?? "";
+		if (key === "") return { ok: false, text: "usage: /memory approve|reject|defer|edit <key> [scope]" };
+		const scope = rest[1] ?? "";
+		if (action === "edit") {
+			const body = rest.slice(2).join(" ");
+			if (body === "") return { ok: false, text: "usage: /memory edit <key> [scope] <new body>" };
+			return bank.review("edit", key, scope, body);
+		}
+		return bank.review(action, key, scope);
+	}
+
+	/**
+	 * R19. Reached only when `inlineConflictDialog` is on and an approved claim would be
+	 * replaced. Anything but an explicit choice leaves the claim pending: the safe
+	 * answer is to defer to /memory review.
+	 */
+	async function decideNow(ctx: Pick<ExtensionToolContext, "ui" | "mode" | "hasUI">, key: string, scope: string, approved: string, proposed: string): Promise<string> {
+		const clip = (text: string): string => (text.length > 70 ? `${text.slice(0, 67)}…` : text);
+		const choice = await ctx.ui.select?.(
+			`memory: ${key} @ ${scope} — replace the approved claim?`,
+			[`keep: ${clip(approved)}`, `replace with: ${clip(proposed)}`, "decide later in /memory review"],
+		);
+		if (choice === undefined || choice === "decide later in /memory review") return "left pending: it will show in /memory review";
+		const selected = choice.startsWith("keep") ? bank.review("reject", key, scope) : bank.review("approve", key, scope);
+		return `decided now: ${selected.text}`;
+	}
+	function trial(rest: string[]): Outcome {
+		const what = rest[0] ?? "report";
+		if (what === "baseline") {
+			const days = flagValue(rest, "--days");
+			const marker = flagValue(rest, "--marker");
+			const sessionsDir = flagValue(rest, "--sessions-dir");
+			return bank.baseline({ days: days === undefined ? undefined : Number(days), marker, sessionsDir });
+		}
+		const days = rest[0] === "report" ? flagValue(rest, "--days") : rest[0];
+		return bank.reportTrial(days === undefined ? undefined : Number(days));
+	}
+
+	function migrate(rest: string[], ctx: ExtensionCommandContext): Outcome {
+		const step = rest[0] ?? "status";
+		switch (step) {
+			case "backup":
+				// Async, but the command handler is awaited by Pi.
+				void bank.migrateBackup().then((outcome) => ctx.ui.notify(outcome.text, outcome.ok ? "info" : "warning"));
+				return { ok: true, text: "backup started: it writes a tarball of the bank and lists it back before anything else is unlocked" };
+			case "plan":
+				return bank.migratePlan();
+			case "status":
+				return bank.migrateStatus();
+			case "draft": {
+				const positional = rest[1] !== undefined && !rest[1].startsWith("--") ? rest[1] : undefined;
+				const batch = flagValue(rest, "--batch");
+				return bank.migrateDraft({
+					wave: flagValue(rest, "--wave") ?? positional,
+					file: flagValue(rest, "--file"),
+					batch: batch === undefined ? undefined : Number(batch),
+				});
+			}
+			case "next":
+				// Alias for a single-file draft brief.
+				return bank.migrateDraft({ wave: rest[1] });
+			case "drafted":
+				return bank.migrateDrafted(rest[1] ?? "", Number(rest[2] ?? 0));
+			case "cutover":
+				return bank.migrateCutover();
+			default:
+				return { ok: false, text: `unknown /memory migrate step "${step}" — backup | plan | status | draft [--wave w] [--file f] [--batch n] | drafted <file> <n> | cutover` };
+		}
 	}
 }
 
-/** No-UI path: the decision has to arrive on the command line. */
-function askByFlag(rest: string[], conflict: PendingConflict): ResolutionChoice | null {
-	const index = rest.findIndex((token) => token.startsWith("--resolve="));
-	// Nothing is guessed: `suggested` is a hint, not an answer.
-	if (index === -1) return null;
-	const resolution = RESOLUTIONS.find((candidate) => candidate === rest[index]!.slice("--resolve=".length));
-	if (resolution === undefined) return null;
-	const merged = rest.find((token) => token.startsWith("--merged="));
-	const note = rest.find((token) => token.startsWith("--note="));
-	return { resolution, ...(merged ? { mergedBody: merged.slice("--merged=".length) } : {}), ...(note ? { note: note.slice("--note=".length) } : {}) };
+function flagValue(parts: string[], name: string): string | undefined {
+	const at = parts.indexOf(name);
+	return at >= 0 ? parts[at + 1] : undefined;
 }
 
-// ─── Formatting ─────────────────────────────────────────────────────────────
+const HELP = `memory:
+  status                     bank, project id, config, counts, daily freshness
+  preview [prompt]           the exact block a turn would get, with tokens per section
+  review [--wave agent|migration]
+                             walk the pending claims (dialog in the TUI, listing elsewhere)
+  approve|reject|defer <key> [scope]
+  edit <key> [scope] <body>
+  doctor                     what is wrong with the bank, if anything
+  config | paths
+  flag <key> stale|rival     mark an injected claim as stale or rival (trial input)
+  flags                      every flag recorded
+  trial [days] | trial baseline [--days n] [--marker text] [--sessions-dir path]
+  migrate backup | plan | status
+  migrate draft [--wave rules|facts:<domain>] [--file <name> | --batch <n>]
+  migrate drafted <file> <n> | migrate cutover
 
-/** What an unanswered contest looks like in the per-turn notice: both claims, in the
- *  space a prompt can spare. One line of "there is a conflict" is not enough for the
- *  human to decide, and the agent relaying it needs something to relay. */
-function describePendingForPrompt(conflict: PendingConflict): string {
-	const others = conflict.candidates.length > 1 ? ` (+${conflict.candidates.length - 1} more)` : "";
-	return [
-		`- ${conflict.id}: ${formatIdentity(conflict.identity)} in ${conflict.file} (asked ${conflict.createdAt})`,
-		`  the bank says: ${conflict.candidates[0] ? clip(conflict.candidates[0].body, 200) : "(no live claim)"}${others}`,
-		`  being written: ${clip(conflict.incoming.body, 200)}`,
-		`  why: ${clip(conflict.explanation.split(" Re-invoke with resolve:")[0] ?? conflict.explanation, 120)}`,
-		`  full text: memory_show ${conflict.request.key}. Decide with /memory resolve ${conflict.id}, or memory_write + resolve + conflictId — and do not pick a winner yourself.`,
-	].join("\n");
-}
+Writes are memory_log (the daily log) and memory_propose (a pending claim).
+memory_read, memory_search and memory_list keep their old names.`;
 
-/** `describeAge` lives in `rollover.ts`: one calendar for the notice, the doctor and the prompt. */
-
-	// The two sides, the rule that refused the write, and how to defer: what a person
-	// needs in order to choose. Options alone are not a decision they can make.
-
-/** The two sides, the rule that refused the write, and how to defer: what a person
- *  needs in order to choose. Options alone are not a decision they can make. */
-function contestTitle(headline: string, incoming: ContestSide, candidates: ContestSide[], explanation: string, conflictId: string, suggested?: Resolution): string {
-	const contest = formatContest({ incoming, candidates, explanation }, { truncate: 300 });
-	// A hint, not an answer: shown so the human knows what the dates alone would have
-	// decided, and ignorable just as legitimately.
-	return [headline, "", contest, "", `Esc leaves it queued — /memory resolve ${conflictId}. Nothing is written until you choose.${suggested ? ` (the dates alone would suggest: ${suggested})` : ""}`].join("\n");
-}
-
-/** The two claims, one line each: what a merge has to reconcile, in view while typing. */
-function sidesPreview(incoming: ContestSide, candidates: ContestSide[]): string {
-	const one = (side: ContestSide) => side.body.replace(/\s+/g, " ").slice(0, 120);
-	return [`bank: ${one(candidates[0] ?? { heading: "", body: "(none)" })}`, `new:   ${one(incoming)}`].join("\n");
-}
-
-
-/** `details` is the structured outcome: logs and renderers get the real shape
- *  instead of a re-derivation from the text the model reads. */
-function toolResult<T>(text: string, details: T, isError = false): AgentToolResult<T> {
-	return { content: [{ type: "text", text }], details, isError };
-}
-
-function formatOutcome(outcome: WriteOutcome): string {
-	const lines = [outcome.summary];
-	if (outcome.contest) lines.push("", outcome.contest);
-	if (outcome.instructions) lines.push("", outcome.instructions);
-	if (outcome.warnings?.length) lines.push("", ...outcome.warnings.map((warning) => `warning: ${warning}`));
-	if (outcome.issues?.length) lines.push("", ...outcome.issues.map((issue) => `${issue.severity} [${issue.code}] ${issue.message}`));
-	return lines.join("\n");
-}
-
-function formatKeyReport(report: KeyReport): string {
-	if (report.claims.length === 0) return `No claims for "${report.key}".`;
-
-	const lines = [report.contested ? `CONTESTED: "${report.key}" has no authority — the store holds more than one live claim.` : `Authority for "${report.key}": ${report.authority ? `${report.authority.path}#${report.authority.heading}` : "none injectable"}`];
-	lines.push("", "Claims:");
-	for (const entry of report.claims) {
-		lines.push(`- ${entry.path}#${entry.heading} [${entry.status}] ${entry.kind} · ${entry.scope.level}${entry.asOf ? ` · ${entry.asOf}` : ""}${entry.supersededBy ? ` → superseded by ${entry.supersededBy}` : ""}`);
-		lines.push(`    ${entry.body.replace(/\s+/g, " ")}`);
-	}
-	if (report.plan && report.plan.shadowed.length > 0) {
-		lines.push("", "Shadowed for this context:");
-		for (const shadow of report.plan.shadowed) lines.push(`- ${shadow.entry.path}#${shadow.entry.heading}: ${shadow.reason}${shadow.by ? ` (by ${shadow.by.path}#${shadow.by.heading})` : ""}`);
-	}
-	if (report.plan && report.plan.outOfScope.length > 0) {
-		lines.push("", "Out of scope here:");
-		for (const shadow of report.plan.outOfScope) lines.push(`- ${shadow.entry.path}#${shadow.entry.heading}: ${shadow.reason}`);
-	}
-	return lines.join("\n");
-}
-
-function formatCandidates(hits: Candidate[]): string {
-	if (hits.length === 0) return "No candidate entries matched.";
-	return [
-		`${hits.length} candidate(s). Candidates are not answers — check the authority with memory_show.`,
-		...hits.map((hit) => `- ${hit.entry.path}#${hit.entry.heading} [${hit.entry.status}] ${hit.entry.kind} · ${hit.entry.scope.level}${hit.entry.asOf ? ` · ${hit.entry.asOf}` : ""} — matched: ${hit.matched.join(", ")}`),
-	].join("\n");
-}
-
-function formatDoctor(report: DoctorReport): string {
-	const lines = [
-		`Bank: ${report.bankRoot}`,
-		`Entry stores: ${report.files.length}; entries: ${report.entries} (active ${report.byStatus.active}, superseded ${report.byStatus.superseded}, withdrawn ${report.byStatus.withdrawn})`,
-	];
-	if (report.contested.length > 0) lines.push("", "Contested identities:", ...report.contested.map((entry) => `- ${entry.identity}: ${entry.candidates.join(", ")}`));
-	if (report.violations.length > 0) lines.push("", "Violations:", ...report.violations.map((violation) => `- ${violation.code} ${violation.path}#${violation.key ?? ""}: ${violation.message}`));
-	if (report.unkeyed.length > 0) lines.push("", "Headings that are not assertion keys:", ...report.unkeyed.map((entry) => `- ${entry}`));
-	if (report.unreadable.length > 0) lines.push("", "Unreadable files:", ...report.unreadable.map((problem) => `- ${problem.path}: ${problem.error}`));
-	if (report.tempFiles.length > 0) lines.push("", "Leftover temp files (an interrupted write):", ...report.tempFiles.map((file) => `- ${file}`));
-	if (report.emptyFiles.length > 0) lines.push("", "Stores with no entries:", ...report.emptyFiles.map((file) => `- ${file}`));
-
-	// The hand-written files belong to the bank too, and this is where a file nothing
-	// reads becomes visible: "absent", or "3 of 40 lines shown", is the evidence.
-	const state = report.workingState;
-	lines.push(
-		"",
-		"Working state (injected, never authoritative):",
-		`- ${ACTIVE_PROJECTS_FILE}: ${state.activeProjects.exists ? `${state.activeProjects.shownLines}/${state.activeProjects.lines} lines shown, ${state.activeProjects.tokens} tokens` : "absent"}`,
-		`- ${DAILY_FILE}: ${state.daily.exists ? `${state.daily.shownItems}/${state.daily.items} open items shown, ${state.daily.tokens} tokens, ${describeAge(state.daily.ageDays)}${state.daily.needsDate ? " (date inferred from mtime)" : ""}` : "absent"}`,
-	);
-	if (report.contested.length === 0 && report.violations.length === 0 && report.unkeyed.length === 0 && report.unreadable.length === 0 && report.tempFiles.length === 0) lines.push("", "No structural problems found.");
-	return lines.join("\n");
-}
-
-function formatDaily(status: DailyStatus): string {
-	if (!status.exists) return "Daily context: no core/dailyContext.md yet.";
-	const { date, ageDays, stale, needsDate } = status.freshness;
-	const when = date === null ? "undated" : `${date.date}${date.source === "mtime" ? " (dated by file mtime)" : ""}`;
-	const age = ageDays === null ? "" : ` (${describeAge(ageDays)})`;
-	return `Daily context: ${when}${age}${stale ? " — stale; it will be archived and carried at the next session start" : ""}${needsDate ? " — add a `- date: YYYY-MM-DD` line so rollover does not have to guess" : ""}.`;
-}
-
-/** The whole bank in one view: stores, working files, archives — with sizes. */
-function formatBankListing(listing: BankListing, dir: string): string {
-	const lines = listing.entries.map((entry) =>
-		entry.directory ? entry.path : `${entry.path}  ${entry.chars ?? "?"} chars${entry.modified ? `  ${entry.modified}` : ""}`,
-	);
-	const note = listing.truncated
-		? `\n_List stopped at the ${listing.truncatedBecause === "limit" ? "entry limit" : "directory depth limit"} — pass a narrower directory._`
-		: "";
-	return `${dir === "." || dir === "" ? "Memory bank" : dir}: ${listing.entries.length} entries\n${lines.join("\n")}${note}`;
-}
-
-function formatQueue(queue: PendingList): string {
-	if (queue.conflicts.length === 0 && queue.corrupt.length === 0) return "Pending conflicts: none.";
-	const lines = [`Pending conflicts: ${queue.conflicts.length}`];
-	for (const conflict of queue.conflicts) {
-		lines.push("", `${conflict.id} — ${formatIdentity(conflict.identity)} (asked ${conflict.createdAt}, aimed at ${conflict.file})`, `Incoming: ${conflict.incoming.body.replace(/\s+/g, " ")}`);
-		for (const candidate of conflict.candidates) lines.push(`Live: ${candidate.path}#${candidate.heading}${candidate.asOf ? ` (${candidate.asOf})` : ""}: ${candidate.body.replace(/\s+/g, " ")}`);
-		lines.push(`Suggested: ${conflict.suggested}. Answer with memory_write + resolve + conflictId, or /memory resolve ${conflict.id}.`);
-	}
-	if (queue.corrupt.length > 0) lines.push("", "Unreadable queue files:", ...queue.corrupt.map((problem) => `- ${problem.file}: ${problem.error}`));
-	return lines.join("\n");
-}
+export { HELP as MEMORY_HELP };

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { ExtensionPicker, type ExtensionPickerResult } from "../extensions/rl-extensions/picker.ts";
 import { getAvailableExtensions, getMonorepoRoot, setExtensionsDirForTesting } from "../extensions/symlink-manager.ts";
@@ -23,9 +23,10 @@ interface PickerHarness {
 	close(): void;
 }
 
-function createPickerHarness(terminalRows = 40, terminalCols = 80): PickerHarness {
+function createPickerHarness(terminalRows = 40, terminalCols = 80, prepare?: (extensionsDir: string) => void): PickerHarness {
 	const dir = mkdtempSync(join(tmpdir(), "rl-picker-test-"));
 	setExtensionsDirForTesting(dir);
+	prepare?.(dir);
 	const theme = {
 		fg: (_style: string, text: string) => text,
 		bg: (_style: string, text: string) => text,
@@ -691,6 +692,37 @@ test("picker: Enter reports each queued enable as a change", () => {
 		);
 	} finally {
 		harness.close();
+	}
+});
+
+test("picker: a name another component holds is refused, and its link is left alone (R42)", () => {
+	const foreign = mkdtempSync(join(tmpdir(), "rl-picker-foreign-"));
+	try {
+		const catalog = getAvailableExtensions(getMonorepoRoot());
+		const memoryIndex = catalog.findIndex((ext) => ext.name === "memory");
+		assert.ok(memoryIndex >= 0, "the catalog lists memory");
+
+		let extensionsDir = "";
+		const harness = createPickerHarness(40, 80, (dir) => {
+			extensionsDir = dir;
+			symlinkSync(foreign, join(dir, "memory"), "dir");
+		});
+		try {
+			// memory is enabled through the foreign link, so Space queues a disable:
+			// the destructive case. Applying it must refuse and keep the link.
+			for (let i = 0; i < memoryIndex; i++) harness.picker.handleInput("down");
+			harness.picker.handleInput(" ");
+			harness.picker.handleInput("enter");
+			assert.equal(harness.result?.kind, "apply");
+			const errors = harness.result?.kind === "apply" ? harness.result.errors : [];
+			assert.equal(errors.length, 1, "the refusal is reported per extension");
+			assert.match(errors[0]!, /memory: ~\/\.pi\/agent\/extensions\/memory already points at .*, which this picker did not create — remove it by hand/);
+			assert.equal(resolve(readlinkSync(join(extensionsDir, "memory"))), resolve(foreign), "the foreign link is untouched");
+		} finally {
+			harness.close();
+		}
+	} finally {
+		rmSync(foreign, { recursive: true, force: true });
 	}
 });
 
