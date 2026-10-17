@@ -19,6 +19,7 @@ test("config: the defaults are the spec's defaults", () => {
 		budgetTokens: 2000,
 		coreTokens: 600,
 		dailyTokens: 500,
+		maxRetrievedClaims: 6,
 		pendingFlagDays: 14,
 		inlineConflictDialog: false,
 		ranker: "bm25",
@@ -57,6 +58,7 @@ test("config: every invalid value falls back to its default with a warning", () 
 			JSON.stringify({
 				budgetTokens: "big",
 				coreTokens: -5,
+				maxRetrievedClaims: -1,
 				pendingFlagDays: 0,
 				searchLimit: 5000,
 				inlineConflictDialog: "yes",
@@ -69,6 +71,7 @@ test("config: every invalid value falls back to its default with a warning", () 
 		assert.deepEqual(result.warnings, [
 			`${file}: budgetTokens must be a whole number — using 2000`,
 			`${file}: coreTokens=-5 is outside 0..20000 — using 600`,
+			`${file}: maxRetrievedClaims=-1 is outside 0..200 — using 6`,
 			`${file}: pendingFlagDays=0 is outside 1..3650 — using 14`,
 			`${file}: searchLimit=5000 is outside 1..100 — using 12`,
 			`${file}: inlineConflictDialog must be true or false — using false`,
@@ -109,11 +112,29 @@ test("config: sections that do not fit the budget are capped, and it is said", (
 	}
 });
 
+test("config: the recall cap is validated, and 0 means the budget is the only limit (R27.4)", () => {
+	const { file, paths, cleanup } = scratchFile();
+	try {
+		writeFileSync(file, JSON.stringify({ maxRetrievedClaims: 0 }));
+		const off = loadConfig(paths);
+		assert.equal(off.config.maxRetrievedClaims, 0);
+		assert.deepEqual(off.warnings, []);
+
+		writeFileSync(file, JSON.stringify({ maxRetrievedClaims: "few" }));
+		const words = loadConfig(paths);
+		assert.equal(words.config.maxRetrievedClaims, DEFAULT_CONFIG.maxRetrievedClaims);
+		assert.deepEqual(words.warnings, [`${file}: maxRetrievedClaims must be a whole number — using 6`]);
+	} finally {
+		cleanup();
+	}
+});
+
 test("config: describeConfig says what a session will actually get", () => {
 	assert.equal(
 		describeConfig({ ...DEFAULT_CONFIG, budgetTokens: 1000, coreTokens: 300, dailyTokens: 200 }),
-		"budget 1000 tokens (core 300, daily 200, retrieved 500), pending flag after 14 days, inline conflict dialog off, ranker bm25",
+		"budget 1000 tokens (core 300, daily 200, retrieved 500), retrieved claims at most 6 per turn, pending flag after 14 days, inline conflict dialog off, ranker bm25",
 	);
+	assert.match(describeConfig({ ...DEFAULT_CONFIG, maxRetrievedClaims: 0 }), /retrieved claims at most unbounded per turn/);
 });
 
 test("config: applyConfig is usable without a file, for tests and /memory config", () => {

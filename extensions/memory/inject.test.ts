@@ -172,8 +172,9 @@ test("inject: unused core and daily budget flows to retrieval (R27)", () => {
 	const claims: Claim[] = [];
 	for (let i = 0; i < 12; i++) claims.push(claim(`always.rule${i}`, { body: `an always rule about git flow number ${i} with padding`, tags: ["always"] }));
 	for (let i = 0; i < 12; i++) claims.push(claim(`other.rule${i}`, { body: `another related rule about git flow ${i}` }));
-	const fullCore = inject(claims, { query: "git flow", config: { budgetTokens: 500, coreTokens: 400, dailyTokens: 0 } });
-	const smallCore = inject(claims, { query: "git flow", config: { budgetTokens: 500, coreTokens: 80, dailyTokens: 0 } });
+	// The count cap is off here: this test is about tokens moving between sections.
+	const fullCore = inject(claims, { query: "git flow", config: { budgetTokens: 500, coreTokens: 400, dailyTokens: 0, maxRetrievedClaims: 0 } });
+	const smallCore = inject(claims, { query: "git flow", config: { budgetTokens: 500, coreTokens: 80, dailyTokens: 0, maxRetrievedClaims: 0 } });
 	assert.ok(fullCore.tokens.core > smallCore.tokens.core, "the core section really is bigger");
 	assert.ok(smallCore.tokens.retrieved > fullCore.tokens.retrieved, "what the core section did not spend is spent on retrieval");
 	assert.ok(fullCore.tokens.total <= 500 && smallCore.tokens.total <= 500);
@@ -195,10 +196,57 @@ test("inject: the drop notice counts by kind and names memory_search (R29)", () 
 	assert.equal(dropNotice(3, 2, 1, 4), "Not shown for the budget: 3 claims (2 rules, 1 fact), 4 open daily items — use memory_search to find them.");
 	const claims: Claim[] = [];
 	for (let i = 0; i < 30; i++) claims.push(claim(`t${i}.rule`, { kind: i % 3 === 0 ? "fact" : "rule", body: `git flow thing ${i}` }));
-	const result = inject(claims, { query: "git flow", config: { budgetTokens: 300, coreTokens: 0, dailyTokens: 0 } });
+	const result = inject(claims, { query: "git flow", config: { budgetTokens: 300, coreTokens: 0, dailyTokens: 0, maxRetrievedClaims: 0 } });
+	assert.equal(result.cappedClaims, 0, "no count cap: every drop came from the budget");
 	assert.ok(result.dropped.rule + result.dropped.fact > 0);
 	assert.equal(result.dropped.rule + result.dropped.fact, 30 - result.injected.length);
 	assert.match(result.text, new RegExp(`Not shown for the budget: ${result.dropped.rule + result.dropped.fact} claims \\(${result.dropped.rule} rules, ${result.dropped.fact} facts\\)`));
+});
+
+test("inject: the recall cap bounds how many claims one turn gets, whatever the budget leaves (R27.4)", () => {
+	const claims: Claim[] = [];
+	for (let i = 0; i < 12; i++) claims.push(claim(`git.t${i}`, { body: `git flow rule number ${i}` }));
+	const result = inject(claims, { query: "git flow", config: { coreTokens: 0, dailyTokens: 0, maxRetrievedClaims: 3 } });
+	assert.equal(result.injected.length, 3, "three retrieved claims, and the rest of the budget goes unused");
+	assert.equal(result.cappedClaims, 9);
+	assert.equal(result.dropped.rule + result.dropped.fact, 9);
+	assert.ok(result.tokens.total < result.budget, "the budget is a ceiling, not a quota");
+	assert.match(result.text, /Not shown: 9 claims \(9 rules, 0 facts\) — past the 3-claim recall cap — use memory_search to find them\./);
+});
+
+test("inject: a cap of 0 leaves the token budget as the only limit", () => {
+	const claims: Claim[] = [];
+	for (let i = 0; i < 12; i++) claims.push(claim(`git.t${i}`, { body: `git flow rule number ${i}` }));
+	const capped = inject(claims, { query: "git flow", config: { coreTokens: 0, dailyTokens: 0, maxRetrievedClaims: 0 } });
+	const limited = inject(claims, { query: "git flow", config: { coreTokens: 0, dailyTokens: 0, maxRetrievedClaims: 3 } });
+	assert.ok(capped.injected.length > limited.injected.length, "uncapped recall keeps filling while the budget has room");
+	assert.equal(capped.cappedClaims, 0);
+});
+
+test("inject: the cap counts dropped claims and says which limit stopped them (R29)", () => {
+	const claims: Claim[] = [];
+	for (let i = 0; i < 20; i++) claims.push(claim(`git.t${i}`, { kind: i % 2 === 0 ? "rule" : "fact", body: `git flow rule number ${i}` }));
+	// A cap tighter than the budget: the cap did the dropping, and the notice says so.
+	const byCap = inject(claims, { query: "git flow", config: { coreTokens: 0, dailyTokens: 0, maxRetrievedClaims: 2 } });
+	assert.match(byCap.text, /Not shown: 18 claims \(9 rules, 9 facts\) — past the 2-claim recall cap — use memory_search to find them\./);
+	// A budget tighter than the cap: the notice stays honest about the budget.
+	const byBudget = inject(claims, { query: "git flow", config: { budgetTokens: 320, coreTokens: 0, dailyTokens: 0, maxRetrievedClaims: 0 } });
+	assert.match(byBudget.text, /Not shown for the budget: \d+ claims/);
+	const preview = formatPreview(byCap);
+	assert.match(preview, /recall cap: 18 claim\(s\) stopped by the per-turn count cap, not by the token budget/);
+});
+
+test("inject: the recall cap does not touch the always-on core section (R27.1 vs R27.4)", () => {
+	const core = ["a", "b", "c", "d", "e", "f", "g", "h"].map((name) => claim(`core.${name}`, { tags: ["always"], body: `always-on rule ${name}` }));
+	const rest = [1, 2, 3, 4, 5].map((n) => claim(`other.${n}`, { body: `matching rule ${n}` }));
+	const result = inject([...core, ...rest], { query: "matching rule", config: { maxRetrievedClaims: 2 } });
+	assert.equal(core.filter((entry) => result.injected.some((shown) => shown.key === entry.key)).length, 8, "every always-on rule is still injected");
+	assert.equal(result.injected.filter((shown) => shown.key.startsWith("other.")).length, 2);
+});
+
+test("inject: dropNotice names the cap and the budget separately", () => {
+	assert.equal(dropNotice(9, 5, 4, 0, 9, 3), "Not shown: 9 claims (5 rules, 4 facts) — past the 3-claim recall cap — use memory_search to find them.");
+	assert.equal(dropNotice(9, 5, 4, 0, 4, 3), "Not shown: 9 claims (5 rules, 4 facts) — 4 claims past the 3-claim recall cap, 5 more past the token budget — use memory_search to find them.");
 });
 
 test("inject: daily items are dropped whole and counted (R29)", () => {

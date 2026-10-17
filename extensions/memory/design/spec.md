@@ -91,6 +91,11 @@ in its constraints) and Pi's extension API docs (`session_start` and `before_age
   2. **Daily open items:** `in_progress` and `carry`, at most 500 tokens.
   3. **Retrieved claims:** the remainder.
   Unused budget from 1 and 2 flows to 3.
+  4. **A count cap on retrieval (D18):** at most `maxRetrievedClaims` retrieved claims per turn
+     (default 6; `0` disables the cap). The token budget alone does not bound the block: once the
+     bank holds dozens of claims the remainder is always spent, so a turn's cost tracks the budget
+     rather than the work in front of it. Claims the cap stops are counted and named like any other
+     cut (R29), and the drop line says which limit stopped them.
 - R28. Which claims may be injected (D1, D9):
   - approved claims: yes;
   - a pending claim whose identity has an approved claim: no, only the approved claim is injected;
@@ -292,3 +297,4 @@ flowchart LR
 | D15 | Caller changes | One-time read-only inventory by the assistant before cutover; Rodrigo edits. | R40.0, R40.1 |
 | D16 | Migration effort | A whole wave is drafted by one command (`/memory migrate apply`) and reviewed as a batch (`--wave`), because one entry per turn would spend a day on migration. Refusals are reported, never quietly kept. | R18, R25, R37, R38 |
 | D17 | Review surface | A custom card, not `ui.select`: the claim's own words and its rival are on screen, and the whole batch is one dialog. | R18.1, R18.2 |
+| D18 | Recall size | Retrieved claims are capped per turn (default 6), not bounded by tokens alone: with the bank at 54 approved claims every prompt spent the whole 2000-token budget, so the trial's go bar (25% of an 880-token baseline) was unreachable by construction. | R27.4, R45 |

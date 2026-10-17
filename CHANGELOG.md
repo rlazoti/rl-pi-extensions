@@ -52,9 +52,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The review notice named only the oldest pending claim; the largest batch (agent-proposed vs.
   migrated) is now named and counted.
 
+### Changed (memory, second pass)
+
+- Retrieval is capped per turn, not bounded by tokens alone: `maxRetrievedClaims` (default 6, `0`
+  disables it, spec R27.4 / D18). With 54 approved claims every prompt spent the whole 2000-token
+  budget, so the trial's go bar (25% of the measured 880-token baseline) could not be reached.
+  Claims the cap stops are counted and named like any other cut, and the drop line says whether the
+  cap or the budget stopped them.
+
 ### Tests (memory, second pass)
 
-- +32 memory tests (182 total, 659 in the suite).
+- +39 memory tests (189 total, 666 in the suite).
 
 ## [1.5.0] - 2026-10-16
 

@@ -118,12 +118,16 @@ Budget `budgetTokens` (default **2000**), and the total never exceeds it:
 
 1. **Always-on core** — approved, in-scope rules tagged `always`, at most `coreTokens` (600).
 2. **Daily open items** — `in_progress` and `carry`, at most `dailyTokens` (500).
-3. **Retrieved claims** — the remainder, BM25-ranked against the prompt.
+3. **Retrieved claims** — the remainder, BM25-ranked against the prompt, at most
+   `maxRetrievedClaims` of them (6; `0` disables the cap).
 
-Unused budget from 1 and 2 flows to 3. Nothing is cut silently: an entry is never
+Unused budget from 1 and 2 flows to 3. The count cap exists because the token
+budget alone does not bound the block: once the bank holds dozens of claims the
+remainder is always spent, and a turn then costs the budget rather than the work
+in front of it. Nothing is cut silently: an entry is never
 split, and if anything is dropped the block ends with how many, of which kind,
-and to use `memory_search`. A read error **fails open**: no injection, one
-visible warning, the turn proceeds.
+which limit stopped them, and to use `memory_search`. A read error **fails open**:
+no injection, one visible warning, the turn proceeds.
 
 `/memory preview [prompt]` prints the exact block a turn would get, with tokens
 per section and what was dropped.
@@ -185,6 +189,7 @@ leaves the claim pending.
   "budgetTokens": 2000,
   "coreTokens": 600,
   "dailyTokens": 500,
+  "maxRetrievedClaims": 6,
   "pendingFlagDays": 14,
   "inlineConflictDialog": false,
   "ranker": "bm25",

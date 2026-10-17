@@ -66,6 +66,8 @@ export interface InjectionResult {
 	sections: InjectionSection[];
 	tokens: { core: number; daily: number; retrieved: number; total: number };
 	dropped: { rule: number; fact: number; dailyItems: number; total: number };
+	/** Claims recall stopped at the count cap rather than at the budget (R27.4). */
+	cappedClaims: number;
 	/** Why a claim was not injected or not eligible, for `/memory preview`. */
 	excluded: ExcludedClaim[];
 	/** Identities with rival approved claims: nothing was asserted for them (R12). */
@@ -83,12 +85,23 @@ export function formatClaim(claim: Claim, label?: string): string {
 	return `- [${claim.kind} · ${claim.scope} · ${claim.asOf}]${tag} ${claim.key}: ${claim.body}`;
 }
 
-/** The line that reports what did not fit (R29). Reserved in the budget up front. */
-export function dropNotice(droppedClaims: number, rules: number, facts: number, droppedItems: number): string {
+/**
+ * The line that reports what did not fit (R29). Reserved in the budget up front.
+ *
+ * Two different things can stop a claim: the token budget, and the recall cap
+ * (R27.4). A reader told "for the budget" when a cap did it goes looking for the
+ * wrong number to raise, so the line names both.
+ */
+export function dropNotice(droppedClaims: number, rules: number, facts: number, droppedItems: number, cappedClaims = 0, recallCap = 0): string {
 	const parts: string[] = [];
 	const plural = (count: number, word: string): string => `${count} ${word}${count === 1 ? "" : "s"}`;
 	if (droppedClaims > 0) parts.push(`${plural(droppedClaims, "claim")} (${plural(rules, "rule")}, ${plural(facts, "fact")})`);
 	if (droppedItems > 0) parts.push(`${plural(droppedItems, "open daily item")}`);
+	if (cappedClaims > 0) {
+		const byBudget = droppedClaims - cappedClaims;
+		const why = byBudget > 0 ? `${plural(cappedClaims, "claim")} past the ${recallCap}-claim recall cap, ${byBudget} more past the token budget` : `past the ${recallCap}-claim recall cap`;
+		return `Not shown: ${parts.join(", ")} — ${why} — use memory_search to find them.`;
+	}
 	return `Not shown for the budget: ${parts.join(", ")} — use memory_search to find them.`;
 }
 
@@ -237,24 +250,30 @@ export function buildInjection(input: InjectionInput): InjectionResult {
 	const coreChosen = new Set(coreFill.chosen.map((candidate) => identityOf(candidate.claim)));
 	const pool = selected.candidates.filter((candidate) => !coreChosen.has(identityOf(candidate.claim)));
 	const header = headerFor(input.ctx.projectId);
-	const reserve = tokensOf(header) + tokensOf(dropNotice(pool.length, 0, 0, open.length));
-	const retrievedCap = Math.max(0, input.config.budgetTokens - coreFill.section.tokens - dailySection.tokens - reserve);
 	// An unapproved proposal ranks below every approved claim (R28).
 	const approvedPool = pool.filter((candidate) => candidate.claim.state === "approved");
 	const pendingPool = pool.filter((candidate) => candidate.claim.state !== "approved");
-	const ranked = [
+	const rankedAll = [
 		...ranker.rank(input.query, approvedPool.map((candidate) => candidate.claim)).map((hit) => approvedPool.find((candidate) => identityOf(candidate.claim) === identityOf(hit.entry))!),
 		...ranker.rank(input.query, pendingPool.map((candidate) => candidate.claim)).map((hit) => pendingPool.find((candidate) => identityOf(candidate.claim) === identityOf(hit.entry))!),
 	];
+	// R27.4: a count cap on recall. The token budget does not bound the block on
+	// its own — with a bank of dozens of claims retrieval fills whatever it is
+	// given — so a turn's cost tracked the budget instead of the work in front of it.
+	const recallCap = input.config.maxRetrievedClaims ?? 0;
+	const ranked = recallCap > 0 ? rankedAll.slice(0, recallCap) : rankedAll;
+	const cappedOut = recallCap > 0 ? rankedAll.slice(recallCap) : [];
+	const reserve = tokensOf(header) + tokensOf(dropNotice(pool.length, 0, 0, open.length, recallCap > 0 ? Math.max(0, pool.length - recallCap) : 0, recallCap));
+	const retrievedCap = Math.max(0, input.config.budgetTokens - coreFill.section.tokens - dailySection.tokens - reserve);
 	const retrievedFill = fillSection({ title: "Related claims", candidates: ranked, cap: retrievedCap, label: true });
 
-	// What did not fit, whole (R29).
-	const droppedCandidates = [...coreFill.leftOver, ...retrievedFill.leftOver];
+	// What did not fit, whole (R29): stopped by the count cap, or by the tokens.
+	const droppedCandidates = [...coreFill.leftOver, ...retrievedFill.leftOver, ...cappedOut];
 	const droppedByKind = { rule: 0, fact: 0 };
 	for (const candidate of droppedCandidates) droppedByKind[candidate.claim.kind] += 1;
 	const notice: string[] = [];
 	if (droppedCandidates.length > 0 || dailySection.dropped > 0) {
-		notice.push(dropNotice(droppedCandidates.length, droppedByKind.rule, droppedByKind.fact, dailySection.dropped));
+		notice.push(dropNotice(droppedCandidates.length, droppedByKind.rule, droppedByKind.fact, dailySection.dropped, cappedOut.length, recallCap));
 	}
 
 	const blocks = [coreFill.section, dailySection, retrievedFill.section].filter((section) => section.text !== "");
@@ -270,6 +289,7 @@ export function buildInjection(input: InjectionInput): InjectionResult {
 			total: text === "" ? 0 : tokensOf(text),
 		},
 		dropped: { rule: droppedByKind.rule, fact: droppedByKind.fact, dailyItems: dailySection.dropped, total: droppedCandidates.length + dailySection.dropped },
+		cappedClaims: cappedOut.length,
 		excluded: selected.excluded,
 		contested: selected.contested,
 		injected: [
@@ -289,6 +309,7 @@ export function formatPreview(result: InjectionResult): string {
 	}
 	lines.push(`  core ${result.tokens.core} + daily ${result.tokens.daily} + retrieved ${result.tokens.retrieved} = ${result.tokens.total}`);
 	if (result.dropped.total > 0) lines.push(`  dropped: ${result.dropped.rule} rules, ${result.dropped.fact} facts, ${result.dropped.dailyItems} daily items`);
+	if (result.cappedClaims > 0) lines.push(`  recall cap: ${result.cappedClaims} claim(s) stopped by the per-turn count cap, not by the token budget`);
 	if (result.contested.length > 0) lines.push(`  contested: ${result.contested.map((entry) => `${entry.key} @ ${entry.scope}`).join(", ")}`);
 	if (result.excluded.length > 0) {
 		lines.push("  not injected:");

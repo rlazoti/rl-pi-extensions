@@ -17,6 +17,14 @@ export interface MemoryConfig {
 	/** Section caps (R27). Unused core and daily budget flows to retrieval. */
 	coreTokens: number;
 	dailyTokens: number;
+	/**
+	 * R27.4: how many retrieved claims one turn may receive, whatever the token
+	 * budget leaves room for. The budget alone does not bound the block: with a
+	 * bank of dozens of claims, retrieval fills every token it is given, so the
+	 * per-turn cost tracks the budget instead of the work in front of it.
+	 * 0 means no cap.
+	 */
+	maxRetrievedClaims: number;
 	/** A pending claim older than this is flagged and no longer injected (R20, R28). */
 	pendingFlagDays: number;
 	/** R19: ask about a rival proposal immediately instead of at review time. */
@@ -31,6 +39,7 @@ export const DEFAULT_CONFIG: MemoryConfig = {
 	budgetTokens: 2000,
 	coreTokens: 600,
 	dailyTokens: 500,
+	maxRetrievedClaims: 6,
 	pendingFlagDays: 14,
 	inlineConflictDialog: false,
 	ranker: "bm25",
@@ -41,6 +50,7 @@ const LIMITS: Record<string, { min: number; max: number }> = {
 	budgetTokens: { min: 200, max: 20_000 },
 	coreTokens: { min: 0, max: 20_000 },
 	dailyTokens: { min: 0, max: 20_000 },
+	maxRetrievedClaims: { min: 0, max: 200 },
 	pendingFlagDays: { min: 1, max: 3650 },
 	searchLimit: { min: 1, max: 100 },
 };
@@ -120,5 +130,5 @@ export function applyConfig(raw: unknown, file: string): ConfigResult {
 }
 
 export function describeConfig(config: MemoryConfig): string {
-	return `budget ${config.budgetTokens} tokens (core ${config.coreTokens}, daily ${config.dailyTokens}, retrieved ${config.budgetTokens - config.coreTokens - config.dailyTokens}), pending flag after ${config.pendingFlagDays} days, inline conflict dialog ${config.inlineConflictDialog ? "on" : "off"}, ranker ${config.ranker}`;
+	return `budget ${config.budgetTokens} tokens (core ${config.coreTokens}, daily ${config.dailyTokens}, retrieved ${config.budgetTokens - config.coreTokens - config.dailyTokens}), retrieved claims at most ${config.maxRetrievedClaims === 0 ? "unbounded" : config.maxRetrievedClaims} per turn, pending flag after ${config.pendingFlagDays} days, inline conflict dialog ${config.inlineConflictDialog ? "on" : "off"}, ranker ${config.ranker}`;
 }
