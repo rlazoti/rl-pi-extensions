@@ -7,7 +7,7 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 
 import factory from "./index.ts";
-import { setBankForTesting } from "./implementation.ts";
+import { MEMORY_SUBCOMMANDS, paletteDescription, setBankForTesting } from "./implementation.ts";
 import { createBank } from "./bank.ts";
 import { bankPaths, ensureBankDirs } from "./store.ts";
 import { upsertClaim } from "./store.ts";
@@ -30,7 +30,11 @@ interface FakeTool {
 
 interface Harness {
 	tools: Map<string, FakeTool>;
-	commands: Map<string, { description: string; handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> }>;
+	commands: Map<string, {
+		description: string;
+		handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+		getArgumentCompletions?: (prefix: string) => { value: string; label: string; description?: string }[] | null;
+	}>;
 	hooks: Map<string, (event: unknown, ctx: ExtensionContext) => unknown>;
 	notifications: { message: string; level?: string }[];
 }
@@ -43,7 +47,7 @@ function fakePi(): { pi: ExtensionAPI; harness: Harness } {
 			return () => {};
 		},
 		registerTool: (tool: FakeTool) => harness.tools.set(tool.name, tool),
-		registerCommand: (name: string, options: { description: string; handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> }) => harness.commands.set(name, options),
+		registerCommand: (name: string, options: { description: string; handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>; getArgumentCompletions?: (prefix: string) => { value: string; label: string; description?: string }[] | null }) => harness.commands.set(name, options),
 	} as unknown as ExtensionAPI;
 	return { pi, harness };
 }
@@ -779,4 +783,96 @@ test("component: an edit to config.json reaches the running session's next turn,
 	} finally {
 		cleanup();
 	}
+});
+
+test("component: the command list, /memory help and the completions all come from one table (R50)", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		const { harness } = install({ paths });
+		const command = harness.commands.get("memory")!;
+		const names = MEMORY_SUBCOMMANDS.flatMap((entry) => [entry.name, ...(entry.also ?? [])]);
+
+		// The line Pi lists: the setting he went looking for is in it.
+		for (const headline of ["status", "preview", "review", "doctor", "settings", "trial", "migrate"]) {
+			assert.ok(command.description.includes(headline), `the listed description names /memory ${headline}`);
+		}
+		for (const entry of MEMORY_SUBCOMMANDS) {
+			assert.ok(command.description.includes(entry.name), `the listed description names /memory ${entry.name}`);
+		}
+		assert.match(paletteDescription(60), /· … — \/memory help$/, "a list cut short says it is cut short, never looks complete");
+
+		// Completions carry the whole table, aliases included, in the reader's words.
+		const all = command.getArgumentCompletions!("");
+		assert.deepEqual(all!.map((item) => item.value), names, "the completion list is the table");
+		for (const item of all!) {
+			assert.ok(item.description && !/\(R\d/.test(item.description), `${item.value} explains itself with no requirement ID`);
+		}
+		assert.deepEqual(command.getArgumentCompletions!("se")!.map((item) => item.value), ["settings"]);
+		assert.deepEqual(command.getArgumentCompletions!("co")!.map((item) => item.value), ["config"], "the old name completes too");
+		assert.equal(command.getArgumentCompletions!("approve git."), null, "after the first word the words are keys and scopes, not a fixed list");
+
+		// The help text is the same table.
+		const notes: string[] = [];
+		const ctx = {
+			...fakeContext({ mode: "print" }).ctx,
+			ui: { notify: (message: string) => notes.push(message) },
+			sessionManager: { getSessionId: () => "s" },
+		} as unknown as ExtensionCommandContext;
+		await command.handler("help", ctx);
+		for (const entry of MEMORY_SUBCOMMANDS) {
+			assert.match(notes[0]!, new RegExp(`^ {2}${entry.name}(\\s|$)`, "m"), `/memory help lists ${entry.name}`);
+			for (const alias of entry.also ?? []) {
+				assert.match(notes[0]!, new RegExp(`\(also: ${alias}\)`), `/memory help names ${alias} as the old name of ${entry.name}`);
+			}
+		}
+		assert.ok(!/\(R\d/.test(notes[0]!), "the help text carries no requirement IDs (R49.2)");
+	} finally {
+		cleanup();
+	}
+});
+
+test("component: every subcommand the list shows is handled; an unlisted name says so", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		const { harness } = install({ paths });
+		const command = harness.commands.get("memory")!;
+		const notes: string[] = [];
+		const ctx = {
+			...fakeContext({ mode: "print" }).ctx,
+			ui: { notify: (message: string) => notes.push(message) },
+			sessionManager: { getSessionId: () => "s" },
+		} as unknown as ExtensionCommandContext;
+
+		for (const entry of MEMORY_SUBCOMMANDS) {
+			for (const name of [entry.name, ...(entry.also ?? [])]) {
+				notes.length = 0;
+				await command.handler(name, ctx);
+				const joined = notes.join("\n");
+				assert.ok(!/but nothing handles it/.test(joined), `/memory ${name} is listed and not implemented`);
+				assert.ok(!new RegExp(`unknown \\/memory subcommand "${name}"`).test(joined), `/memory ${name} is listed but dispatch does not know it`);
+			}
+		}
+
+		notes.length = 0;
+		await command.handler("nonsense", ctx);
+		assert.match(notes[0]!, /unknown \/memory subcommand "nonsense"/);
+	} finally {
+		cleanup();
+	}
+});
+
+test("README: it documents no /memory subcommand that does not exist, and omits none that does", () => {
+	const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");
+	const line = readme.split("\n").find((row) => row.startsWith("| Command | `/memory"))!;
+	const cell = line.match(/`([^`]+)`/g)!.map((part) => part.slice(1, -1)).find((part) => part.includes("·"))!;
+	const documented = cell.split("·").map((part) => part.trim()).filter((part) => part !== "");
+	const handled = MEMORY_SUBCOMMANDS.map((entry) => entry.name);
+
+	for (const name of documented) {
+		assert.ok(handled.includes(name), `the README documents /memory ${name}, which the command does not answer`);
+	}
+	for (const name of handled) {
+		assert.ok(documented.includes(name) || name === "help", `the command answers /memory ${name} and the README never lists it`);
+	}
+	assert.match(line, /`config` still works as the old name/, "the README says the alias still answers");
 });

@@ -188,6 +188,14 @@ in its constraints) and Pi's extension API docs (`session_start` and `before_age
   every default as of the day it was written, and that is Rodrigo's decision. A file naming one key is
   complete — an absent key keeps its default, and an unknown or out-of-range key is reported, never
   swallowed (R30, D19).
+- R49.2. Nothing a person reads carries a requirement ID. The mapping from a setting to the requirement
+  it serves lives in a `spec` field on the same table row, rendered nowhere. (Tests, commits and this
+  spec keep citing IDs.)
+- R50. One table lists the subcommands (`MEMORY_SUBCOMMANDS`), and it renders `/memory help`, the line
+  Pi shows in its command list, and the argument completions for the first word after the command. A
+  name the table lists but the code does not handle is reported as our bug, not as the reader's typo. A
+  hand-written list drifted when `settings` was added; the list and the code that answers it share one
+  source now. The README's command list is checked against the table.
 
 ## Design
 
@@ -213,7 +221,7 @@ in its constraints) and Pi's extension API docs (`session_start` and `before_age
 | `trial.ts` | Turn metrics, flags, baseline from session files, trial report (R43–R47). |
 | `migrate.ts` | Backup gate, waves, per-file draft turns, resumable state (R37–R39). |
 | `config.ts` | `~/.pi/memory/config.json` with validated defaults, the settings table the validator and the listing share, `/memory settings` text (R48–R49). Invalid config falls back to defaults with a warning. |
-| `implementation.ts` | Registers tools, commands and both hooks (R25, R41). |
+| `implementation.ts` | Registers tools, commands and both hooks; the subcommand table that renders help, the command-list line and the completions (R25, R41, R50). |
 
 ### Bank layout (`~/.pi/memory/`)
 ```
@@ -268,8 +276,12 @@ flowchart LR
   range the validator enforces (accept at both bounds, refuse just outside, name the fallback);
   a value the file set, a default, and a value the interlock moved read differently in the listing;
   the template parses as accepted config with every key at its default, one key in the file leaves the
-  rest default, and the listing writes no file; in one running session a config edit changes the next
-  turn's injection, and a bad value falls back without stopping it.
+  rest default, and the listing writes no file; no rendered line carries a requirement ID; in one
+  running session a config edit changes the next turn's injection, and a bad value falls back without
+  stopping it.
+- **Command surface (R50):** every name in the subcommand table appears in the command-list line, in
+  `/memory help` and in the completions, and none of them reports "not implemented"; an unlisted name is
+  reported as unknown; the README's command list agrees with the table in both directions.
 
 ## How each constraint in the intent is met
 | Constraint | Met by |

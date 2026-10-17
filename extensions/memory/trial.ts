@@ -282,7 +282,7 @@ export function computeBaseline(opts: {
 	if (blocks.length === 0) {
 		return {
 			ok: false,
-			reason: `no block starting "${marker}" was found in ${files.length} session files under ${opts.sessionsDir}. Nothing was written: the baseline has to be measured, not estimated (R47).`,
+			reason: `no block starting "${marker}" was found in ${files.length} session files under ${opts.sessionsDir}. Nothing was written: the baseline has to be measured, not estimated.`,
 			filesScanned: files.length,
 			blocksFound: 0,
 		};
@@ -359,7 +359,7 @@ export function trialReport(paths: BankPaths, opts: { today: string; days?: numb
 		report.verdict = `only ${daysBetween(sinceDay, opts.today) + 1} of ${days} days covered`;
 	}
 	if (!baseline) {
-		report.verdict = `${report.turns} turns recorded, but no baseline: run /memory trial baseline first (R47)`;
+		report.verdict = `${report.turns} turns recorded, but no baseline: run /memory trial baseline first`;
 		return report;
 	}
 	report.ratio = baseline.medianTokens === 0 ? Number.POSITIVE_INFINITY : report.medianTokens / baseline.medianTokens;

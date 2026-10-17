@@ -43,23 +43,25 @@ export interface MemoryConfig {
  */
 export interface SettingInfo {
 	key: keyof MemoryConfig;
-	/** One line on what the number or name decides, with the requirement it serves. */
+	/** One line on what the number or name decides, in the reader's words. */
 	meaning: string;
 	/** Bounds for a whole number. Absent for the settings that are not numbers. */
 	range?: { min: number; max: number };
 	/** What a boundary value means, when the number alone would mislead. */
 	boundary?: string;
+	/** The spec requirement this setting serves: for tests and commits, never on screen. */
+	spec: string;
 }
 
 export const SETTINGS: readonly SettingInfo[] = [
-	{ key: "budgetTokens", range: { min: 200, max: 20_000 }, meaning: "the whole block one turn receives (R26)" },
-	{ key: "coreTokens", range: { min: 0, max: 20_000 }, meaning: "always-on rules and facts (R27)" },
-	{ key: "dailyTokens", range: { min: 0, max: 20_000 }, meaning: "open daily items (R27)" },
-	{ key: "maxRetrievedClaims", range: { min: 0, max: 200 }, boundary: "0 means no cap", meaning: "claims one turn may recall, whatever the budget leaves (R27.4)" },
-	{ key: "pendingFlagDays", range: { min: 1, max: 3650 }, meaning: "days a pending claim waits before it is flagged and stops injecting (R20)" },
-	{ key: "searchLimit", range: { min: 1, max: 100 }, meaning: "hits memory_search returns when asked for none (R33)" },
-	{ key: "inlineConflictDialog", meaning: "ask about a rival claim at the tool call instead of at review (R19)" },
-	{ key: "ranker", meaning: "ranker for automatic recall; bm25 is the only one implemented (R32)" },
+	{ key: "budgetTokens", range: { min: 200, max: 20_000 }, meaning: "the whole block one turn receives", spec: "R26" },
+	{ key: "coreTokens", range: { min: 0, max: 20_000 }, meaning: "always-on rules and facts", spec: "R27" },
+	{ key: "dailyTokens", range: { min: 0, max: 20_000 }, meaning: "open daily items", spec: "R27" },
+	{ key: "maxRetrievedClaims", range: { min: 0, max: 200 }, boundary: "0 means no cap", meaning: "claims one turn may recall, whatever the budget leaves", spec: "R27.4" },
+	{ key: "pendingFlagDays", range: { min: 1, max: 3650 }, meaning: "days a pending claim waits before it is flagged and stops injecting", spec: "R20" },
+	{ key: "searchLimit", range: { min: 1, max: 100 }, meaning: "hits memory_search returns when asked for none", spec: "R33" },
+	{ key: "inlineConflictDialog", meaning: "ask about a rival claim at the tool call instead of at review", spec: "R19" },
+	{ key: "ranker", meaning: "ranker for automatic recall; bm25 is the only one implemented", spec: "R32" },
 ];
 
 export const DEFAULT_CONFIG: MemoryConfig = {
@@ -200,7 +202,7 @@ export function describeSettings(result: ConfigResult, view: { file: string; pre
 	}
 	const retrieved = result.config.budgetTokens - result.config.coreTokens - result.config.dailyTokens;
 	const defaultRetrieved = DEFAULT_CONFIG.budgetTokens - DEFAULT_CONFIG.coreTokens - DEFAULT_CONFIG.dailyTokens;
-	lines.push(row("retrieved", String(retrieved), String(defaultRetrieved), "—", "derived", "what is left for recall after core and daily (R27)"));
+	lines.push(row("retrieved", String(retrieved), String(defaultRetrieved), "—", "derived", "what is left for recall after core and daily"));
 	if (!view.present) {
 		lines.push(
 			"",

@@ -91,6 +91,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (spec R48). Tested by changing `maxRetrievedClaims` under one live bank and counting the claims its
   next injection carries, and by a bad `budgetTokens` falling back without stopping the turn.
 
+### Fixed (memory, settings, second pass)
+
+- **`/memory settings` was missing from the list a user reads.** The subcommands were hand-written in
+  three places — the line Pi shows in its command list, `/memory help`, and nowhere else — and adding
+  `settings` updated one of them. One table (`MEMORY_SUBCOMMANDS`) now renders the help text, the
+  command-list line and the **argument completions** for the first word after `/memory`; a name listed
+  but not handled reports itself as our bug rather than as the reader's typo; and the README's command
+  list is checked against the table in both directions (spec R50).
+- **Requirement IDs stopped leaking into output.** `(R26)`, `(R2)`, `(R4)`, `(R47)` appeared in the
+  settings table, in a migration report, in a write-time refusal and in a trial verdict — numbers only
+  this repo's tests and commits can look up. Each row keeps its ID in a `spec` field that renders
+  nowhere, and a test asserts no rendered line carries one (spec R49.2).
+
 ### Tests (memory, settings)
 
 - +5 memory tests (194 total, 671 in the suite): the table covers every setting exactly once and its
@@ -100,6 +113,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - +1 memory test (195 total, 672 in the suite): the template parses as accepted config with every key at
   its default, one key in the file leaves the rest default with nothing reported, and a file that exists
   gets no template. The command test pins that the listing leaves no `config.json` behind.
+- +3 memory tests (198 total, 676 in the suite): the subcommand table appears complete in the
+  command-list line, in `/memory help` and in the completions with none of them unimplemented, an
+  unlisted name reported as unknown, no rendered line carrying a requirement ID, and the README's
+  command list agreeing with the table both ways.
 
 ## [1.5.0] - 2026-10-16
 

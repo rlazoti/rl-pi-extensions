@@ -274,3 +274,19 @@ test("config: the absent-file listing carries a paste-ready template, and a key 
 		cleanup();
 	}
 });
+
+test("config: the settings listing speaks to a person, not to the spec (R49.2)", () => {
+	const { file, paths, cleanup } = scratchFile();
+	try {
+		const listing = describeSettings(loadConfig(paths), { file, present: false });
+		for (const line of listing.split("\n")) {
+			assert.ok(!/\bR\d/.test(line), `no requirement ID on screen: ${line}`);
+		}
+		for (const setting of SETTINGS) {
+			assert.match(setting.spec, /^R\d+(\.\d+)?$/, `${setting.key} still names the requirement it serves, off screen`);
+			assert.ok(setting.meaning.length > 0 && !setting.meaning.includes("("), `${setting.key} explains itself without parenthetical IDs`);
+		}
+	} finally {
+		cleanup();
+	}
+});

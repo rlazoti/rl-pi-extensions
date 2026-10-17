@@ -5,7 +5,7 @@ live component: enabled by a symlink at `~/.pi/agent/extensions/memory` (the
 rl-extensions picker creates it).
 
 Design inputs: [`design/intent.md`](design/intent.md) and
-[`design/spec.md`](design/spec.md) (requirements `R1…R49`, decisions `D1…D19`).
+[`design/spec.md`](design/spec.md) (requirements `R1…R50`, decisions `D1…D19`).
 This README is the operating contract: what injects, what waits, what is refused,
 and what is deliberately not done.
 
@@ -21,7 +21,7 @@ and what is deliberately not done.
 | Write | `memory_log(section, text)` | One daily item. The extension stamps the date and time; the agent cannot set them. |
 | Write | `memory_propose(…)` | A **pending** claim. The agent can never write an approved claim. |
 | Write | `memory_archive(name, text)` | Read-only archive for prose that is neither a claim nor a daily item. |
-| Command | `/memory …` | `status · preview · review · approve · reject · defer · edit · doctor · settings · paths · flag · flags · trial · migrate` — `config` still works as the old name for `settings`; review and the review actions take `--wave agent\|migration` |
+| Command | `/memory …` | `status · preview · review · approve · reject · defer · edit · doctor · settings · paths · flag · flags · trial · migrate` — `config` still works as the old name for `settings`; review and the review actions take `--wave agent\|migration`. One table (`MEMORY_SUBCOMMANDS` in `implementation.ts`) renders `/memory help`, the line Pi lists, and the argument completions, so the list cannot fall behind the code (R50) |
 | Hook | `session_start` | One review notice when anything waits. Never blocks. |
 | Hook | `before_agent_start` | The budgeted injection, for user-started runs only. |
 
@@ -210,9 +210,9 @@ where the value came from:
 
 ```
 setting                current  default     allowed  in use   what it decides
-budgetTokens              2000     2000  200..20000  default  the whole block one turn receives (R26)
-maxRetrievedClaims           6        6      0..200  default  claims one turn may recall, whatever the budget leaves (R27.4); 0 means no cap
-retrieved                  900      900           —  derived  what is left for recall after core and daily (R27)
+budgetTokens              2000     2000  200..20000  default  the whole block one turn receives
+maxRetrievedClaims           6        6      0..200  default  claims one turn may recall, whatever the budget leaves; 0 means no cap
+retrieved                  900      900           —  derived  what is left for recall after core and daily
 ```
 
 Three things that listing exists to make visible:
@@ -226,7 +226,9 @@ Three things that listing exists to make visible:
   one look identical.
 
 The table and the validator read the same data (`SETTINGS` in `config.ts`), so a
-listing cannot drift from what is enforced.
+listing cannot drift from what is enforced. Nothing on screen carries a requirement
+ID: `R…` numbers belong in tests, commits and this README, and each row keeps its
+number in a `spec` field that is never rendered (R49.2).
 
 With no file yet, the listing also prints a paste-ready block — every key at its
 default, valid JSON as written, generated from that same table. It **writes

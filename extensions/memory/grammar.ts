@@ -177,7 +177,7 @@ export function validateClaim(claim: Claim): string[] {
 	if (body === "") problems.push("body is required");
 	else {
 		const chars = charCount(body);
-		if (chars > BODY_MAX_CHARS) problems.push(`body is ${chars} characters; the limit is ${BODY_MAX_CHARS} (R4)`);
+		if (chars > BODY_MAX_CHARS) problems.push(`body is ${chars} characters; the limit is ${BODY_MAX_CHARS}`);
 		if (body.includes("##")) problems.push("body may not contain a markdown heading — one claim is one paragraph");
 	}
 	for (const list of [claim.aliases, claim.tags, claim.links]) {

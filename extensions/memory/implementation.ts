@@ -253,7 +253,8 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 	// ── The /memory command ──────────────────────────────────────────────────
 
 	pi.registerCommand("memory", {
-		description: "Memory: status, review, preview, doctor, trial, migration",
+		description: paletteDescription(),
+		getArgumentCompletions: completeSubcommands,
 		handler: async (args, ctx) => {
 			const parts = args.trim().split(/\s+/).filter((part) => part !== "");
 			const sub = parts[0] ?? "status";
@@ -264,6 +265,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 	});
 
 	async function dispatch(sub: string, rest: string[], ctx: ExtensionCommandContext): Promise<Outcome> {
+		const listed = MEMORY_SUBCOMMANDS.some((command) => command.name === sub || command.also?.includes(sub));
 		switch (sub) {
 			case "status":
 				return bank.status(ctx.cwd);
@@ -294,7 +296,11 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 			case "paths":
 				return { ok: true, text: describePaths(bank.paths) };
 			default:
-				return { ok: false, text: `unknown /memory subcommand "${sub}" — try /memory help` };
+				// A name the table lists but this switch does not handle is our bug, and calling it
+				// "unknown subcommand" would send the reader looking for a typo they did not make.
+				return listed
+					? { ok: false, text: `memory: "/memory ${sub}" is listed in /memory help but nothing handles it — report it` }
+					: { ok: false, text: `unknown /memory subcommand "${sub}" — try /memory help` };
 		}
 	}
 
@@ -433,25 +439,96 @@ function flagValue(parts: string[], name: string): string | undefined {
 	return at >= 0 ? parts[at + 1] : undefined;
 }
 
-const HELP = `memory:
-  status                     bank, project id, config, counts, daily freshness
-  preview [prompt]           the exact block a turn would get, with tokens per section
-  review [--wave agent|migration]
-                             walk the pending claims (dialog in the TUI, listing elsewhere)
-  approve|reject|defer <key> [scope]  —  or --wave agent|migration for the batch
-  edit <key> [scope] <body>
-  doctor                     what is wrong with the bank, if anything
-  settings | config          every setting: value in use, default, range, and where the file is
-  paths                      where the bank's files live
-  flag <key> stale|rival     mark an injected claim as stale or rival (trial input)
-  flags                      every flag recorded
-  trial [days] | trial baseline [--days n] [--marker text] [--sessions-dir path]
-  migrate backup | plan | status
-  migrate draft [--wave rules|facts:<domain>] [--file <name> | --batch <n>]
-  migrate apply [--wave w | --all]   draft a whole wave through the gate
-  migrate drafted <file> <n> | migrate daily | migrate cutover
+/**
+ * Every subcommand in one table (R50). It renders `/memory help`, the line Pi
+ * shows in its command list, and the argument completions, and `dispatch` calls a
+ * name listed here but not handled our bug rather than the reader's typo. A
+ * hand-written list drifted — it lost `settings` the day `settings` was added — so
+ * the list a user reads and the code that answers it now share one source.
+ */
+export interface MemorySubcommand {
+	name: string;
+	/** What the caller types after the name. */
+	args?: string;
+	/** One line in the reader's words: no requirement IDs on screen (R49.2). */
+	summary: string;
+	/** Continuation lines for a command with forms of its own. */
+	forms?: string[];
+	/** Names that answer the same way, listed so help and completions both show them. */
+	also?: string[];
+}
 
-Writes are memory_log (the daily log) and memory_propose (a pending claim).
-memory_read, memory_search and memory_list keep their old names.`;
+export const MEMORY_SUBCOMMANDS: readonly MemorySubcommand[] = [
+	{ name: "status", summary: "the bank, this project, the counts, and how fresh the daily log is" },
+	{ name: "preview", args: "[prompt]", summary: "the exact block a turn would get, with tokens per section" },
+	{ name: "review", summary: "walk the pending claims — a card in the TUI, a listing elsewhere", forms: ["[--wave agent | --wave migration] walks one wave of the queue"] },
+	{ name: "approve", args: "<key> [scope]", summary: "take the proposed claim; the words it replaces go to history", forms: ["--wave agent|migration decides a whole batch at once"] },
+	{ name: "reject", args: "<key> [scope]", summary: "refuse the proposal; what the store holds stays" },
+	{ name: "defer", args: "<key> [scope]", summary: "leave the proposal pending for another day" },
+	{ name: "edit", args: "<key> [scope] <body>", summary: "rewrite a pending claim's text" },
+	{ name: "doctor", summary: "what is wrong with the bank, if anything" },
+	{ name: "settings", summary: "every setting: the value in use, its default, its range, and where the file is", also: ["config"] },
+	{ name: "paths", summary: "where the bank's files live" },
+	{ name: "flag", args: "<key> stale|rival", summary: "mark an injected claim as stale or rival (input to the trial)" },
+	{ name: "flags", summary: "every flag recorded" },
+	{ name: "trial", args: "[days] | baseline", summary: "the week's numbers against the baseline, and the go/no-go", forms: ["baseline [--days n] [--marker text] [--sessions-dir path]"] },
+	{ name: "migrate", summary: "move an old bank in, under a backup gate", forms: ["backup | plan | status | draft [--wave w] [--file f | --batch n] | drafted <file> <n>", "apply [--wave w | --all] | daily | cutover"] },
+	{ name: "help", summary: "this list" },
+];
+
+const HELP_COLUMN = 34;
+
+function helpText(): string {
+	const lines: string[] = [];
+	for (const command of MEMORY_SUBCOMMANDS) {
+		const head = command.args ? `${command.name} ${command.args}` : command.name;
+		const also = command.also?.length ? ` (also: ${command.also.join(", ")})` : "";
+		if (head.length > HELP_COLUMN) {
+			lines.push(`  ${head}`, `  ${"".padEnd(HELP_COLUMN)}${command.summary}${also}`);
+		} else {
+			lines.push(`  ${head.padEnd(HELP_COLUMN)}${command.summary}${also}`);
+		}
+		for (const form of command.forms ?? []) lines.push(`  ${"".padEnd(HELP_COLUMN)}${form}`);
+	}
+	return [
+		"memory:",
+		...lines,
+		"",
+		"Writes are memory_log (the daily log) and memory_propose (a pending claim).",
+		"memory_read, memory_search and memory_list keep their old names.",
+	].join("\n");
+}
+
+const HELP = helpText();
+
+/**
+ * The line Pi lists for the command: every name it answers, and an ellipsis when
+ * they do not fit, so a short line says it is short instead of looking complete.
+ */
+export function paletteDescription(limit = 140): string {
+	let text = "memory: status";
+	for (const command of MEMORY_SUBCOMMANDS) {
+		if (command.name === "status" || command.name === "help") continue;
+		if (text.length + command.name.length + 3 > limit) return `${text} · … — /memory help`;
+		text += ` · ${command.name}`;
+	}
+	return `${text} — /memory help`;
+}
+
+/**
+ * Pi asks for completions of what was typed after `/memory`. Only the first word
+ * is a subcommand; after it the words are keys, scopes and claim bodies, which are
+ * the bank's business and not a fixed list (R50).
+ */
+function completeSubcommands(argumentPrefix: string): { value: string; label: string; description?: string }[] | null {
+	if (/\s/.test(argumentPrefix)) return null;
+	const items: { value: string; label: string; description?: string }[] = [];
+	for (const command of MEMORY_SUBCOMMANDS) {
+		for (const name of [command.name, ...(command.also ?? [])]) {
+			if (name.startsWith(argumentPrefix)) items.push({ value: name, label: name, description: command.summary });
+		}
+	}
+	return items;
+}
 
 export { HELP as MEMORY_HELP };

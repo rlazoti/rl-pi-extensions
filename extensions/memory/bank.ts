@@ -364,7 +364,7 @@ export class Bank {
 		if ("done" in result) return { ok: false, text: result.reason };
 		const lines = [result.total === 0 ? "no open items carried" : `carried ${result.total} open item(s) into ${result.dailyFile}`];
 		for (const converted of result.converted) lines.push(`  ${converted.file}: ${converted.added} added, ${converted.skipped} already there`);
-		for (const status of result.statusOnly) lines.push(`  ${status.file}: project status, not memory (R2) — nothing carried; archived at cutover`);
+		for (const status of result.statusOnly) lines.push(`  ${status.file}: project status, not memory — nothing carried; archived at cutover`);
 		for (const refused of result.refused) lines.push(`  left out as status: ${refused.file}: ${refused.item}`);
 		return { ok: true, text: lines.join("\n") };
 	}
