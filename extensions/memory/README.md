@@ -5,7 +5,7 @@ live component: enabled by a symlink at `~/.pi/agent/extensions/memory` (the
 rl-extensions picker creates it).
 
 Design inputs: [`design/intent.md`](design/intent.md) and
-[`design/spec.md`](design/spec.md) (requirements `R1…R47`, decisions `D1…D15`).
+[`design/spec.md`](design/spec.md) (requirements `R1…R49`, decisions `D1…D19`).
 This README is the operating contract: what injects, what waits, what is refused,
 and what is deliberately not done.
 
@@ -21,7 +21,7 @@ and what is deliberately not done.
 | Write | `memory_log(section, text)` | One daily item. The extension stamps the date and time; the agent cannot set them. |
 | Write | `memory_propose(…)` | A **pending** claim. The agent can never write an approved claim. |
 | Write | `memory_archive(name, text)` | Read-only archive for prose that is neither a claim nor a daily item. |
-| Command | `/memory …` | `status · preview · review · approve · reject · defer · edit · doctor · config · paths · flag · flags · trial · migrate` — review and the review actions take `--wave agent\|migration` |
+| Command | `/memory …` | `status · preview · review · approve · reject · defer · edit · doctor · settings · paths · flag · flags · trial · migrate` — `config` still works as the old name for `settings`; review and the review actions take `--wave agent\|migration` |
 | Hook | `session_start` | One review notice when anything waits. Never blocks. |
 | Hook | `before_agent_start` | The budgeted injection, for user-started runs only. |
 
@@ -100,7 +100,7 @@ daily/today.md, daily/archive/YYYY-MM/   the daily log; rolled over once per ses
 archive/                                 read-only migrated prose and status text
 migration/state.json                     resumable migration progress, plus the verified backup
 metrics/turns.jsonl, flags.jsonl, baseline.json   trial metrics (never any prompt text)
-config.json                              the settings below
+config.json                              the settings below — hand-editable; the next turn reads it
 ```
 
 `write → read → write` is byte-stable for every file this component writes, and a
@@ -201,6 +201,39 @@ Unknown or mistyped keys fall back to the default **with a warning**, never
 silently. `ranker` accepts only implemented rankers: `bm25`. The `Ranker`
 interface (`rank(query, entries) → scored[]`) is the only hook for a future one;
 this component deliberately builds no semantic ranker.
+
+### Seeing and changing them (R48–R49)
+
+`/memory settings` (the old name `/memory config` still works) lists every
+setting with the value in use, its default, the range the validator enforces, and
+where the value came from:
+
+```
+setting                current  default     allowed  in use   what it decides
+budgetTokens              2000     2000  200..20000  default  the whole block one turn receives (R26)
+maxRetrievedClaims           6        6      0..200  default  claims one turn may recall, whatever the budget leaves (R27.4); 0 means no cap
+retrieved                  900      900           —  derived  what is left for recall after core and daily (R27)
+```
+
+Three things that listing exists to make visible:
+
+- **`in use` says where a value came from**: `file` (you set it), `default`, or
+  `capped` — the section interlock moved it, because `coreTokens + dailyTokens`
+  cannot exceed `budgetTokens`. A refused value never reads as set.
+- **`retrieved` is derived, not a setting.** It is the recall the caps actually
+  leave, and it is the number the trial's lever sits on.
+- **No knob is a bare number.** Without its range, a wrong value and an unusual
+  one look identical.
+
+The table and the validator read the same data (`SETTINGS` in `config.ts`), so a
+listing cannot drift from what is enforced.
+
+`config.json` is hand-editable on the same terms as the claim stores: an edit
+reaches the **next turn** of a running session, no restart. A value outside its
+range falls back to its default, says so, and the turn proceeds. The TUI editor
+for these values is deliberately not built yet (D19): a settings panel is only
+worth having when it can show a knob beside the effect it has, and that effect is
+what the trial is measuring now.
 
 ---
 

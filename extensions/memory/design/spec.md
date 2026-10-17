@@ -173,6 +173,17 @@ in its constraints) and Pi's extension API docs (`session_start` and `before_age
   - writes the median, sample size and date range to `metrics/baseline.json`.
   If the block is not found, the command reports this and writes nothing. It never estimates.
 
+### Settings (D19)
+- R48. `config.json` is hand-editable on the same terms as the claim stores: a change reaches the
+  next turn of a running session, with no restart. A value outside its range falls back to its
+  default and the fallback is reported (R30); it never stops the turn.
+- R49. `/memory settings` (the old name `config` keeps working) lists every setting with the value
+  in use, its default, the range the validator enforces, and where that value came from: the file, a
+  default, or the section interlock. It also shows the recall size the caps leave, marked as derived.
+  The listing and the validator read the same table, so a listing cannot drift from what is enforced.
+  A knob never appears as a plain number: without its range the reader cannot tell a wrong value
+  from an unusual one.
+
 ## Design
 
 ### Placement
@@ -196,7 +207,7 @@ in its constraints) and Pi's extension API docs (`session_start` and `before_age
 | `notice.ts` | Session-start review notice and its counts (R20). |
 | `trial.ts` | Turn metrics, flags, baseline from session files, trial report (R43–R47). |
 | `migrate.ts` | Backup gate, waves, per-file draft turns, resumable state (R37–R39). |
-| `config.ts` | `~/.pi/memory/config.json` with validated defaults. Invalid config falls back to defaults with a warning. |
+| `config.ts` | `~/.pi/memory/config.json` with validated defaults, the settings table the validator and the listing share, `/memory settings` text (R48–R49). Invalid config falls back to defaults with a warning. |
 | `implementation.ts` | Registers tools, commands and both hooks (R25, R41). |
 
 ### Bank layout (`~/.pi/memory/`)
@@ -248,6 +259,11 @@ flowchart LR
   cutover.
 - **Compatibility:** read names registered; old write names not registered; picker stops on a
   foreign `memory` link.
+- **Settings (R48–R49):** the table covers every setting exactly once, and each row's range is the
+  range the validator enforces (accept at both bounds, refuse just outside, name the fallback);
+  a value the file set, a default, and a value the interlock moved read differently in the listing;
+  in one running session a config edit changes the next turn's injection, and a bad value falls back
+  without stopping it.
 
 ## How each constraint in the intent is met
 | Constraint | Met by |
@@ -261,7 +277,7 @@ flowchart LR
 | Read names keep working; writes renamed with a documented path; callers updated by hand | R41, R40.1. |
 | Name `memory`; never overwrites a foreign symlink | R42, R40.2–3. |
 | One machine | R3. |
-| Defaults: 2k budget, no tool blocking, inline dialog off, all configurable | R19, R26, R34, `config.ts`. |
+| Defaults: 2k budget, no tool blocking, inline dialog off, all configurable | R19, R26, R34, R48–R49, `config.ts`. |
 
 ## Open questions from the intent
 - **Always-on core versus retrieved, and the split of 2k?** Answered: R27, 600 / 500 / remainder,
@@ -298,3 +314,4 @@ flowchart LR
 | D16 | Migration effort | A whole wave is drafted by one command (`/memory migrate apply`) and reviewed as a batch (`--wave`), because one entry per turn would spend a day on migration. Refusals are reported, never quietly kept. | R18, R25, R37, R38 |
 | D17 | Review surface | A custom card, not `ui.select`: the claim's own words and its rival are on screen, and the whole batch is one dialog. | R18.1, R18.2 |
 | D18 | Recall size | Retrieved claims are capped per turn (default 6), not bounded by tokens alone: with the bank at 54 approved claims every prompt spent the whole 2000-token budget, so the trial's go bar (25% of an 880-token baseline) was unreachable by construction. | R27.4, R45 |
+| D19 | Settings surface | A text listing (`/memory settings`) plus live reload of a hand-edited config, now. The TUI editor waits until the trial has a week of measurements, because the panel's value is showing a knob beside the effect it has, and that effect is not measured yet. | R48, R49 |

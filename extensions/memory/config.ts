@@ -35,6 +35,33 @@ export interface MemoryConfig {
 	searchLimit: number;
 }
 
+/**
+ * One row per setting: what it decides, its bounds, and what a boundary value
+ * means. `applyConfig` validates against these same bounds, and
+ * `/memory settings` renders them, so no listing can drift from the validator
+ * (R48).
+ */
+export interface SettingInfo {
+	key: keyof MemoryConfig;
+	/** One line on what the number or name decides, with the requirement it serves. */
+	meaning: string;
+	/** Bounds for a whole number. Absent for the settings that are not numbers. */
+	range?: { min: number; max: number };
+	/** What a boundary value means, when the number alone would mislead. */
+	boundary?: string;
+}
+
+export const SETTINGS: readonly SettingInfo[] = [
+	{ key: "budgetTokens", range: { min: 200, max: 20_000 }, meaning: "the whole block one turn receives (R26)" },
+	{ key: "coreTokens", range: { min: 0, max: 20_000 }, meaning: "always-on rules and facts (R27)" },
+	{ key: "dailyTokens", range: { min: 0, max: 20_000 }, meaning: "open daily items (R27)" },
+	{ key: "maxRetrievedClaims", range: { min: 0, max: 200 }, boundary: "0 means no cap", meaning: "claims one turn may recall, whatever the budget leaves (R27.4)" },
+	{ key: "pendingFlagDays", range: { min: 1, max: 3650 }, meaning: "days a pending claim waits before it is flagged and stops injecting (R20)" },
+	{ key: "searchLimit", range: { min: 1, max: 100 }, meaning: "hits memory_search returns when asked for none (R33)" },
+	{ key: "inlineConflictDialog", meaning: "ask about a rival claim at the tool call instead of at review (R19)" },
+	{ key: "ranker", meaning: "ranker for automatic recall; bm25 is the only one implemented (R32)" },
+];
+
 export const DEFAULT_CONFIG: MemoryConfig = {
 	budgetTokens: 2000,
 	coreTokens: 600,
@@ -46,18 +73,18 @@ export const DEFAULT_CONFIG: MemoryConfig = {
 	searchLimit: 12,
 };
 
-const LIMITS: Record<string, { min: number; max: number }> = {
-	budgetTokens: { min: 200, max: 20_000 },
-	coreTokens: { min: 0, max: 20_000 },
-	dailyTokens: { min: 0, max: 20_000 },
-	maxRetrievedClaims: { min: 0, max: 200 },
-	pendingFlagDays: { min: 1, max: 3650 },
-	searchLimit: { min: 1, max: 100 },
-};
+const LIMITS: Record<string, { min: number; max: number }> = {};
+for (const setting of SETTINGS) {
+	if (setting.range) LIMITS[setting.key] = setting.range;
+}
 
 export interface ConfigResult {
 	config: MemoryConfig;
 	warnings: string[];
+	/** Keys the file named itself. Anything not listed here is a default. */
+	explicit: string[];
+	/** Keys the file named but the section interlock adjusted (R27). */
+	capped: string[];
 }
 
 /**
@@ -69,7 +96,7 @@ export function loadConfig(paths: BankPaths): ConfigResult {
 	try {
 		text = readFileSync(paths.config, "utf8");
 	} catch {
-		return { config: { ...DEFAULT_CONFIG }, warnings: [] };
+		return { config: { ...DEFAULT_CONFIG }, warnings: [], explicit: [], capped: [] };
 	}
 	let raw: unknown;
 	try {
@@ -78,6 +105,8 @@ export function loadConfig(paths: BankPaths): ConfigResult {
 		return {
 			config: { ...DEFAULT_CONFIG },
 			warnings: [`${paths.config} is not valid JSON (${error instanceof Error ? error.message : String(error)}); every default is in use`],
+			explicit: [],
+			capped: [],
 		};
 	}
 	return applyConfig(raw, paths.config);
@@ -86,8 +115,10 @@ export function loadConfig(paths: BankPaths): ConfigResult {
 export function applyConfig(raw: unknown, file: string): ConfigResult {
 	const config: MemoryConfig = { ...DEFAULT_CONFIG };
 	const warnings: string[] = [];
+	const explicit: string[] = [];
+	const capped: string[] = [];
 	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-		return { config, warnings: [`${file} must hold a JSON object; every default is in use`] };
+		return { config, warnings: [`${file} must hold a JSON object; every default is in use`], explicit, capped };
 	}
 	const source = raw as Record<string, unknown>;
 	for (const [key, value] of Object.entries(source)) {
@@ -96,13 +127,17 @@ export function applyConfig(raw: unknown, file: string): ConfigResult {
 			continue;
 		}
 		if (key === "inlineConflictDialog") {
-			if (typeof value === "boolean") config.inlineConflictDialog = value;
-			else warnings.push(`${file}: inlineConflictDialog must be true or false — using ${DEFAULT_CONFIG.inlineConflictDialog}`);
+			if (typeof value === "boolean") {
+				config.inlineConflictDialog = value;
+				explicit.push(key);
+			} else warnings.push(`${file}: inlineConflictDialog must be true or false — using ${DEFAULT_CONFIG.inlineConflictDialog}`);
 			continue;
 		}
 		if (key === "ranker") {
-			if (typeof value === "string" && value.trim() !== "") config.ranker = value.trim();
-			else warnings.push(`${file}: ranker must be a name — using "${DEFAULT_CONFIG.ranker}"`);
+			if (typeof value === "string" && value.trim() !== "") {
+				config.ranker = value.trim();
+				explicit.push(key);
+			} else warnings.push(`${file}: ranker must be a name — using "${DEFAULT_CONFIG.ranker}"`);
 			continue;
 		}
 		const limit = LIMITS[key]!;
@@ -115,6 +150,7 @@ export function applyConfig(raw: unknown, file: string): ConfigResult {
 			continue;
 		}
 		(config as unknown as Record<string, number>)[key] = value;
+		explicit.push(key);
 	}
 	// A budget smaller than its own sections is a contradiction, not a preference.
 	if (config.coreTokens + config.dailyTokens > config.budgetTokens) {
@@ -123,10 +159,46 @@ export function applyConfig(raw: unknown, file: string): ConfigResult {
 		);
 		const room = config.budgetTokens;
 		const coreShare = Math.min(config.coreTokens, room);
+		const dailyShare = Math.min(config.dailyTokens, room - coreShare);
+		if (coreShare !== config.coreTokens) capped.push("coreTokens");
+		if (dailyShare !== config.dailyTokens) capped.push("dailyTokens");
 		config.coreTokens = coreShare;
-		config.dailyTokens = Math.min(config.dailyTokens, room - coreShare);
+		config.dailyTokens = dailyShare;
 	}
-	return { config, warnings };
+	return { config, warnings, explicit, capped };
+}
+
+const NAME_WIDTH = Math.max(...SETTINGS.map((setting) => setting.key.length), "retrieved".length) + 1;
+
+/**
+ * `/memory settings`: every setting with the value in use, its default, the
+ * range it must fall inside, and where the value came from — the file, a
+ * default, or the section interlock. A number with no range beside it cannot be
+ * reviewed: the reader has no way to know it is wrong (R48).
+ */
+export function describeSettings(result: ConfigResult, view: { file: string; present: boolean }): string {
+	const row = (name: string, current: string, fallback: string, allowed: string, state: string, meaning: string) =>
+		`${name.padEnd(NAME_WIDTH)}${current.padStart(9)}${fallback.padStart(9)}${allowed.padStart(12)}  ${state.padEnd(9)}${meaning}`;
+	const stateOf = (key: string) => (result.capped.includes(key) ? "capped" : result.explicit.includes(key) ? "file" : "default");
+	const value = (key: keyof MemoryConfig) => String(result.config[key]);
+	const fallback = (key: keyof MemoryConfig) => String(DEFAULT_CONFIG[key]);
+	const lines: string[] = [
+		view.present
+			? `config file: ${view.file}\nThis file is hand-editable: the next turn reads it, no restart.`
+			: `config file: ${view.file} — not present, so every value below is a default`,
+		"",
+		row("setting", "current", "default", "allowed", "in use", "what it decides"),
+	];
+	for (const setting of SETTINGS) {
+		const allowed = setting.range ? `${setting.range.min}..${setting.range.max}` : setting.key === "ranker" ? "a name" : "true|false";
+		const meaning = setting.boundary ? `${setting.meaning}; ${setting.boundary}` : setting.meaning;
+		lines.push(row(setting.key, value(setting.key), fallback(setting.key), allowed, stateOf(setting.key), meaning));
+	}
+	const retrieved = result.config.budgetTokens - result.config.coreTokens - result.config.dailyTokens;
+	const defaultRetrieved = DEFAULT_CONFIG.budgetTokens - DEFAULT_CONFIG.coreTokens - DEFAULT_CONFIG.dailyTokens;
+	lines.push(row("retrieved", String(retrieved), String(defaultRetrieved), "—", "derived", "what is left for recall after core and daily (R27)"));
+	for (const warning of result.warnings) lines.push(`warning: ${warning}`);
+	return lines.join("\n");
 }
 
 export function describeConfig(config: MemoryConfig): string {

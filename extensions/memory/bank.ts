@@ -12,7 +12,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-import { applyConfig, loadConfig, describeConfig, type MemoryConfig } from "./config.js";
+import { applyConfig, loadConfig, describeConfig, describeSettings, type ConfigResult } from "./config.js";
 import { dailyStatus, readDaily, rolloverDaily, appendDailyItem, type DailyLog } from "./daily.js";
 import { gateDaily, gatePropose } from "./gate.js";
 import { buildInjection, formatPreview, type InjectionResult } from "./inject.js";
@@ -67,7 +67,8 @@ export class Bank {
 	readonly paths: BankPaths;
 	private readonly clock: Clock;
 	private readonly git: (cwd: string) => Promise<{ root?: string; remote?: string }>;
-	private configCache: { config: MemoryConfig; warnings: string[] } | undefined;
+	private configCache: ConfigResult | undefined;
+	private configSignature = "";
 	private snapshotCache: BankSnapshot | undefined;
 	private snapshotSignature = "";
 	private contextCache = new Map<string, ScopeContext>();
@@ -86,16 +87,45 @@ export class Bank {
 		return dayOf(this.clock());
 	}
 
-	config(): { config: MemoryConfig; warnings: string[] } {
-		if (!this.configCache) this.configCache = loadConfig(this.paths);
+	/**
+	 * The config file is hand-editable like the claim stores, so the cache is keyed
+	 * on it the same way (name, mtime, size): an edit in an editor reaches the next
+	 * turn of a running session instead of waiting for a restart (R48).
+	 */
+	config(): ConfigResult {
+		const signature = this.configSignatureOf();
+		if (this.configCache === undefined || signature !== this.configSignature) {
+			this.configCache = loadConfig(this.paths);
+			this.configSignature = signature;
+		}
 		return this.configCache;
+	}
+
+	private configSignatureOf(): string {
+		try {
+			const stat = statSync(this.paths.config);
+			return `${Math.round(stat.mtimeMs)}:${stat.size}`;
+		} catch {
+			return "absent";
+		}
 	}
 
 	/** Report a config object the caller just edited, without pretending to read the file. */
 	setConfig(raw: unknown): string[] {
 		const applied = applyConfig(raw, this.paths.config);
 		this.configCache = applied;
+		this.configSignature = this.configSignatureOf();
 		return applied.warnings;
+	}
+
+	/** Every setting with its default, its range, and where the value in use came from (R48). */
+	settings(): Outcome<ConfigResult> {
+		const result = this.config();
+		return {
+			ok: true,
+			text: describeSettings(result, { file: this.paths.config, present: existsSync(this.paths.config) }),
+			data: result,
+		};
 	}
 
 	/**

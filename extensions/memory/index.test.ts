@@ -717,3 +717,64 @@ test("component: Pi really exports the token estimator the budget and the baseli
 	assert.equal(typeof pi.estimateTokens, "function", "estimateTokens must exist in the Pi install the tests run against");
 	assert.equal(pi.estimateTokens({ role: "user", content: "abcdefgh" } as never), 2);
 });
+
+test("component: /memory settings lists every knob, and /memory config is its old name (R48)", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		const { harness } = install({ paths });
+		const notes: string[] = [];
+		const ctx = {
+			...fakeContext({ mode: "print" }).ctx,
+			ui: { notify: (message: string) => notes.push(message) },
+			sessionManager: { getSessionId: () => "s" },
+		} as unknown as ExtensionCommandContext;
+		const command = harness.commands.get("memory")!;
+
+		await command.handler("settings", ctx);
+		assert.match(notes[0]!, /config\.json — not present, so every value below is a default/);
+		assert.match(notes[0]!, /setting\s+current\s+default\s+allowed\s+in use\s+what it decides/);
+		assert.match(notes[0]!, /maxRetrievedClaims\s+6\s+6\s+0\.\.200\s+default/);
+		assert.match(notes[0]!, /retrieved\s+900\s+900\s+—\s+derived/);
+
+		notes.length = 0;
+		writeFileSync(join(paths.root, "config.json"), JSON.stringify({ maxRetrievedClaims: 2, budgetTokens: 1200, coreTokens: 400, dailyTokens: 300 }));
+		await command.handler("config", ctx);
+		const shown = notes[0]!;
+		assert.ok(shown.includes(`config file: ${join(paths.root, "config.json")}`), "the old name still names the file");
+		assert.match(shown, /maxRetrievedClaims\s+2\s+6\s+0\.\.200\s+file/);
+		assert.match(shown, /retrieved\s+500\s+900\s+—\s+derived/);
+
+		notes.length = 0;
+		writeFileSync(join(paths.root, "config.json"), JSON.stringify({ budgetTokens: "wide" }));
+		await command.handler("settings", ctx);
+		assert.match(notes[0]!, /warning: .*budgetTokens must be a whole number — using 2000/);
+	} finally {
+		cleanup();
+	}
+});
+
+test("component: an edit to config.json reaches the running session's next turn, no restart (R48)", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		for (const key of ["git.flow", "git.push", "git.merge"]) {
+			upsertClaim(paths, claim(key, { body: `the git flow rule about ${key}` }));
+		}
+		const { harness, ctx } = install({ paths });
+		const before = harness.hooks.get("before_agent_start")!;
+		const turn = () => before({ type: "before_agent_start", messageType: "user", prompt: "the git flow rule" }, ctx) as Promise<{ message: { content: string } }>;
+
+		const first = await turn();
+		assert.equal((first.message.content.match(/\[rule ·/g) ?? []).length, 3, "three related claims at the default cap");
+
+		writeFileSync(join(paths.root, "config.json"), JSON.stringify({ maxRetrievedClaims: 1 }));
+		const second = await turn();
+		assert.equal((second.message.content.match(/\[rule ·/g) ?? []).length, 1, "the same session honours the new cap on its next turn");
+		assert.match(second.message.content, /Not shown: 2 claims \(2 rules, 0 facts\) — past the 1-claim recall cap/);
+
+		writeFileSync(join(paths.root, "config.json"), JSON.stringify({ maxRetrievedClaims: 1, budgetTokens: 5 }));
+		const third = await turn();
+		assert.equal((third.message.content.match(/\[rule ·/g) ?? []).length, 1, "a bad value falls back to its default; it does not stop the turn");
+	} finally {
+		cleanup();
+	}
+});

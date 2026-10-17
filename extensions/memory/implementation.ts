@@ -280,8 +280,9 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 				return reviewAction(sub, rest);
 			case "doctor":
 				return bank.doctor();
+			case "settings":
 			case "config":
-				return { ok: true, text: `config file: ${bank.paths.config}\n${describeConfigValue(bank)}` };
+				return bank.settings();
 			case "flag":
 				return bank.flag(rest[0] ?? "", (rest[1] ?? "stale") as "stale" | "rival", ctx.sessionManager.getSessionId());
 			case "flags":
@@ -295,16 +296,6 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 			default:
 				return { ok: false, text: `unknown /memory subcommand "${sub}" — try /memory help` };
 		}
-	}
-
-	function describeConfigValue(bank: Bank): string {
-		const { config, warnings } = bank.config();
-		const lines = [
-			`budget ${config.budgetTokens} tokens (core ${config.coreTokens}, daily ${config.dailyTokens}, retrieved the rest)`,
-			`pending claims are flagged after ${config.pendingFlagDays} days; inline conflict dialog ${config.inlineConflictDialog ? "on" : "off"}; ranker ${config.ranker}`,
-		];
-		for (const warning of warnings) lines.push(`warning: ${warning}`);
-		return lines.join("\n");
 	}
 
 	async function review(rest: string[], ctx: ExtensionCommandContext): Promise<Outcome> {
@@ -450,7 +441,8 @@ const HELP = `memory:
   approve|reject|defer <key> [scope]  —  or --wave agent|migration for the batch
   edit <key> [scope] <body>
   doctor                     what is wrong with the bank, if anything
-  config | paths
+  settings | config          every setting: value in use, default, range, and where the file is
+  paths                      where the bank's files live
   flag <key> stale|rival     mark an injected claim as stale or rival (trial input)
   flags                      every flag recorded
   trial [days] | trial baseline [--days n] [--marker text] [--sessions-dir path]

@@ -64,6 +64,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - +39 memory tests (189 total, 666 in the suite).
 
+### Added (memory, settings)
+
+- **`/memory settings`** — every setting with the value in use, its default, the range the validator
+  enforces, and where that value came from: `file`, `default`, or `capped` (the section interlock moved
+  it). A refused value never reads as set. It also prints `retrieved` as a **derived** row — what the
+  caps actually leave for recall, which is the number the trial's lever sits on — and `config` still
+  answers to the old name. The listing and the validator read one table (`SETTINGS` in `config.ts`), so
+  a listing cannot drift from what is enforced, and no knob is shown as a bare number: without its
+  range a wrong value and an unusual one look identical (spec R49).
+- A TUI editor for these values is deliberately **not** built yet: a settings panel is only worth
+  having once it can show a knob beside the effect it has, and that effect is what the trial is
+  measuring now (spec D19).
+
+### Fixed (memory, settings)
+
+- **A config edit waited for a restart.** `config.json` is hand-editable, and the claim stores had
+  already learned to re-read on external change, but the config was read once per session: an edit — or
+  a deliberately bad value, to see what the fallback does — never reached a running session. It is now
+  cached on the file's mtime/size like the stores, so the next turn of the same session honours it
+  (spec R48). Tested by changing `maxRetrievedClaims` under one live bank and counting the claims its
+  next injection carries, and by a bad `budgetTokens` falling back without stopping the turn.
+
+### Tests (memory, settings)
+
+- +5 memory tests (194 total, 671 in the suite): the table covers every setting exactly once and its
+  range is the range the validator enforces (both bounds accepted, just outside refused with the
+  fallback named), origin of each value, the listing's rows, and the running session honouring an
+  external config edit through the real `before_agent_start` hook.
+
 ## [1.5.0] - 2026-10-16
 
 ### Added

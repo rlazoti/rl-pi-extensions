@@ -4,7 +4,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { DEFAULT_CONFIG, applyConfig, describeConfig, loadConfig } from "./config.ts";
+import { DEFAULT_CONFIG, SETTINGS, applyConfig, describeConfig, describeSettings, loadConfig } from "./config.ts";
 import { bankPaths } from "./store.ts";
 
 function scratchFile(): { file: string; paths: ReturnType<typeof bankPaths>; cleanup: () => void } {
@@ -143,3 +143,93 @@ test("config: applyConfig is usable without a file, for tests and /memory config
 	assert.equal(result.config.coreTokens + result.config.dailyTokens, 900, "its sections fit the budget it was given");
 	assert.match(result.warnings[0]!, /exceed budgetTokens/);
 });
+
+test("config: the settings table is the validator — the same keys and the same bounds (R48)", () => {
+	assert.deepEqual(
+		SETTINGS.map((setting) => setting.key).sort(),
+		Object.keys(DEFAULT_CONFIG).sort(),
+		"one row per setting: none missing, none invented",
+	);
+	assert.deepEqual(
+		SETTINGS.filter((setting) => !setting.range).map((setting) => setting.key),
+		["inlineConflictDialog", "ranker"],
+		"only the non-numeric settings have no numeric bound",
+	);
+
+	for (const setting of SETTINGS) {
+		assert.ok(setting.meaning.length > 0 && !setting.meaning.includes("\n"), `${setting.key} explains itself in one line`);
+		if (!setting.range) continue;
+		const { min, max } = setting.range;
+		for (const accepted of [min, max]) {
+			const result = applyConfig(storeAlongside(setting.key, accepted), "<inline>");
+			assert.equal(result.config[setting.key], accepted, `${setting.key} accepts ${accepted}`);
+			assert.deepEqual(result.warnings, [], `${setting.key}=${accepted} is inside its range, so nothing is reported`);
+		}
+		for (const refused of [min - 1, max + 1]) {
+			const result = applyConfig(storeAlongside(setting.key, refused), "<inline>");
+			assert.equal(result.config[setting.key], DEFAULT_CONFIG[setting.key], `${setting.key}=${refused} falls back`);
+			assert.deepEqual(result.warnings, [`<inline>: ${setting.key}=${refused} is outside ${min}..${max} — using ${DEFAULT_CONFIG[setting.key]}`]);
+		}
+	}
+});
+
+/** A store that names one setting, plus the neighbours that keep the section interlock (R27) out of the way. */
+function storeAlongside(key: string, value: number): Record<string, number> {
+	const store: Record<string, number> = { [key]: value };
+	if (key === "budgetTokens") {
+		store.coreTokens = 0;
+		store.dailyTokens = 0;
+	}
+	if (key === "coreTokens" || key === "dailyTokens") {
+		store.budgetTokens = 20_000;
+		store[key === "coreTokens" ? "dailyTokens" : "coreTokens"] = 0;
+	}
+	return store;
+}
+
+test("config: the result says which value the file set, which is a default, and which the interlock moved", () => {
+	const moved = applyConfig({ maxRetrievedClaims: 2, budgetTokens: 500, coreTokens: 400, dailyTokens: 400 }, "<inline>");
+	assert.deepEqual(moved.explicit, ["maxRetrievedClaims", "budgetTokens", "coreTokens", "dailyTokens"]);
+	assert.deepEqual(moved.capped, ["dailyTokens"], "core kept its share; daily lost 300 tokens to fit the budget");
+	assert.equal(moved.config.dailyTokens, 100);
+
+	const refused = applyConfig({ pendingFlagDays: 0, nonsense: 1 }, "<inline>");
+	assert.deepEqual(refused.explicit, [], "a refused value never reads as set");
+	assert.deepEqual(refused.capped, []);
+});
+
+test("config: the settings listing shows every knob, its default, its range and where its value came from (R48)", () => {
+	const { file, paths, cleanup } = scratchFile();
+	try {
+		const bare = describeSettings(loadConfig(paths), { file, present: false });
+		assert.match(bare, /config\.json — not present, so every value below is a default/);
+		assert.match(bare, /0 means no cap/, "a boundary value says what it means");
+		for (const setting of SETTINGS) {
+			const line = rowOf(bare, setting.key);
+			assert.ok(line, `${setting.key} has a row`);
+			assert.ok(line!.includes(String(DEFAULT_CONFIG[setting.key])), `${setting.key} shows its default`);
+			assert.match(line!, /default\s/, `${setting.key} says its value in use is the default`);
+			if (setting.range) assert.ok(line!.includes(`${setting.range.min}..${setting.range.max}`), `${setting.key} shows the range the validator enforces`);
+		}
+		const derived = rowOf(bare, "retrieved")!;
+		assert.ok(derived.includes(String(DEFAULT_CONFIG.budgetTokens - DEFAULT_CONFIG.coreTokens - DEFAULT_CONFIG.dailyTokens)));
+		assert.match(derived, /derived/, "the number the caps actually leave is shown as derived, not as a setting");
+
+		writeFileSync(file, JSON.stringify({ maxRetrievedClaims: 1, budgetTokens: 2000, coreTokens: 1800, dailyTokens: 500, typo: true }));
+		const edited = describeSettings(loadConfig(paths), { file, present: true });
+		assert.ok(edited.includes(`config file: ${file}`), "the listing names the file it read");
+		assert.match(edited, /hand-editable: the next turn reads it, no restart/);
+		assert.match(rowOf(edited, "maxRetrievedClaims")!, /\bfile\s/, "a value the file set reads as set, not as a default");
+		assert.equal(rowOf(edited, "maxRetrievedClaims")!.includes("0..200"), true);
+		assert.equal(rowOf(edited, "dailyTokens")!.includes("200"), true, "the number in use is the capped one, not the one written");
+		assert.match(rowOf(edited, "dailyTokens")!, /capped/);
+		assert.match(edited, /warning: .*unknown setting "typo"/);
+		assert.match(rowOf(edited, "retrieved")!, /derived/);
+	} finally {
+		cleanup();
+	}
+});
+
+function rowOf(text: string, name: string): string | undefined {
+	return text.split("\n").find((line) => line.startsWith(name));
+}
