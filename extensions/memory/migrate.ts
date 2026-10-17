@@ -16,9 +16,13 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { join , basename } from "node:path";
+import { basename, join } from "node:path";
 
-import { archiveFile, markdownFiles, readJson, writeJson, type BankPaths } from "./store.js";
+import { appendDatedItems, type DailySection } from "./daily.js";
+import { detectStatus, gatePropose } from "./gate.js";
+import { type Claim } from "./grammar.js";
+import { propose } from "./queue.js";
+import { archiveFile, markdownFiles, readFileOrNull, readJson, type BankPaths, writeJson } from "./store.js";
 import { dayOf, type Clock, systemClock } from "./time.js";
 
 export const STATE_VERSION = 1;
@@ -337,6 +341,148 @@ export function draftQueue(paths: BankPaths, opts: { wave?: string; batch?: numb
 	const batch = opts.batch === undefined || opts.batch < 1 ? 1 : opts.batch;
 	return queue.slice(0, batch);
 }
+
+/**
+ * Draft a whole wave in one pass: every live entry in every file of the wave
+ * becomes a pending claim with `origin: migration`, through the same gate a
+ * hand-written proposal passes. The text is carried over verbatim — the judgment
+ * is left where the spec puts it, with Rodrigo at review — and anything the gate
+ * refuses is reported with its reason rather than quietly kept.
+ *
+ * This is the fast path for a big bank. Rewriting an entry into a tighter claim
+ * stays available (`/memory migrate draft` hands the file over for that), and a
+ * claim still never injects until it is approved (D9).
+ */
+export function applyMigration(
+	paths: BankPaths,
+	opts: { wave?: string; all?: boolean; clock?: Clock } = {},
+): { proposed: { file: string; key: string }[]; refused: { file: string; key: string; problem: string }[]; files: string[]; wave: string } | { done: true; reason: string } {
+	const clock = opts.clock ?? systemClock;
+	const state = readState(paths);
+	const blocked = requireBackup(state);
+	if (blocked) return { done: true, reason: blocked };
+	if (state === undefined) return { done: true, reason: "no migration plan: run /memory migrate plan first" };
+
+	const queue = todoQueue(state, { wave: opts.wave }).filter((todo) => todo.wave !== "daily");
+	if (queue.length === 0) return { done: true, reason: opts.wave ? `nothing left in wave ${opts.wave}` : "every claim file has been drafted" };
+	const wanted = opts.all ? queue : queue.filter((todo) => todo.wave === queue[0]!.wave);
+
+	const proposed: { file: string; key: string }[] = [];
+	const refused: { file: string; key: string; problem: string }[] = [];
+	const today = dayOf(clock());
+
+	for (const todo of wanted) {
+		const text = readFileOrNull(join(paths.root, todo.file));
+		if (text === undefined) {
+			refused.push({ file: todo.file, key: "(file)", problem: "the source file cannot be read" });
+			continue;
+		}
+		let count = 0;
+		for (const entry of parseLegacyStore(text, todo.file).entries) {
+			if (legacyIsRetired(entry)) {
+				refused.push({ file: todo.file, key: entry.key, problem: `retired (${entry.fields.status ?? "?"}): archive it, do not propose it` });
+				continue;
+			}
+			const draft: Claim = {
+				key: entry.key,
+				kind: legacyKind(entry),
+				scope: entry.fields.scope ?? "global",
+				asOf: entry.fields.asOf ?? "",
+				source: `migrated from ${todo.file}${entry.fields.source ? ` (originally: ${entry.fields.source})` : ""}`,
+				body: entry.body,
+				aliases: splitList(entry.fields.aliases),
+				tags: splitList(entry.fields.tags),
+				links: splitList(entry.fields.links),
+				origin: "migration",
+				state: "pending",
+				proposedAt: today,
+			};
+			const gate = gatePropose({ claim: draft });
+			if (!gate.ok) {
+				refused.push({ file: todo.file, key: entry.key, problem: gate.problems.join("; ") });
+				continue;
+			}
+			propose(paths, gate.claim, today);
+			proposed.push({ file: todo.file, key: entry.key });
+			count++;
+		}
+		const tracked = state.files[todo.file];
+		if (tracked) {
+			tracked.status = "drafted";
+			tracked.proposals = count;
+			tracked.note = `applied: ${count} claim(s) proposed`;
+		}
+	}
+
+	state.updatedAt = today;
+	writeState(paths, state);
+	return { proposed, refused, files: wanted.map((todo) => todo.file), wave: wanted[0]!.wave };
+}
+
+function splitList(value: string | undefined): string[] {
+	return (value ?? "")
+		.split(/[;,]/)
+		.map((part) => part.trim())
+		.filter((part) => part !== "");
+}
+
+/**
+ * The working-state wave: the open items in a daily-context file become dated
+ * items in today's log, with their original dates. A file that is project status
+ * instead (release state, SHAs, tool lists) gets nothing: projects live outside
+ * memory (R2), and its text is status the store refuses to keep as a claim.
+ * Status-bearing items are reported and left out, never silently dropped.
+ */
+export function migrateDailyItems(
+	paths: BankPaths,
+	opts: { clock?: Clock } = {},
+): { dailyFile: string; converted: { file: string; added: number; skipped: number }[]; statusOnly: { file: string; items: number }[]; refused: { file: string; item: string }[]; total: number } | { done: true; reason: string } {
+	const clock = opts.clock ?? systemClock;
+	const state = readState(paths);
+	const blocked = requireBackup(state);
+	if (blocked) return { done: true, reason: blocked };
+	if (state === undefined) return { done: true, reason: "no migration plan: run /memory migrate plan first" };
+
+	const converted: { file: string; added: number; skipped: number }[] = [];
+	const statusOnly: { file: string; items: number }[] = [];
+	const refused: { file: string; item: string }[] = [];
+	let total = 0;
+	let dailyFile = "";
+
+	for (const entry of Object.values(state.files)) {
+		if (entry.wave !== "daily") continue;
+		const text = readFileOrNull(join(paths.root, entry.file));
+		if (text === undefined) continue;
+		const items = legacyDailyItems(text);
+		if (!/daily/i.test(basename(entry.file))) {
+			statusOnly.push({ file: entry.file, items: items.length });
+			entry.status = "drafted";
+			entry.proposals = 0;
+			entry.note = "project status, not memory (R2): nothing carried; the file is archived at cutover";
+			continue;
+		}
+		const clean: { section: DailySection; text: string; day?: string }[] = [];
+		for (const item of items) {
+			if (detectStatus(item.text).length > 0) {
+				refused.push({ file: entry.file, item: item.text.slice(0, 120) });
+				continue;
+			}
+			clean.push(item);
+		}
+		const result = appendDatedItems(paths, clean, dayOf(clock()));
+		dailyFile = result.file;
+		converted.push({ file: entry.file, added: result.added, skipped: result.skipped });
+		total += result.added;
+		entry.status = "drafted";
+		entry.proposals = 0;
+		entry.note = `${result.added} open item(s) carried into daily/today.md${refused.length > 0 ? `, ${refused.length} status item(s) left out` : ""}`;
+	}
+
+	state.updatedAt = dayOf(clock());
+	writeState(paths, state);
+	return { dailyFile, converted, statusOnly, refused, total };
+}
+
 
 export interface Progress {
 	total: number;

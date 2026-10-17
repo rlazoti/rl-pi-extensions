@@ -21,7 +21,7 @@ and what is deliberately not done.
 | Write | `memory_log(section, text)` | One daily item. The extension stamps the date and time; the agent cannot set them. |
 | Write | `memory_propose(…)` | A **pending** claim. The agent can never write an approved claim. |
 | Write | `memory_archive(name, text)` | Read-only archive for prose that is neither a claim nor a daily item. |
-| Command | `/memory …` | `status · preview · review · approve · reject · defer · edit · doctor · config · paths · flag · flags · trial · migrate` |
+| Command | `/memory …` | `status · preview · review · approve · reject · defer · edit · doctor · config · paths · flag · flags · trial · migrate` — review and the review actions take `--wave agent\|migration` |
 | Hook | `session_start` | One review notice when anything waits. Never blocks. |
 | Hook | `before_agent_start` | The budgeted injection, for user-started runs only. |
 
@@ -159,7 +159,12 @@ never dropped automatically, however long they wait.
 
 `/memory review` walks the queue. In the TUI it opens **one dialog at a time**
 (Pi has a single dialog slot): approve, reject, edit the wording, defer, stop.
-Anywhere else it lists the queue and the exact commands to act on it.
+Anywhere else it lists the queue and the exact commands to act on it. Past a
+dozen claims the full listing is also written to
+`migration/review-<wave>-<day>.md`, because a queue you must read is a document,
+not a scrollback. A whole batch is decided with
+`/memory approve|reject|defer --wave agent|migration`; wording changes stay per
+claim (`/memory edit <key> [scope] <new body>`).
 
 `inlineConflictDialog` (default `false`): when `true`, a proposal that would
 replace an approved claim opens a dialog right away, inside the tool call, so
@@ -215,10 +220,40 @@ rl memory.
 /memory migrate backup                     tarball of the bank, listed back to prove it
 /memory migrate plan                       waves from the files that really exist, rules first
 /memory migrate status                     progress, resumable
-/memory migrate draft [--wave w] [--file f] [--batch n]   the next source file, verbatim, with instructions
+/memory migrate apply [--wave w | --all]   draft a whole wave in one pass, through the gate
+/memory migrate draft [--wave w] [--file f] [--batch n]   one file, verbatim, for rewriting by hand
 /memory migrate drafted <file> <n>         record one file as drafted
+/memory migrate daily                      the working-state wave, with the items' own dates
 /memory migrate cutover                    archive the sources — never delete them
 ```
+
+### Migrating a whole bank in one sitting
+
+```
+/memory migrate backup
+/memory migrate plan
+/memory migrate apply --all      every live entry becomes a pending claim; refusals are listed with reasons
+/memory migrate daily            open items from the old daily-context file, dated as they were
+/memory review --wave migration  the queue, and a full listing written beside it
+/memory approve --wave migration the batch decided at once
+```
+
+Nothing injected changes during any of it: a migrated claim is `origin: migration`
+and never injects until approved (D9), so the migration can be run, reviewed and
+rejected without the model ever seeing a draft. After the batch is approved,
+what is wrong is fixed where it lives — `claims/rules/*.md` and
+`claims/facts/*.md` are hand-editable, and an edit is picked up by the next turn
+(no restart). To drop one: `/memory reject <key> [scope]`.
+
+`apply` carries entry text over verbatim and runs it through the same gate a
+hand-written proposal passes: an entry with no `asOf`, a body that reads as
+status, supersession prose, or an already-retired entry is **not** proposed and
+is reported with its reason. Use `migrate draft` for a file whose entries need
+rewriting into tighter claims.
+
+`migrate daily` converts only the daily-context file. A file that is project
+status (release state, SHAs, tool lists) is reported as such and carried by
+nothing: projects live outside memory (R2).
 
 Every step except `backup` refuses to run without a verified backup. Source files
 are untouched until cutover. Migration claims carry `origin: migration` and never
@@ -261,7 +296,7 @@ glob matcher whose semantics are pinned by tests — `dot: true` (a scope must s
 
 ## Tests
 
-165 tests, one file per module (`time · grammar · scope · store · queue · gate ·
+174 tests, one file per module (`time · grammar · scope · store · queue · gate ·
 daily · rank · inject · notice · config · trial · migrate · index`). `index.test.ts`
 drives the real Pi surface — tool registrations, both hooks, `/memory` — against a
 scratch bank with an injected clock and git probe, so no test touches

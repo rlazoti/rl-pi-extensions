@@ -173,6 +173,39 @@ export function formatItem(item: DailyItem): string {
  * Append one item, stamped by the extension (R15). The agent chooses the section
  * and the text; the date and time are never the agent's to set.
  */
+/**
+ * Append items that already carry their own date — migrated daily work, carried
+ * forward from a file the extension did not write. The date is the item's, not
+ * now: re-dating carried work to today makes every migrated item look fresh.
+ * Re-appending the same text to the same section does nothing, so the migration
+ * step can be run twice.
+ */
+export function appendDatedItems(
+	paths: BankPaths,
+	items: { section: DailySection; text: string; day?: string }[],
+	today: string,
+): { file: string; added: number; skipped: number } {
+	const log = readDaily(paths, today);
+	let added = 0;
+	let skipped = 0;
+	for (const item of items) {
+		const text = item.text.replace(/\s+/g, " ").trim();
+		if (text === "" || !isDailySection(item.section)) {
+			skipped++;
+			continue;
+		}
+		const stamp = item.day ?? today;
+		if (log.items.some((existing) => existing.section === item.section && existing.text === text)) {
+			skipped++;
+			continue;
+		}
+		log.items.push({ section: item.section, stamp, day: stamp.slice(0, 10), text, line: 0, undated: item.day === undefined });
+		added++;
+	}
+	if (added > 0) writeDaily(paths, log);
+	return { file: log.file, added, skipped };
+}
+
 export function appendDailyItem(paths: BankPaths, input: { section: string; text: string; clock?: Clock }): { file: string; item: DailyItem; log: DailyLog } {
 	const clock = input.clock ?? systemClock;
 	const now = clock();

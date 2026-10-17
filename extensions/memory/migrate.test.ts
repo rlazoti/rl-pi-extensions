@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+	applyMigration,
 	cutoverSources,
 	legacyDailyItems,
 	legacyIsRetired,
@@ -12,7 +13,9 @@ import {
 	markDrafted,
 	migrationProgress,
 	draftQueue,
+	migrateDailyItems,
 	nextDraft,
+	readState,
 	parseLegacyStore,
 	planMigration,
 	recordBackup,
@@ -20,7 +23,7 @@ import {
 	savePlan,
 	formatMigrationProgress,
 } from "./migrate.ts";
-import { bankPaths, ensureBankDirs, markdownFiles } from "./store.ts";
+import { bankPaths, ensureBankDirs, markdownFiles, readClaims } from "./store.ts";
 
 const DAY = () => new Date(2026, 9, 16, 10, 0, 0);
 
@@ -248,6 +251,95 @@ test("migrate: progress is resumable and a re-plan keeps reviewed work (R38)", (
 		progress = migrationProgress(paths);
 		assert.equal(progress.drafted, 1);
 		assert.equal(markDrafted(paths, "no/such/file.md", 1, DAY).ok, false);
+	} finally {
+		cleanup();
+	}
+});
+
+test("migrate: apply drafts a wave through the gate and reports what it refused (R38)", () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		writeBank(paths);
+		writeFileSync(
+			join(paths.root, "knowledge", "broken.md"),
+			"# Broken\n\n## broken.no-date\n- kind: fact\n- scope: global\n- source: a test\n\nNo asOf anywhere.\n\n## broken.old-thing\n- kind: rule\n- scope: global\n- asOf: 2026-01-01\n- source: a test\n\nSuperseded by the newer branch rule.\n",
+		);
+		savePlan(paths, planMigration(paths, { clock: DAY }));
+
+		const blocked = applyMigration(paths, { all: true, clock: DAY });
+		assert.equal("done" in blocked && blocked.done, true, "the backup gate holds");
+
+		recordBackup(paths, { file: join(paths.backups, "memory-2026-10-16-10-00-00.tar.gz"), entries: 12 }, DAY);
+		const result = applyMigration(paths, { all: true, clock: DAY });
+		if ("done" in result) return assert.fail(result.reason);
+		assert.deepEqual(
+			result.proposed.map((entry) => entry.key).sort(),
+			["git-standards.branch-naming-convention", "git-standards.github-push-preferences", "macos.pressure-widget"],
+		);
+		const refusals = new Map(result.refused.map((entry) => [entry.key, entry.problem]));
+		assert.match(refusals.get("git-standards.old-flow")!, /retired/);
+		assert.match(refusals.get("broken.no-date")!, /asOf/);
+		assert.match(refusals.get("broken.old-thing")!, /supersed/i);
+
+		const snapshot = readClaims(paths);
+		assert.equal(snapshot.claims.length, 3);
+		assert.ok(snapshot.claims.every((claim) => claim.state === "pending" && claim.origin === "migration"));
+		assert.ok(snapshot.claims.every((claim) => claim.source.startsWith("migrated from knowledge/")));
+
+		const again = applyMigration(paths, { all: true, clock: DAY });
+		assert.equal("done" in again && (again as { reason: string }).reason, "every claim file has been drafted", "resumable");
+		const state = readState(paths)!;
+		assert.equal(state.files["knowledge/loose.md"]!.status, "drafted", "a prose file has nothing to propose, and is still accounted for");
+	} finally {
+		cleanup();
+	}
+});
+
+test("migrate: the working-state wave carries open items with their dates and leaves project status out (R2, R15)", () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		writeBank(paths);
+		writeFileSync(
+			join(paths.root, "core", "activeProjects.md"),
+			"# Active Projects\n\n## rl-pi-extensions (~/Projects/Terminal/rl-pi-extensions)\n- Status: **v1.5.0 released and pushed** (2026-10-16), head 9fa1b7c\n- Open: delete the merged local branch\n",
+		);
+		const planned = planMigration(paths, { clock: DAY });
+		savePlan(paths, planned);
+		assert.equal(planned.state.files["core/activeProjects.md"]!.wave, "daily");
+
+		const blocked = migrateDailyItems(paths, { clock: DAY });
+		assert.equal("done" in blocked && blocked.done, true, "the backup gate holds here too");
+
+		recordBackup(paths, { file: join(paths.backups, "memory-2026-10-16-10-00-00.tar.gz"), entries: 12 }, DAY);
+		const result = migrateDailyItems(paths, { clock: DAY });
+		assert.equal("done" in result, false);
+		if ("done" in result) return;
+		assert.deepEqual(result.converted, [{ file: "core/dailyContext.md", added: 4, skipped: 0 }]);
+		assert.deepEqual(result.statusOnly, [{ file: "core/activeProjects.md", items: 2 }]);
+		assert.equal(result.total, 4);
+		const daily = readFileSync(result.dailyFile, "utf8");
+		assert.match(daily, /- \(2026-10-14\) Run app in simulator and verify all screens/);
+		assert.match(daily, /- \(2026-10-16\) rewrite the memory component from scratch/);
+		assert.ok(!daily.includes("9fa1b7c"), "release status never reaches the daily log");
+
+		const again = migrateDailyItems(paths, { clock: DAY });
+		assert.equal("done" in again, false);
+		assert.equal("done" in again ? undefined : again.total, 0, "running it twice adds nothing");
+		const progress = migrationProgress(paths);
+		const state = readState(paths)!;
+		assert.deepEqual(
+			Object.values(state.files)
+				.filter((entry) => entry.wave === "daily")
+				.map((entry) => [entry.file, entry.status]),
+			[
+				["core/activeProjects.md", "drafted"],
+				["core/dailyContext.md", "drafted"],
+			],
+			"both working-state files are done, and the note says what happened",
+		);
+		assert.match(state.files["core/activeProjects.md"]!.note!, /project status, not memory/);
+		assert.equal(progress.byWave.find((wave) => wave.wave === "daily")!.done, 2);
+		assert.equal(state.files["knowledge/macos.md"]!.status, "todo", "the claim waves are untouched");
 	} finally {
 		cleanup();
 	}

@@ -339,6 +339,9 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 	}
 
 	function reviewAction(action: "approve" | "reject" | "defer" | "edit", rest: string[]): Outcome {
+		const wave = flagValue(rest, "--wave");
+		if (wave !== undefined && action !== "edit") return bank.reviewWave(action, wave === "agent" ? "agent" : "migration");
+		if (wave !== undefined) return { ok: false, text: "edit is per claim: /memory edit <key> [scope] <new body>" };
 		const key = rest[0] ?? "";
 		if (key === "") return { ok: false, text: "usage: /memory approve|reject|defer|edit <key> [scope]" };
 		const scope = rest[1] ?? "";
@@ -397,6 +400,13 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 					batch: batch === undefined ? undefined : Number(batch),
 				});
 			}
+			case "apply":
+				return bank.migrateApply({
+					wave: flagValue(rest, "--wave") ?? (rest[1] !== undefined && !rest[1].startsWith("--") ? rest[1] : undefined),
+					all: rest.includes("--all"),
+				});
+			case "daily":
+				return bank.migrateDaily();
 			case "next":
 				// Alias for a single-file draft brief.
 				return bank.migrateDraft({ wave: rest[1] });
@@ -420,7 +430,7 @@ const HELP = `memory:
   preview [prompt]           the exact block a turn would get, with tokens per section
   review [--wave agent|migration]
                              walk the pending claims (dialog in the TUI, listing elsewhere)
-  approve|reject|defer <key> [scope]
+  approve|reject|defer <key> [scope]  —  or --wave agent|migration for the batch
   edit <key> [scope] <body>
   doctor                     what is wrong with the bank, if anything
   config | paths
@@ -429,7 +439,8 @@ const HELP = `memory:
   trial [days] | trial baseline [--days n] [--marker text] [--sessions-dir path]
   migrate backup | plan | status
   migrate draft [--wave rules|facts:<domain>] [--file <name> | --batch <n>]
-  migrate drafted <file> <n> | migrate cutover
+  migrate apply [--wave w | --all]   draft a whole wave through the gate
+  migrate drafted <file> <n> | migrate daily | migrate cutover
 
 Writes are memory_log (the daily log) and memory_propose (a pending claim).
 memory_read, memory_search and memory_list keep their old names.`;

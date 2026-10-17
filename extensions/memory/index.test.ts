@@ -440,6 +440,115 @@ test("component: a migrated proposal is told it never injects, and a sloppy orig
 	}
 });
 
+test("component: an edit made outside the extension is seen by the next turn", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		const bank = createBank({ paths, clock: CLOCK, git: async () => ({ root: "/repo/rl-pi-extensions", remote: "git@github.com:rlazoti/rl-pi-extensions.git" }) });
+		upsertClaim(paths, claim("git.flow", { tags: ["always"], body: "Never push without confirmation." }));
+		assert.match((await bank.injection("push", "/repo/rl-pi-extensions", "s")).result.text, /Never push without confirmation\./);
+
+		// Rodrigo edits the store in his editor: the claim is what it says now.
+		writeFileSync(join(paths.rules, "git.md"), readFileSync(join(paths.rules, "git.md"), "utf8").replace("Never push without confirmation.", "Never push to a shared remote without confirmation."));
+		const after = (await bank.injection("push", "/repo/rl-pi-extensions", "s")).result;
+		assert.match(after.text, /Never push to a shared remote without confirmation\./);
+		assert.ok(!after.text.includes("Never push without confirmation."), "the old wording is gone");
+
+		// And a claim approved in another session shows up here.
+		const other = createBank({ paths, clock: CLOCK, git: async () => ({}) });
+		other.proposeClaim({ key: "ledger.format", kind: "fact", scope: "global", asOf: "2026-09-01", source: "another session", body: "Ledgers are plain files." });
+		const seen = (await bank.injection("ledger", "/repo/rl-pi-extensions", "s")).result;
+		assert.match(seen.text, /\[fact · global · 2026-09-01\] \[unapproved\] ledger\.format: Ledgers are plain files/);
+	} finally {
+		cleanup();
+	}
+});
+
+test("component: migrate everything, then decide the batch once — and it injects (R38, R18, R28)", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		writeFileSync(
+			join(paths.root, "knowledge", "git-standards.md"),
+			"# Git standards\n\n## git-standards.push\n- kind: rule\n- scope: global\n- asOf: 2026-01-01\n- source: repo wiki\n- tags: always\n\nNever push without confirmation.\n",
+		);
+		writeFileSync(
+			join(paths.root, "knowledge", "macos.md"),
+			"# macOS\n\n## macos.widget\n- kind: fact\n- scope: global\n- asOf: 2026-09-01\n- source: this session\n\nThe memory pressure widget lives in the menu bar.\n",
+		);
+		const { harness } = install({ paths });
+		const notes: string[] = [];
+		const ctx = { ...fakeContext({ mode: "print" }).ctx, ui: { notify: (message: string) => notes.push(message) }, sessionManager: { getSessionId: () => "s" } } as unknown as ExtensionCommandContext;
+		const command = harness.commands.get("memory")!;
+
+		for (const step of ["migrate backup", "migrate plan", "migrate apply --all"]) await command.handler(step, ctx);
+		assert.match(notes[2]!, /wave rules: 2 claim\(s\) proposed from 2 file\(s\)/);
+
+		// Nothing injects while the batch waits, however well it matches the prompt (D9).
+		const bank = createBank({ paths, clock: CLOCK, git: async () => ({ root: "/repo/rl-pi-extensions", remote: "git@github.com:rlazoti/rl-pi-extensions.git" }) });
+		assert.equal((await bank.injection("push without confirmation", "/repo/rl-pi-extensions", "s")).result.text, "");
+
+		await command.handler("approve --wave migration", ctx);
+		assert.match(notes[3]!, /approved 2 pending claim\(s\) in the migration batch/);
+
+		const injected = (await bank.injection("push without confirmation", "/repo/rl-pi-extensions", "s")).result;
+		assert.match(injected.text, /### Always-on rules\n- \[rule · global · 2026-01-01\] git-standards\.push: Never push without confirmation\./);
+		assert.match(injected.text, /git-standards\.push: Never push without confirmation\./);
+	} finally {
+		cleanup();
+	}
+});
+
+test("component: one command decides a whole wave, and a long queue becomes a file to read (R18)", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		const bank = createBank({ paths, clock: CLOCK, git: async () => ({ root: "/repo/rl-pi-extensions", remote: "git@github.com:rlazoti/rl-pi-extensions.git" }) });
+		for (let i = 1; i <= 13; i++) {
+			bank.proposeClaim({ key: `mig.key${i}`, kind: "fact", scope: "global", asOf: "2026-01-01", source: "a test", body: `migrated fact number ${i}`, origin: "migration" });
+		}
+		const { harness } = install({ paths });
+		const notes: string[] = [];
+		const ctx = { ...fakeContext({ mode: "print" }).ctx, ui: { notify: (message: string) => notes.push(message) }, sessionManager: { getSessionId: () => "s" } } as unknown as ExtensionCommandContext;
+		const command = harness.commands.get("memory")!;
+
+		await command.handler("review --wave migration", ctx);
+		assert.match(notes[0]!, /13 claims waiting/);
+		assert.match(notes[0]!, /full listing written to .*migration\/review-migration-2026-10-16\.md/);
+		const digest = readFileSync(join(paths.migration, "review-migration-2026-10-16.md"), "utf8");
+		for (let i = 1; i <= 13; i++) assert.ok(digest.includes(`mig.key${i}`), `the digest lists mig.key${i}`);
+
+		await command.handler("approve --wave migration", ctx);
+		assert.match(notes[1]!, /approved 13 pending claim\(s\) in the migration batch/);
+		const counts = bank.queueCounts();
+		assert.equal(counts.total, 0, "nothing waits any more");
+		assert.equal(bank.snapshot().claims.filter((claim) => claim.state === "approved").length, 13);
+	} finally {
+		cleanup();
+	}
+});
+
+test("component: /memory migrate daily carries the working state with its dates (R15)", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		mkdirSync(join(paths.root, "core"), { recursive: true });
+		writeFileSync(
+			join(paths.root, "core", "dailyContext.md"),
+			"# Daily Context\n\n## In Progress\n\n- (2026-10-14) verify the simulator build\n- (2026-10-16) tune the ageing defaults\n\n## Completed\n\n- (2026-10-15) wrote the design doc\n",
+		);
+		const { harness } = install({ paths });
+		const notes: string[] = [];
+		const ctx = { ...fakeContext({ mode: "print" }).ctx, ui: { notify: (message: string) => notes.push(message) }, sessionManager: { getSessionId: () => "s" } } as unknown as ExtensionCommandContext;
+		const command = harness.commands.get("memory")!;
+		await command.handler("migrate backup", ctx);
+		await command.handler("migrate plan", ctx);
+		await command.handler("migrate daily", ctx);
+		assert.match(notes[notes.length - 1]!, /carried 3 open item\(s\) into .*daily\/today\.md/);
+		assert.match(readFileSync(join(paths.daily, "today.md"), "utf8"), /- \(2026-10-14\) verify the simulator build/);
+		await command.handler("migrate daily", ctx);
+		assert.match(notes[notes.length - 1]!, /core\/dailyContext\.md: 0 added, 3 already there/);
+	} finally {
+		cleanup();
+	}
+});
+
 test("component: the read tools work over the new layout (R41)", async () => {
 	const { paths, cleanup } = scratchBank();
 	try {

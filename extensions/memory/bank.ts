@@ -16,7 +16,7 @@ import { applyConfig, loadConfig, describeConfig, type MemoryConfig } from "./co
 import { dailyStatus, readDaily, rolloverDaily, appendDailyItem, type DailyLog } from "./daily.js";
 import { gateDaily, gatePropose } from "./gate.js";
 import { buildInjection, formatPreview, type InjectionResult } from "./inject.js";
-import { archiveText, backupBank, ensureBankDirs, inspectBank, readClaims, bankPaths as pathsFor, type BankPaths, type BankSnapshot, type ExecFn } from "./store.js";
+import { archiveText, backupBank, ensureBankDirs, inspectBank, readClaims, bankPaths as pathsFor, writeAtomic, type BankPaths, type BankSnapshot, type ExecFn } from "./store.js";
 import { listPending, propose, approve, reject as rejectClaim, defer as deferClaim, editPending, queueCounts, describePending, type PendingEntry, type QueueCounts } from "./queue.js";
 import { reviewNotice, type NoticeOptions } from "./notice.js";
 import { bm25, createRanker, type RankedText } from "./rank.js";
@@ -25,7 +25,9 @@ import { dayOf, describeAge, systemClock, type Clock } from "./time.js";
 import { identityOf, parseStore, type Claim } from "./grammar.js";
 import {
 	cutoverSources,
+	applyMigration,
 	draftQueue,
+	migrateDailyItems,
 	formatMigrationProgress,
 	markDrafted,
 	migrationProgress,
@@ -67,6 +69,7 @@ export class Bank {
 	private readonly git: (cwd: string) => Promise<{ root?: string; remote?: string }>;
 	private configCache: { config: MemoryConfig; warnings: string[] } | undefined;
 	private snapshotCache: BankSnapshot | undefined;
+	private snapshotSignature = "";
 	private contextCache = new Map<string, ScopeContext>();
 	private dayCache: string | undefined;
 	private rolledOver = false;
@@ -95,13 +98,39 @@ export class Bank {
 		return applied.warnings;
 	}
 
+	/**
+	 * The claim stores are hand-editable, and more than one Pi session can hold a
+	 * bank open. So the cache is keyed on the stores' identity (name, mtime, size):
+	 * an edit made in an editor, or an approval made in another session, is seen by
+	 * the next turn instead of the next restart.
+	 */
 	snapshot(): BankSnapshot {
-		if (!this.snapshotCache) this.snapshotCache = readClaims(this.paths);
+		const signature = this.storeSignature();
+		if (this.snapshotCache === undefined || signature !== this.snapshotSignature) {
+			this.snapshotCache = readClaims(this.paths);
+			this.snapshotSignature = signature;
+		}
 		return this.snapshotCache;
+	}
+
+	private storeSignature(): string {
+		const parts: string[] = [];
+		for (const dir of [this.paths.rules, this.paths.facts]) {
+			for (const name of safeReaddir(dir).sort()) {
+				try {
+					const stat = statSync(join(dir, name));
+					parts.push(`${name}:${Math.round(stat.mtimeMs)}:${stat.size}`);
+				} catch {
+					parts.push(`${name}:unreadable`);
+				}
+			}
+		}
+		return parts.join(",");
 	}
 
 	private invalidate(): void {
 		this.snapshotCache = undefined;
+		this.snapshotSignature = "";
 	}
 
 	async context(cwd: string): Promise<ScopeContext> {
@@ -258,7 +287,12 @@ export class Bank {
 
 	// ── Review ───────────────────────────────────────────────────────────────
 
-	reviewList(opts: { wave?: "agent" | "migration" } = {}): { pending: PendingEntry[]; text: string } {
+	/**
+	 * The queue as text. Past a dozen claims the dialog walk stops being a
+	 * review, so the full listing also goes to a file in the bank: hand-editable,
+	 * searchable, and the thing to read beside `/memory approve --wave …`.
+	 */
+	reviewList(opts: { wave?: "agent" | "migration" } = {}): { pending: PendingEntry[]; text: string; digestFile?: string } {
 		const { config } = this.config();
 		let pending = listPending(this.snapshot(), { today: this.today, pendingFlagDays: config.pendingFlagDays });
 		if (opts.wave === "agent") pending = pending.filter((entry) => entry.claim.origin === "agent");
@@ -269,7 +303,40 @@ export class Bank {
 			: `${pending.length} claim${pending.length === 1 ? "" : "s"} waiting (${counts.agentProposals} from the agent, ${counts.migrationBacklog} migrated, ${counts.flagged.length} older than ${config.pendingFlagDays} days).`;
 		const body = pending.map((entry) => describePending(entry, this.today).join("\n")).join("\n\n");
 		const contested = counts.contested.map((entry) => `contested: ${entry.key} @ ${entry.scope} — ${entry.files.join(", ")} (nothing injects for it)`);
+		if (pending.length > 12) {
+			const file = join(this.paths.migration, `review-${opts.wave ?? "all"}-${this.today}.md`);
+			const digest = [`# Pending claims awaiting review — ${this.today}`, ``, `${pending.length} claims (${opts.wave ?? "all waves"}). Read this beside \`/memory approve --wave ${opts.wave ?? "…"}\`, or edit the store files by hand: what is in \`claims/\` is what injects.`, ``, ...pending.map((entry) => describePending(entry, this.today).join("\n"))].join("\n\n") + "\n";
+			writeAtomic(file, digest);
+			return { pending, digestFile: file, text: [`${header}`, `full listing written to ${file}`, body, ...contested].filter((part) => part !== "").join("\n\n") };
+		}
 		return { pending, text: [header, body, ...contested].filter((part) => part !== "").join("\n\n") };
+	}
+
+	/** R18: a whole batch decided at once. Wording changes stay per claim. */
+	reviewWave(action: "approve" | "reject" | "defer", wave: "agent" | "migration"): Outcome & { done: number } {
+		const listed = this.reviewList({ wave });
+		let done = 0;
+		const problems: string[] = [];
+		for (const entry of listed.pending) {
+			const outcome = this.review(action, entry.claim.key, entry.claim.scope);
+			if (outcome.ok) done++;
+			else problems.push(outcome.text);
+		}
+		const verb = action === "approve" ? "approved" : action === "reject" ? "rejected" : "deferred";
+		const tail = problems.length > 0 ? `; ${problems.length} refused: ${problems.slice(0, 3).join("; ")}` : "";
+		const digest = listed.digestFile ? ` Full listing: ${listed.digestFile}` : "";
+		return { ok: problems.length === 0, done, text: `${verb} ${done} pending claim(s) in the ${wave} batch${tail}.${digest}` };
+	}
+
+	/** The working-state wave: open items keep their dates; project status stays out. */
+	migrateDaily(): Outcome {
+		const result = migrateDailyItems(this.paths, { clock: this.clock });
+		if ("done" in result) return { ok: false, text: result.reason };
+		const lines = [result.total === 0 ? "no open items carried" : `carried ${result.total} open item(s) into ${result.dailyFile}`];
+		for (const converted of result.converted) lines.push(`  ${converted.file}: ${converted.added} added, ${converted.skipped} already there`);
+		for (const status of result.statusOnly) lines.push(`  ${status.file}: project status, not memory (R2) — nothing carried; archived at cutover`);
+		for (const refused of result.refused) lines.push(`  left out as status: ${refused.file}: ${refused.item}`);
+		return { ok: true, text: lines.join("\n") };
 	}
 
 	review(action: "approve" | "reject" | "defer" | "edit", key: string, scope: string, body?: string): Outcome {
@@ -508,6 +575,23 @@ export class Bank {
 		const body = brief.entries.map((entry) => `## ${entry.key}\n${entry.body}`).join("\n\n");
 		const retired = brief.retired.length > 0 ? `\nretired entries (archive them, do not propose them): ${brief.retired.join(", ")}` : "";
 		return { ok: true, text: `${brief.instructions}\n\n--- the file, as it is today ---\n${body}${retired}` };
+	}
+
+	/** Draft a whole wave in one pass, through the same gate as a hand-written proposal. */
+	migrateApply(opts: { wave?: string; all?: boolean } = {}): Outcome {
+		const result = applyMigration(this.paths, { ...opts, clock: this.clock });
+		if ("done" in result) return { ok: false, text: result.reason };
+		const lines = [
+			`wave ${result.wave}: ${result.proposed.length} claim(s) proposed from ${result.files.length} file(s). None of them inject until you approve them (D9).`,
+			`  files: ${result.files.join(", ")}`,
+		];
+		if (result.refused.length > 0) {
+			lines.push(`  ${result.refused.length} entry(ies) not proposed:`);
+			for (const refusal of result.refused.slice(0, 15)) lines.push(`    ${refusal.file} ${refusal.key}: ${refusal.problem}`);
+			if (result.refused.length > 15) lines.push(`    …and ${result.refused.length - 15} more: /memory migrate status`);
+		}
+		lines.push("Next: /memory review --wave migration (the full listing is written beside it), then /memory approve --wave migration.");
+		return { ok: true, text: lines.join("\n"), data: result };
 	}
 
 	migrateDrafted(file: string, proposals: number): Outcome {

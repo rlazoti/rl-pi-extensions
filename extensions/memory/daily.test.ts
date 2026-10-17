@@ -4,18 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import {
-	appendDailyItem,
-	dailyArchiveFiles,
-	dailyFile,
-	dailyStatus,
-	openItems,
-	parseDaily,
-	readDaily,
-	renderDaily,
-	rolloverDaily,
-	DAILY_SECTIONS,
-} from "./daily.ts";
+import { DAILY_SECTIONS, appendDailyItem, appendDatedItems, dailyArchiveFiles, dailyFile, dailyStatus, openItems, parseDaily, readDaily, renderDaily, rolloverDaily } from "./daily.ts";
 import { bankPaths, ensureBankDirs } from "./store.ts";
 
 function scratch(): { paths: ReturnType<typeof bankPaths>; cleanup: () => void } {
@@ -44,6 +33,34 @@ const CANONICAL = `# Daily log — 2026-10-16
 ## note
 - an item another tool wrote without a stamp
 `;
+
+test("daily: migrated items keep their own date, and appending them twice does nothing (R15)", () => {
+	const { paths, cleanup } = scratch();
+	try {
+		const first = appendDatedItems(paths, [
+			{ section: "carry", text: "Run app in simulator and verify all screens", day: "2026-10-14" },
+			{ section: "decision", text: "rewrite the memory component from scratch", day: "2026-10-16" },
+			{ section: "carry", text: "an item with no date of its own" },
+		], "2026-10-17");
+		assert.equal(first.added, 3);
+		const log = readDaily(paths, "2026-10-17");
+		assert.deepEqual(
+			log.items.map((item) => [item.section, item.stamp, item.day, item.undated]),
+			[
+				["carry", "2026-10-14", "2026-10-14", false],
+				["carry", "2026-10-17", "2026-10-17", true],
+				["decision", "2026-10-16", "2026-10-16", false],
+			],
+		);
+		const again = appendDatedItems(paths, [{ section: "carry", text: "Run app in simulator and verify all screens", day: "2026-10-14" }], "2026-10-17");
+		assert.deepEqual([again.added, again.skipped], [0, 1], "the step can be re-run");
+		// The stamp survives the round trip, which is the point: carried work does
+		// not become fresh work because the migration ran today.
+		assert.match(readFileSync(join(paths.daily, "today.md"), "utf8"), /- \(2026-10-14\) Run app in simulator/);
+	} finally {
+		cleanup();
+	}
+});
 
 test("daily: a hand-written log renders back byte for byte (R6)", () => {
 	const parsed = parseDaily(CANONICAL, "daily/today.md", "2026-10-16");
