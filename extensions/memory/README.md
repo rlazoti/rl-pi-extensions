@@ -228,6 +228,13 @@ Three things that listing exists to make visible:
 The table and the validator read the same data (`SETTINGS` in `config.ts`), so a
 listing cannot drift from what is enforced.
 
+With no file yet, the listing also prints a paste-ready block — every key at its
+default, valid JSON as written, generated from that same table. It **writes
+nothing**: create the file with one key if one key is what you want, since a key
+you leave out keeps its default and a one-key file is complete. A file naming
+every key is a file pinning every default as of the day it was written, and that
+is your decision, not the listing's.
+
 `config.json` is hand-editable on the same terms as the claim stores: an edit
 reaches the **next turn** of a running session, no restart. A value outside its
 range falls back to its default, says so, and the turn proceeds. The TUI editor

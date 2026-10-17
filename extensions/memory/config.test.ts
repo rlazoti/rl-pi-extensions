@@ -4,7 +4,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { DEFAULT_CONFIG, SETTINGS, applyConfig, describeConfig, describeSettings, loadConfig } from "./config.ts";
+import { DEFAULT_CONFIG, SETTINGS, applyConfig, configTemplate, describeConfig, describeSettings, loadConfig } from "./config.ts";
 import { bankPaths } from "./store.ts";
 
 function scratchFile(): { file: string; paths: ReturnType<typeof bankPaths>; cleanup: () => void } {
@@ -233,3 +233,44 @@ test("config: the settings listing shows every knob, its default, its range and 
 function rowOf(text: string, name: string): string | undefined {
 	return text.split("\n").find((line) => line.startsWith(name));
 }
+
+test("config: the absent-file listing carries a paste-ready template, and a key left out keeps its default (R49)", () => {
+	const { file, paths, cleanup } = scratchFile();
+	try {
+		const bare = describeSettings(loadConfig(paths), { file, present: false });
+		const template = configTemplate();
+		assert.ok(bare.includes(template), "the listing carries the template verbatim");
+		assert.match(bare, /only the keys you want — a key you leave out keeps its default/);
+		assert.match(bare, /This listing writes nothing/);
+		assert.match(bare, /pins every default above as of today/);
+
+		const parsed = JSON.parse(template) as Record<string, unknown>;
+		assert.deepEqual(
+			Object.keys(parsed).sort(),
+			SETTINGS.map((setting) => setting.key).sort(),
+			"the template names every setting and nothing else",
+		);
+		for (const setting of SETTINGS) {
+			assert.deepEqual(parsed[setting.key], DEFAULT_CONFIG[setting.key], `${setting.key} shows the default the validator uses`);
+		}
+
+		// One key is a complete file: the rest stay defaults, with nothing reported.
+		writeFileSync(file, JSON.stringify({ maxRetrievedClaims: 2 }));
+		const oneKey = loadConfig(paths);
+		assert.deepEqual(oneKey.warnings, []);
+		assert.deepEqual(oneKey.explicit, ["maxRetrievedClaims"]);
+		assert.equal(oneKey.config.budgetTokens, DEFAULT_CONFIG.budgetTokens, "an absent key is still the default");
+
+		// The template is real config, not a commented sketch: pasted whole it loads clean.
+		writeFileSync(file, `${template}\n`);
+		const whole = loadConfig(paths);
+		assert.deepEqual(whole.warnings, []);
+		const pinned = describeSettings(whole, { file, present: true });
+		assert.ok(!pinned.includes(template), "a file that exists gets no template");
+		for (const setting of SETTINGS) {
+			assert.match(rowOf(pinned, setting.key)!, /\bfile\s/, `${setting.key} now reads as a choice, not a default`);
+		}
+	} finally {
+		cleanup();
+	}
+});

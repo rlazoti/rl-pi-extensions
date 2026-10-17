@@ -76,6 +76,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A TUI editor for these values is deliberately **not** built yet: a settings panel is only worth
   having once it can show a knob beside the effect it has, and that effect is what the trial is
   measuring now (spec D19).
+- **A paste-ready `config.json` in the listing when the file is absent**, generated from the same table
+  the validator uses — valid JSON as written, printed and never written. A file naming one key is a
+  complete file: an absent key keeps its default, an unknown key is reported, an out-of-range key falls
+  back with the fallback named. The view writes nothing, because a file naming every key pins every
+  default as of the day it was written, and that is Rodrigo's call (spec R49.1).
 
 ### Fixed (memory, settings)
 
@@ -92,6 +97,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   range is the range the validator enforces (both bounds accepted, just outside refused with the
   fallback named), origin of each value, the listing's rows, and the running session honouring an
   external config edit through the real `before_agent_start` hook.
+- +1 memory test (195 total, 672 in the suite): the template parses as accepted config with every key at
+  its default, one key in the file leaves the rest default with nothing reported, and a file that exists
+  gets no template. The command test pins that the listing leaves no `config.json` behind.
 
 ## [1.5.0] - 2026-10-16
 

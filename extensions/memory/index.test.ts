@@ -732,6 +732,8 @@ test("component: /memory settings lists every knob, and /memory config is its ol
 
 		await command.handler("settings", ctx);
 		assert.match(notes[0]!, /config\.json — not present, so every value below is a default/);
+		assert.match(notes[0]!, /"maxRetrievedClaims": 6/, "a paste-ready template, not just a table");
+		assert.ok(!existsSync(join(paths.root, "config.json")), "the listing writes nothing");
 		assert.match(notes[0]!, /setting\s+current\s+default\s+allowed\s+in use\s+what it decides/);
 		assert.match(notes[0]!, /maxRetrievedClaims\s+6\s+6\s+0\.\.200\s+default/);
 		assert.match(notes[0]!, /retrieved\s+900\s+900\s+—\s+derived/);

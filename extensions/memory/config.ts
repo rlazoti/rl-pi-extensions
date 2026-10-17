@@ -175,6 +175,10 @@ const NAME_WIDTH = Math.max(...SETTINGS.map((setting) => setting.key.length), "r
  * range it must fall inside, and where the value came from — the file, a
  * default, or the section interlock. A number with no range beside it cannot be
  * reviewed: the reader has no way to know it is wrong (R48).
+ *
+ * When there is no file, the listing also carries a paste-ready template and
+ * writes nothing: a key the file names is a choice, so a file naming every key
+ * would pin every default against a later change (R49).
  */
 export function describeSettings(result: ConfigResult, view: { file: string; present: boolean }): string {
 	const row = (name: string, current: string, fallback: string, allowed: string, state: string, meaning: string) =>
@@ -197,8 +201,29 @@ export function describeSettings(result: ConfigResult, view: { file: string; pre
 	const retrieved = result.config.budgetTokens - result.config.coreTokens - result.config.dailyTokens;
 	const defaultRetrieved = DEFAULT_CONFIG.budgetTokens - DEFAULT_CONFIG.coreTokens - DEFAULT_CONFIG.dailyTokens;
 	lines.push(row("retrieved", String(retrieved), String(defaultRetrieved), "—", "derived", "what is left for recall after core and daily (R27)"));
+	if (!view.present) {
+		lines.push(
+			"",
+			"To change a value, create that file with only the keys you want — a key you leave out keeps its default.",
+			"The next turn of a running session reads it, no restart. This listing writes nothing.",
+			"",
+			configTemplate(),
+			"",
+			"Writing every key works, and pins every default above as of today: a later change to a default will not reach you.",
+		);
+	}
 	for (const warning of result.warnings) lines.push(`warning: ${warning}`);
 	return lines.join("\n");
+}
+
+/**
+ * A paste-ready `config.json`, built from the same table and defaults the
+ * validator uses, so it cannot drift from what is accepted. It is printed, never
+ * written (R49).
+ */
+export function configTemplate(): string {
+	const body = SETTINGS.map((setting) => `  ${JSON.stringify(setting.key)}: ${JSON.stringify(DEFAULT_CONFIG[setting.key])}`).join(",\n");
+	return `{\n${body}\n}`;
 }
 
 export function describeConfig(config: MemoryConfig): string {

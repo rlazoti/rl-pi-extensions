@@ -183,6 +183,11 @@ in its constraints) and Pi's extension API docs (`session_start` and `before_age
   The listing and the validator read the same table, so a listing cannot drift from what is enforced.
   A knob never appears as a plain number: without its range the reader cannot tell a wrong value
   from an unusual one.
+- R49.1. With no config file, the listing also carries a paste-ready template generated from that same
+  table, and **writes nothing**: a key the file names is a choice, so a file naming every key pins
+  every default as of the day it was written, and that is Rodrigo's decision. A file naming one key is
+  complete — an absent key keeps its default, and an unknown or out-of-range key is reported, never
+  swallowed (R30, D19).
 
 ## Design
 
@@ -262,8 +267,9 @@ flowchart LR
 - **Settings (R48–R49):** the table covers every setting exactly once, and each row's range is the
   range the validator enforces (accept at both bounds, refuse just outside, name the fallback);
   a value the file set, a default, and a value the interlock moved read differently in the listing;
-  in one running session a config edit changes the next turn's injection, and a bad value falls back
-  without stopping it.
+  the template parses as accepted config with every key at its default, one key in the file leaves the
+  rest default, and the listing writes no file; in one running session a config edit changes the next
+  turn's injection, and a bad value falls back without stopping it.
 
 ## How each constraint in the intent is met
 | Constraint | Met by |
