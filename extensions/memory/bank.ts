@@ -16,7 +16,7 @@ import { applyConfig, loadConfig, describeConfig, describeSettings, type ConfigR
 import { dailyStatus, readDaily, rolloverDaily, appendDailyItem, type DailyLog } from "./daily.js";
 import { gateDaily, gatePropose } from "./gate.js";
 import { buildInjection, formatPreview, type InjectionResult } from "./inject.js";
-import { archiveText, backupBank, ensureBankDirs, inspectBank, readClaims, bankPaths as pathsFor, writeAtomic, StoreUnreadable, type BankHealth, type BankPaths, type BankSnapshot, type ExecFn } from "./store.js";
+import { archiveText, backupBank, ensureBankDirs, FileLocked, inspectBank, isLockFile, readClaims, bankPaths as pathsFor, writeAtomic, StoreUnreadable, type BankHealth, type BankPaths, type BankSnapshot, type ExecFn } from "./store.js";
 import { listPending, propose, approve, reject as rejectClaim, defer as deferClaim, editPending, queueCounts, describePending, type PendingEntry, type QueueCounts } from "./queue.js";
 import { reviewNotice, type NoticeOptions } from "./notice.js";
 import { bm25, createRanker, type RankedText } from "./rank.js";
@@ -147,6 +147,7 @@ export class Bank {
 		const parts: string[] = [];
 		for (const dir of [this.paths.rules, this.paths.facts]) {
 			for (const name of safeReaddir(dir).sort()) {
+				if (isLockFile(name)) continue;
 				try {
 					const stat = statSync(join(dir, name));
 					parts.push(`${name}:${Math.round(stat.mtimeMs)}:${stat.size}`);
@@ -179,9 +180,11 @@ export class Bank {
 	/** The daily log is rolled over once per session, the first time it is needed. */
 	rollover(): { day: string; carried: number; archivedTo?: string; reason?: string; futureDated: boolean } {
 		if (!this.rolledOver) {
-			this.rolledOver = true;
 			ensureBankDirs(this.paths);
 			const result = rolloverDaily(this.paths, { today: this.today });
+			// A log another session is still writing is not a rollover that happened:
+			// stay un-rolled so the next turn tries again.
+			if (result.skipped !== true) this.rolledOver = true;
 			this.dayCache = this.today;
 			return { day: this.today, ...result };
 		}
@@ -402,6 +405,7 @@ export class Bank {
 	 */
 	private refusal<T>(error: unknown): Outcome<T> {
 		if (error instanceof StoreUnreadable) return { ok: false, text: `refused: ${error.message}` };
+		if (error instanceof FileLocked) return { ok: false, text: `refused: ${error.message}` };
 		throw error instanceof Error ? error : new Error(String(error));
 	}
 
@@ -439,7 +443,7 @@ export class Bank {
 		const walk = (at: string, depth: number): void => {
 			if (lines.length >= limit || depth > 4) return;
 			for (const name of safeReaddir(at).sort()) {
-				if (name.startsWith(".") || lines.length >= limit) continue;
+				if (name.startsWith(".") || isLockFile(name) || lines.length >= limit) continue;
 				const full = join(at, name);
 				let stat;
 				try {

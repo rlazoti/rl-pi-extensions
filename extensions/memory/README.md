@@ -152,6 +152,22 @@ paragraph between sections, a section the tool does not know.
 
 The rule behind both: a writer may rewrite only what it can reproduce.
 
+## One writer at a time
+
+More than one Pi session can have the same bank open. Every write is read-modify-
+write, so a session that reads a file, changes it, and writes it back can overwrite
+a claim another session wrote in between.
+
+- Every mutation holds an advisory lock on the file it rewrites, taken before the
+  read and released after the rename. A lock older than the stale window belongs to
+  a session that died mid-write, so it is taken over, not waited on.
+- A claim-store write waits a moment for a live lock, then refuses and names the
+  session holding it. Nothing is written and nothing is lost.
+- A daily rollover that finds the log being written does nothing this time and says
+  so. The next turn tries again.
+- History and archive records take their slot under the slot's own lock, so two
+  sessions superseding the same key write two records instead of one.
+
 ## Writes, and the status redirect
 
 `memory_propose` refuses bodies that read as project status — commit SHAs (7–40

@@ -23,7 +23,7 @@
  *    old bytes to `history/`; migration moves source text to `archive/`.
  */
 
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { execFile } from "node:child_process";
@@ -289,6 +289,124 @@ export function readStoreForWrite(file: string): { text: string; preamble: strin
 }
 
 /**
+ * One writer per file, across processes.
+ *
+ * More than one Pi session can hold the same bank open, and the memory tools are
+ * read-modify-write: read the file, change the entries, write the file back. Two
+ * sessions that start from the same read end with one claim missing and no error
+ * anywhere. So every mutation takes an advisory lock on the file it is about to
+ * rewrite, holds it across the read, and releases it after the rename.
+ *
+ * The lock is an `O_EXCL` create beside the file, which is atomic on every
+ * filesystem this bank lives on. A lock older than `staleMs` belongs to a process
+ * that died mid-write, so it is taken over rather than waited on forever. A lock
+ * that is fresh means the other writer is milliseconds away from finishing: the
+ * wait is short, and if it still fails the write is refused rather than blind.
+ */
+export const LOCK_SUFFIX = ".lock";
+
+export interface LockHandle {
+	/** The lock file itself, so a refusal can name who holds it. */
+	file: string;
+}
+
+/** A file another writer holds: the write that wanted it is refused, not delayed. */
+export class FileLocked extends Error {
+	constructor(file: string, holder: string) {
+		super(`${file}: another memory write holds it (${holder}). Nothing was written; try again.`);
+		this.name = "FileLocked";
+	}
+}
+
+function lockFileFor(file: string): string {
+	return `${file}${LOCK_SUFFIX}`;
+}
+
+function sleepSync(ms: number): void {
+	// Node allows `Atomics.wait` on the main thread, and the wait here is at most
+	// `waitMs` — the other writer is a rename away from finishing.
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** The outcome of one attempt: taken, held by someone (name unknown after a race
+ * means `undefined`), or the lock vanished between two calls and it is worth
+ * trying again.
+ */
+export type LockAttempt = { acquired: LockHandle } | { held: string | undefined };
+
+/** Take the lock if it is free or stale. Never waits. */
+export function tryAcquireLock(file: string, opts: { staleMs?: number; now?: () => number } = {}): LockAttempt {
+	const lock = lockFileFor(file);
+	const staleMs = opts.staleMs ?? 5_000;
+	const now = opts.now ?? ((): number => Date.now());
+	for (let attempt = 0; attempt < 3; attempt++) {
+		try {
+			if (!existsSync(dirname(lock))) mkdirSync(dirname(lock), { recursive: true });
+			writeFileSync(lock, `${process.pid} ${now()}\n`, { flag: "wx" });
+			return { acquired: { file: lock } };
+		} catch (error) {
+			if ((error as { code?: string }).code !== "EEXIST") throw error;
+			let age = Number.NaN;
+			let holder = "unknown pid";
+			try {
+				age = now() - statSync(lock).mtimeMs;
+				holder = readFileSync(lock, "utf8").trim().split(" ")[0] ?? holder;
+			} catch {
+				continue; // released between the create and the stat: try again
+			}
+			if (age > staleMs) {
+				// The writer that took it died mid-write. Take the lock over: an old
+				// lock must not lock the bank forever.
+				try {
+					rmSync(lock, { force: true });
+				} catch {
+					/* someone else took it over first; the next attempt sees that */
+				}
+				continue;
+			}
+			return { held: holder };
+		}
+	}
+	return { held: undefined };
+}
+
+/** The lock, or a thrown `FileLocked` after a short wait for the other writer. */
+export function acquireLock(file: string, opts: { staleMs?: number; waitMs?: number; now?: () => number } = {}): LockHandle {
+	const waitMs = opts.waitMs ?? 200;
+	const started = (opts.now ?? Date.now)();
+	for (;;) {
+		const attempt = tryAcquireLock(file, opts);
+		if ("acquired" in attempt) return attempt.acquired;
+		if (attempt.held !== undefined && (opts.now ?? Date.now)() - started > waitMs) throw new FileLocked(file, attempt.held);
+		if (attempt.held === undefined) throw new FileLocked(file, "a writer that will not say when it finishes");
+		sleepSync(5);
+	}
+}
+
+export function releaseLock(handle: LockHandle): void {
+	try {
+		rmSync(handle.file, { force: true });
+	} catch {
+		/* a lock that is already gone is not a problem */
+	}
+}
+
+/** Run one read-modify-write while holding the file's lock. */
+export function withFileLock<T>(file: string, write: () => T): T {
+	const handle = acquireLock(file);
+	try {
+		return write();
+	} finally {
+		releaseLock(handle);
+	}
+}
+
+/** Is this a lock file rather than bank content? Locks are never listed or read. */
+export function isLockFile(name: string): boolean {
+	return name.endsWith(LOCK_SUFFIX);
+}
+
+/**
  * Write through a sibling temp file and rename. A crash leaves a `.tmp-<pid>`
  * sibling, which `inspect` reports rather than hides.
  */
@@ -387,14 +505,18 @@ function slotOf(file: string, namespace: string): number {
  */
 export function upsertClaim(paths: BankPaths, claim: Claim): { file: string; replaced: boolean } {
 	const { file } = storeFileFor(paths, claim);
-	const current = readStoreForWrite(file);
-	const preamble = current.text === "" ? defaultPreamble(claim) : current.preamble;
-	const entries: Claim[] = [...current.entries];
-	const previous = entries.findIndex((entry) => recordOf(entry) === recordOf(claim));
-	if (previous >= 0) entries[previous] = claim;
-	else entries.push(claim);
-	writeAtomic(file, renderStore(preamble, entries));
-	return { file, replaced: previous >= 0 };
+	// The read is inside the lock: reading first and locking later is exactly the
+	// window in which another session's claim disappears.
+	return withFileLock(file, () => {
+		const current = readStoreForWrite(file);
+		const preamble = current.text === "" ? defaultPreamble(claim) : current.preamble;
+		const entries: Claim[] = [...current.entries];
+		const previous = entries.findIndex((entry) => recordOf(entry) === recordOf(claim));
+		if (previous >= 0) entries[previous] = claim;
+		else entries.push(claim);
+		writeAtomic(file, renderStore(preamble, entries));
+		return { file, replaced: previous >= 0 };
+	});
 }
 
 export function defaultPreamble(claim: Claim): string {
@@ -404,11 +526,13 @@ export function defaultPreamble(claim: Claim): string {
 /** Remove one claim (by identity) from its store file. Returns false when absent. */
 export function removeClaim(paths: BankPaths, claim: Claim): boolean {
 	const { file } = storeFileFor(paths, claim);
-	const current = readStoreForWrite(file);
-	const kept = current.entries.filter((entry) => recordOf(entry) !== recordOf(claim));
-	if (kept.length === current.entries.length) return false;
-	writeAtomic(file, renderStore(current.preamble, kept));
-	return true;
+	return withFileLock(file, () => {
+		const current = readStoreForWrite(file);
+		const kept = current.entries.filter((entry) => recordOf(entry) !== recordOf(claim));
+		if (kept.length === current.entries.length) return false;
+		writeAtomic(file, renderStore(current.preamble, kept));
+		return true;
+	});
 }
 
 /**
@@ -418,14 +542,23 @@ export function removeClaim(paths: BankPaths, claim: Claim): boolean {
  */
 export function moveToHistory(paths: BankPaths, claim: Claim, stamp: { field: "supersededAt" | "rejectedAt"; day: string }): string {
 	const stamped: Claim = { ...claim, [stamp.field]: stamp.day, state: "approved" } as Claim;
+	const render = (): string => renderStore(`# History: ${claim.key}`, [stamped]);
 	for (let slot = 1; slot < 100; slot++) {
 		const file = slot === 1 ? join(paths.history, `${claim.key}.md`) : join(paths.history, `${claim.key}-${slot}.md`);
-		if (!existsSync(file)) {
-			writeAtomic(file, renderStore(`# History: ${claim.key}`, [stamped]));
-			return file;
+		// The slot is claimed under its own lock: two sessions superseding the same
+		// key at once take different slots rather than writing over each other.
+		const attempt = tryAcquireLock(file);
+		if (!("acquired" in attempt)) continue; // taken or contested: the next slot is free
+		const held = attempt.acquired;
+		try {
+			if (!existsSync(file)) {
+				writeAtomic(file, render());
+				return file;
+			}
+			if (readFileOrNull(file) === render()) return file; // identical bytes: already recorded
+		} finally {
+			releaseLock(held);
 		}
-		const mine = readFileOrNull(file);
-		if (mine !== undefined && renderStore(`# History: ${claim.key}`, [stamped]) === mine) return file; // identical bytes: already recorded
 	}
 	throw new Error(`no free history slot for "${claim.key}" after 99 tries`);
 }
@@ -435,19 +568,41 @@ export function moveToHistory(paths: BankPaths, claim: Claim, stamp: { field: "s
 /** Move a source file into the read-only archive without ever deleting it (R39). */
 export function archiveFile(paths: BankPaths, source: string): { file: string } {
 	const name = basename(source);
-	let target = join(paths.archive, name);
-	for (let slot = 2; existsSync(target); slot++) target = join(paths.archive, `${name.replace(/\.md$/, "")}-${slot}.md`);
-	renameSync(source, target);
-	return { file: target };
+	const stem = name.replace(/\.md$/, "");
+	for (let slot = 1; slot < 100; slot++) {
+		const target = slot === 1 ? join(paths.archive, name) : join(paths.archive, `${stem}-${slot}.md`);
+		const attempt = tryAcquireLock(target);
+		if (!("acquired" in attempt)) continue; // taken or contested: next slot
+		const held = attempt.acquired;
+		try {
+			if (existsSync(target)) continue;
+			renameSync(source, target);
+			return { file: target };
+		} finally {
+			releaseLock(held);
+		}
+	}
+	throw new Error(`no free archive slot for "${name}" after 99 tries`);
 }
 
 /** Archive prose that is not a file: leftover status text pulled out of a claim body. */
 export function archiveText(paths: BankPaths, name: string, text: string): { file: string } {
 	const slug = name.trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "note";
-	let target = join(paths.archive, `${slug}.md`);
-	for (let slot = 2; existsSync(target); slot++) target = join(paths.archive, `${slug}-${slot}.md`);
-	writeAtomic(target, text.endsWith("\n") ? text : `${text}\n`);
-	return { file: target };
+	const body = text.endsWith("\n") ? text : `${text}\n`;
+	for (let slot = 1; slot < 100; slot++) {
+		const target = slot === 1 ? join(paths.archive, `${slug}.md`) : join(paths.archive, `${slug}-${slot}.md`);
+		const attempt = tryAcquireLock(target);
+		if (!("acquired" in attempt)) continue; // taken or contested: next slot
+		const held = attempt.acquired;
+		try {
+			if (existsSync(target)) continue;
+			writeAtomic(target, body);
+			return { file: target };
+		} finally {
+			releaseLock(held);
+		}
+	}
+	throw new Error(`no free archive slot for "${name}" after 99 tries`);
 }
 
 // ── Backup (R37) ───────────────────────────────────────────────────────────

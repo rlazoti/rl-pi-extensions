@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -16,6 +17,9 @@ import {
 	readClaims,
 	removeClaim,
 	storeFileFor,
+	acquireLock,
+	FileLocked,
+	releaseLock,
 	StoreUnreadable,
 	upsertClaim,
 	writeAtomic,
@@ -24,6 +28,7 @@ import {
 	type ExecFn,
 } from "./store.ts";
 import { renderStore, type Claim } from "./grammar.ts";
+import { parallelWriters } from "./test-support/writers.ts";
 
 function scratch(): { dir: string; paths: ReturnType<typeof bankPaths>; cleanup: () => void } {
 	const dir = mkdtempSync(join(tmpdir(), "memory-bank-"));
@@ -448,6 +453,70 @@ test("store: health names the lines that block a write (P1)", () => {
 			health.unwritable.map((problem) => problem.line).sort((a, b) => a - b),
 			[11, 19],
 		);
+	} finally {
+		cleanup();
+	}
+});
+
+test("store: a live lock refuses the write and writes nothing (P2)", () => {
+	const { paths, cleanup } = scratch();
+	try {
+		upsertClaim(paths, claim({ key: "git.flow" }));
+		const file = join(paths.rules, "git.md");
+		const before = readFileSync(file, "utf8");
+		const held = acquireLock(file);
+		try {
+			assert.throws(
+				() => upsertClaim(paths, claim({ key: "git.other", state: "pending" })),
+				(error: unknown) => {
+					assert.ok(error instanceof FileLocked, `expected FileLocked, got ${String(error)}`);
+					assert.match(error.message, new RegExp(`another memory write holds it \\(${String(process.pid)}`));
+					assert.match(error.message, /Nothing was written/);
+					return true;
+				},
+			);
+			assert.equal(readFileSync(file, "utf8"), before);
+		} finally {
+			releaseLock(held);
+		}
+		// Released: the same write goes through.
+		upsertClaim(paths, claim({ key: "git.other", state: "pending" }));
+		assert.match(readFileSync(file, "utf8"), /## git\.other/);
+	} finally {
+		cleanup();
+	}
+});
+
+test("store: a lock left by a dead writer is taken over, not waited on forever (P2)", () => {
+	const { paths, cleanup } = scratch();
+	try {
+		upsertClaim(paths, claim({ key: "git.flow" }));
+		const file = join(paths.rules, "git.md");
+		const lock = `${file}.lock`;
+		writeFileSync(lock, `${process.pid} long ago\n`);
+		const old = new Date(Date.now() - 60_000);
+		utimesSync(lock, old, old);
+		upsertClaim(paths, claim({ key: "git.other", state: "pending" }));
+		assert.match(readFileSync(file, "utf8"), /## git\.other/, "a stale lock must not lock the bank forever");
+		assert.ok(!existsSync(lock), "the taken-over lock is gone once the write finishes");
+	} finally {
+		cleanup();
+	}
+});
+
+test("store: two processes writing one store keep both claims (P2)", async () => {
+	const { dir, paths, cleanup } = scratch();
+	try {
+		// The real race: two Pi sessions, each read-modify-writing the same file.
+		// Before the lock, whichever session wrote last replaced the other's claim.
+		const results = await parallelWriters(dir, "store", ["alpha", "beta"]);
+		assert.deepEqual(results.map((result) => result.status), [0, 0], results.map((result) => result.stderr).join("\n"));
+		const text = readFileSync(join(paths.rules, "git.md"), "utf8");
+		for (let i = 0; i < 6; i++) {
+			assert.match(text, new RegExp(`## git\\.alpha${i}`), `session alpha's claim ${i} survived`);
+			assert.match(text, new RegExp(`## git\\.beta${i}`), `session beta's claim ${i} survived`);
+		}
+		assert.deepEqual(readdirSync(paths.rules).filter((name) => name.endsWith(".lock")), [], "no lock is left behind");
 	} finally {
 		cleanup();
 	}

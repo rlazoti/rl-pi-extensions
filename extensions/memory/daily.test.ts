@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { DAILY_SECTIONS, appendDailyItem, appendDatedItems, dailyArchiveFiles, dailyFile, dailyStatus, openItems, parseDaily, readDaily, renderDaily, rolloverDaily } from "./daily.ts";
-import { bankPaths, ensureBankDirs } from "./store.ts";
+import { acquireLock, bankPaths, ensureBankDirs, FileLocked, releaseLock } from "./store.ts";
+import { parallelWriters } from "./test-support/writers.ts";
 
 function scratch(): { paths: ReturnType<typeof bankPaths>; cleanup: () => void } {
 	const dir = mkdtempSync(join(tmpdir(), "memory-daily-"));
@@ -300,6 +301,66 @@ test("daily: the archive holds the day's own bytes, not a re-render (P1)", () =>
 	// where the archive can still be read, and the bytes it was written in survive.
 		const fresh = readDaily(paths, "2026-10-19");
 		assert.deepEqual(fresh.items.map((item) => item.text), ["Ship the analysis."]);
+	} finally {
+		cleanup();
+	}
+});
+
+test("daily: two processes logging at once lose no item (P2)", async () => {
+	const { paths, cleanup } = scratch();
+	try {
+		// The real race: `memory_log` in two Pi sessions inside the same minute. Before
+		// the lock, the log kept whichever session wrote last.
+		const results = await parallelWriters(paths.root, "daily", ["alpha", "beta"]);
+		assert.deepEqual(results.map((result) => result.status), [0, 0], results.map((result) => result.stderr).join("\n"));
+		const log = readDaily(paths, "2026-10-18");
+		for (const who of ["alpha", "beta"]) {
+			for (let i = 0; i < 6; i++) {
+				assert.ok(log.items.some((item) => item.text === `item ${who} ${i}`), `the item ${who} logged ${i} survived`);
+			}
+		}
+		assert.deepEqual(log.issues, [], "the log two sessions wrote together is readable");
+		assert.deepEqual(readdirSync(paths.daily).filter((name) => name.endsWith(".lock")), [], "no lock is left behind");
+	} finally {
+		cleanup();
+	}
+});
+
+test("daily: memory_log refuses while another session holds the log (P2)", () => {
+	const { paths, cleanup } = scratch();
+	try {
+		const file = dailyFile(paths);
+		const held = acquireLock(file);
+		try {
+			assert.throws(() => appendDailyItem(paths, { section: "note", text: "While the other session writes.", clock: clockAt("2026-10-18T10:00:00") }), FileLocked);
+			assert.ok(!existsSync(file) || !readFileSync(file, "utf8").includes("While the other session"), "a refused log write writes nothing");
+		} finally {
+			releaseLock(held);
+		}
+		appendDailyItem(paths, { section: "note", text: "Now.", clock: clockAt("2026-10-18T10:01:00") });
+		assert.match(readFileSync(file, "utf8"), /- \(2026-10-18 10:01\) Now\./);
+	} finally {
+		cleanup();
+	}
+});
+
+test("daily: a rollover skips a log another session is writing, and says so (P2)", () => {
+	const { paths, cleanup } = scratch();
+	try {
+		writeFileSync(dailyFile(paths), "# Daily log — 2026-10-16\n\n## in_progress\n- (2026-10-16 09:00) Still open.\n");
+		const held = acquireLock(dailyFile(paths));
+		try {
+			const skipped = rolloverDaily(paths, { today: "2026-10-17" });
+			assert.equal(skipped.carried, 0);
+			assert.equal(skipped.skipped, true);
+			assert.match(skipped.reason ?? "", /another session is writing/);
+			assert.match(readFileSync(dailyFile(paths), "utf8"), /2026-10-16/, "the day is not archived under the other writer");
+		} finally {
+			releaseLock(held);
+		}
+		const rolled = rolloverDaily(paths, { today: "2026-10-17" });
+		assert.equal(rolled.carried, 1);
+		assert.ok(rolled.archivedTo);
 	} finally {
 		cleanup();
 	}

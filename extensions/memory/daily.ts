@@ -24,7 +24,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { dayOf, isDay, monthOf, stampOf, systemClock, type Clock } from "./time.js";
-import { markdownFiles, writeAtomic, type BankPaths } from "./store.js";
+import { markdownFiles, releaseLock, tryAcquireLock, withFileLock, writeAtomic, type BankPaths } from "./store.js";
 
 export const DAILY_SECTIONS = ["completed", "in_progress", "carry", "decision", "note"] as const;
 export type DailySection = (typeof DAILY_SECTIONS)[number];
@@ -225,6 +225,15 @@ export function appendDatedItems(
 	today: string,
 ): { file: string; added: number; skipped: number } {
 	const file = dailyFile(paths);
+	return withFileLock(file, () => appendDatedItemsLocked(paths, items, today));
+}
+
+function appendDatedItemsLocked(
+	paths: BankPaths,
+	items: { section: DailySection; text: string; day?: string }[],
+	today: string,
+): { file: string; added: number; skipped: number } {
+	const file = dailyFile(paths);
 	let text = readOrNull(file) ?? "";
 	let added = 0;
 	let skipped = 0;
@@ -266,7 +275,9 @@ export function appendDailyItem(paths: BankPaths, input: { section: string; text
 	if (text === "") throw new Error("text is required");
 	const file = dailyFile(paths);
 	const item: DailyItem = { section: input.section, stamp: stampOf(now), day: today, text, line: 0, undated: false };
-	writeText(file, insertDailyItem(readOrNull(file) ?? "", today, item.section, formatItem(item)));
+	// Read, insert and write in one locked stretch: two Pi sessions logging at the
+	// same minute must not lose one of the two items.
+	withFileLock(file, () => writeText(file, insertDailyItem(readOrNull(file) ?? "", today, item.section, formatItem(item))));
 	return { file, item, log: readDaily(paths, today) };
 }
 
@@ -291,6 +302,8 @@ export interface RolloverResult {
 	carried: number;
 	/** Why nothing happened, when nothing happened. */
 	reason?: string;
+	/** True when the log is another session's to finish writing; try again later. */
+	skipped?: boolean;
 	/** A log stamped in the future is never archived (and never rolled). */
 	futureDated: boolean;
 }
@@ -305,6 +318,19 @@ export interface RolloverResult {
  */
 export function rolloverDaily(paths: BankPaths, opts: { today: string }): RolloverResult {
 	const file = dailyFile(paths);
+	// A rollover rewrites the log, so it holds the log's lock. Another session
+	// mid-write means the rollover simply does not happen this time — it is not a
+	// failure, and the next session or turn tries again.
+	const held = tryAcquireLock(file);
+	if (!("acquired" in held)) return { carried: 0, reason: "another session is writing the daily log — not rolled over yet", futureDated: false, skipped: true };
+	try {
+		return rollDailyLocked(paths, file, opts);
+	} finally {
+		releaseLock(held.acquired);
+	}
+}
+
+function rollDailyLocked(paths: BankPaths, file: string, opts: { today: string }): RolloverResult {
 	const text = readOrNull(file);
 	if (text === undefined) return { carried: 0, reason: "no daily log yet", futureDated: false };
 	const log = parseDaily(text, file);
