@@ -876,3 +876,70 @@ test("README: it documents no /memory subcommand that does not exist, and omits 
 	}
 	assert.match(line, /`config` still works as the old name/, "the README says the alias still answers");
 });
+
+const UNREADABLE_CLAIMS = `# rule claims about git
+
+## git.flow
+kind: rule
+scope: global
+asOf: 2026-01-01
+source: probe
+
+A healthy rule.
+
+## git.broken
+kind: opinion
+scope: global
+asOf: 2026-01-01
+source: a typo in the field value
+
+A rule the parser refused, and used to vanish on the next write.
+`;
+
+test("component: an unreadable claim blocks the write instead of vanishing under it (P1)", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		const file = join(paths.rules, "git.md");
+		writeFileSync(file, UNREADABLE_CLAIMS);
+		const before = readFileSync(file, "utf8");
+		const { harness } = install({ paths, mode: "print", cwd: "/repo/rl-pi-extensions" });
+		const command = harness.commands.get("memory")!;
+		const notes: string[] = [];
+		const ctx = {
+			...(fakeContext({ mode: "print", cwd: "/repo/rl-pi-extensions" }).ctx as object),
+			ui: { notify: (message: string) => notes.push(message), select: async () => undefined, editor: async () => undefined, input: async () => undefined, confirm: async () => true },
+			mode: "print",
+			hasUI: false,
+			signal: undefined,
+			cwd: "/repo/rl-pi-extensions",
+			sessionManager: { getSessionId: () => "s1" },
+		} as unknown as ExtensionCommandContext;
+
+		const propose = harness.tools.get("memory_propose")!;
+		const refused = await propose.execute("t1", { key: "git.new", kind: "rule", scope: "global", asOf: "2026-10-18", source: "this session", body: "A brand new rule." }, undefined, undefined, toolCtx());
+		assert.equal(refused.isError, true);
+		assert.match(refused.content[0]!.text, /refused:/);
+		assert.match(refused.content[0]!.text, /git\.md:11: kind must be rule \| fact/);
+		assert.match(refused.content[0]!.text, /nothing was written/i);
+		assert.equal(readFileSync(file, "utf8"), before, "the unreadable claim is still on disk, byte for byte");
+
+		// The health report says the same thing, in the same words, before the next
+		// proposal wastes a turn on a refusal.
+		await command.handler("doctor", ctx);
+		assert.match(notes[notes.length - 1]!, /the bank needs attention/);
+		assert.match(notes[notes.length - 1]!, /git\.md:11/);
+		assert.match(notes[notes.length - 1]!, /nothing was deleted/i);
+		await command.handler("status", ctx);
+		assert.match(notes[notes.length - 1]!, /cannot read \(no write touches these files until it is fixed\)/);
+
+		// Fix the line by hand — the documented way to fix a claim — and the write
+		// that was refused goes through.
+		writeFileSync(file, before.replace("kind: opinion", "kind: rule"));
+		const accepted = await propose.execute("t2", { key: "git.new", kind: "rule", scope: "global", asOf: "2026-10-18", source: "this session", body: "A brand new rule." }, undefined, undefined, toolCtx());
+		assert.notEqual(accepted.isError, true, accepted.content[0]!.text);
+		assert.match(readFileSync(file, "utf8"), /## git\.new/);
+		assert.match(readFileSync(file, "utf8"), /A rule the parser refused/);
+	} finally {
+		cleanup();
+	}
+});

@@ -21,10 +21,10 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { dayOf, isDay, monthOf, stampOf, systemClock, type Clock } from "./time.js";
-import { markdownFiles, type BankPaths } from "./store.js";
+import { markdownFiles, writeAtomic, type BankPaths } from "./store.js";
 
 export const DAILY_SECTIONS = ["completed", "in_progress", "carry", "decision", "note"] as const;
 export type DailySection = (typeof DAILY_SECTIONS)[number];
@@ -58,6 +58,7 @@ export interface DailyLog {
 
 const HEADING = /^#\s*Daily log\s*[—-]\s*(\d{4}-\d{2}-\d{2})\s*$/;
 const SECTION = /^##\s+(\S+)\s*$/;
+const H1 = /^#\s/;
 const ITEM = /^-\s+\((\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}))?\)\s*(.*)$/;
 
 export function dailyFile(paths: BankPaths): string {
@@ -170,8 +171,46 @@ export function formatItem(item: DailyItem): string {
 }
 
 /**
- * Append one item, stamped by the extension (R15). The agent chooses the section
- * and the text; the date and time are never the agent's to set.
+ * Insert one item line into the log's own text, under the heading it belongs to.
+ *
+ * The daily log is a log, not a rendered artifact: it can hold a paragraph someone
+ * typed between sections, a section the grammar does not know, or an item another
+ * tool wrote without a stamp. `memory_log` adds one line and puts it in the right
+ * place; it does not re-render the file, because a re-render writes back only what
+ * the parser understood and deletes the rest. Everything that is not the new line
+ * keeps its bytes and its position.
+ *
+ * A section heading is matched exactly (`## note`), because a line like
+ * `## Notes for tomorrow` is someone's prose, not a section the tool owns.
+ */
+export function insertDailyItem(text: string, day: string, section: DailySection, line: string): string {
+	const lines = text.length === 0 ? [] : text.replace(/\n+$/, "").split("\n");
+	if (!lines.some((candidate) => HEADING.test(candidate))) lines.unshift(`# Daily log — ${day}`);
+
+	const heading = `## ${section}`;
+	const at = lines.findIndex((candidate) => candidate.trim() === heading);
+	if (at === -1) {
+		// One blank line between the previous section and this one, never two.
+		if (lines.length > 0 && lines[lines.length - 1]!.trim() !== "") lines.push("");
+		lines.push(heading, line);
+		return `${lines.join("\n")}\n`;
+	}
+	// The end of this section is the last line of content before the next heading.
+	let lastContent = at;
+	for (let i = at + 1; i < lines.length; i++) {
+		if (SECTION.test(lines[i]!) || H1.test(lines[i]!)) break;
+		if (lines[i]!.trim() !== "") lastContent = i;
+	}
+	lines.splice(lastContent + 1, 0, line);
+	return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Append items that already carry their own date — migrated daily work, carried
+ * forward from a file the extension did not write. The date is the item's, not
+ * now: re-dating carried work to today makes every migrated item look fresh.
+ * Re-appending the same text to the same section does nothing, so the migration
+ * step can be run twice.
  */
 /**
  * Append items that already carry their own date — migrated daily work, carried
@@ -185,27 +224,37 @@ export function appendDatedItems(
 	items: { section: DailySection; text: string; day?: string }[],
 	today: string,
 ): { file: string; added: number; skipped: number } {
-	const log = readDaily(paths, today);
+	const file = dailyFile(paths);
+	let text = readOrNull(file) ?? "";
 	let added = 0;
 	let skipped = 0;
+	const seen = new Set(readDaily(paths, today).items.map((item) => `${item.section}\u0000${item.text}`));
 	for (const item of items) {
-		const text = item.text.replace(/\s+/g, " ").trim();
-		if (text === "" || !isDailySection(item.section)) {
+		const body = item.text.replace(/\s+/g, " ").trim();
+		if (body === "" || !isDailySection(item.section)) {
 			skipped++;
 			continue;
 		}
-		const stamp = item.day ?? today;
-		if (log.items.some((existing) => existing.section === item.section && existing.text === text)) {
+		if (seen.has(`${item.section}\u0000${body}`)) {
 			skipped++;
 			continue;
 		}
-		log.items.push({ section: item.section, stamp, day: stamp.slice(0, 10), text, line: 0, undated: item.day === undefined });
+		// An item with no date of its own is written without one. Stamping it today
+		// would make carried work look fresh, and `/memory status` counts it as a
+		// coarse date precisely because the stamp is not there.
+		text = insertDailyItem(text, today, item.section, item.day === undefined ? `- ${body}` : `- (${item.day}) ${body}`);
+		seen.add(`${item.section}\u0000${body}`);
 		added++;
 	}
-	if (added > 0) writeDaily(paths, log);
-	return { file: log.file, added, skipped };
+	if (added > 0) writeText(file, text);
+	return { file, added, skipped };
 }
 
+/**
+ * Append one item, stamped by the extension (R15): one line inserted under the
+ * section's heading. The agent chooses the section and the text; the date and the
+ * time are never the agent's to set, and nothing else in the file is rewritten.
+ */
 export function appendDailyItem(paths: BankPaths, input: { section: string; text: string; clock?: Clock }): { file: string; item: DailyItem; log: DailyLog } {
 	const clock = input.clock ?? systemClock;
 	const now = clock();
@@ -215,15 +264,24 @@ export function appendDailyItem(paths: BankPaths, input: { section: string; text
 	}
 	const text = input.text.replace(/\s+/g, " ").trim();
 	if (text === "") throw new Error("text is required");
-	const log = readDaily(paths, today);
-	log.items.push({ section: input.section, stamp: stampOf(now), day: today, text, line: 0, undated: false });
-	writeDaily(paths, log);
-	return { file: log.file, item: log.items[log.items.length - 1]!, log };
+	const file = dailyFile(paths);
+	const item: DailyItem = { section: input.section, stamp: stampOf(now), day: today, text, line: 0, undated: false };
+	writeText(file, insertDailyItem(readOrNull(file) ?? "", today, item.section, formatItem(item)));
+	return { file, item, log: readDaily(paths, today) };
+}
+
+/**
+ * Replace the daily log's text through the same write-and-rename the claim stores
+ * use: a crash leaves the previous log whole, never half a day's work.
+ */
+function writeText(file: string, text: string): void {
+	if (!existsSync(dirname(file))) mkdirSync(dirname(file), { recursive: true });
+	writeAtomic(file, text.endsWith("\n") ? text : `${text}\n`);
 }
 
 export function writeDaily(paths: BankPaths, log: DailyLog): void {
 	if (!existsSync(paths.daily)) mkdirSync(paths.daily, { recursive: true });
-	writeFileSync(log.file, renderDaily(log), "utf8");
+	writeAtomic(log.file, renderDaily(log));
 }
 
 export interface RolloverResult {
@@ -264,7 +322,11 @@ export function rolloverDaily(paths: BankPaths, opts: { today: string }): Rollov
 	// record is never overwritten, and a name collision must not make a file
 	// impossible to archive.
 	for (let slot = 2; existsSync(target); slot++) target = join(monthDir, `${log.day}-${slot}.md`);
-	writeFileSync(target, renderDaily(log), "utf8");
+	// The day is archived as it was written, bytes for bytes. `renderDaily` would
+	// drop anything the parser did not understand — a paragraph between sections, a
+	// section the grammar does not know — and an archive that quietly loses the day
+	// is worse than no archive.
+	writeFileSync(target, text.endsWith("\n") ? text : `${text}\n`, "utf8");
 
 	const carried = openItems(log);
 	const fresh: DailyLog = { file, day: opts.today, items: carried.map((item) => ({ ...item, line: 0 })), issues: [] };

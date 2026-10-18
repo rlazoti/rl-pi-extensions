@@ -13,7 +13,7 @@
 
 import { charCount, type Claim } from "./grammar.js";
 import { daysBetween, describeAge } from "./time.js";
-import { findContested, moveToHistory, readClaims, removeClaim, upsertClaim, type BankSnapshot, type BankPaths } from "./store.js";
+import { findContested, moveToHistory, readClaims, readStoreForWrite, removeClaim, storeFileFor, upsertClaim, type BankSnapshot, type BankPaths } from "./store.js";
 
 export interface PendingEntry {
 	claim: Claim;
@@ -60,6 +60,24 @@ function identity(claim: Claim): string {
 	return `${claim.key}\u0000${claim.scope}`;
 }
 
+/**
+ * Check every file this operation is about to rewrite before it rewrites any of
+ * them. A refusal must not arrive half-way through, with the old claim already
+ * moved to history and the new one unwritten.
+ *
+ * @throws {import("./store.js").StoreUnreadable} naming the file and the line.
+ */
+function assertWritable(paths: BankPaths, claims: Claim[]): void {
+	const seen = new Set<string>();
+	for (const claim of claims) {
+		if (!claim) continue;
+		const { file } = storeFileFor(paths, claim);
+		if (seen.has(file)) continue;
+		seen.add(file);
+		readStoreForWrite(file);
+	}
+}
+
 export interface ProposeResult {
 	file: string;
 	/** A previous draft for the same identity, moved to history rather than lost. */
@@ -77,6 +95,7 @@ export function propose(paths: BankPaths, claim: Claim, today: string): ProposeR
 	const snapshot = readClaims(paths);
 	const previous = snapshot.entries.find((entry) => entry.claim.state === "pending" && identity(entry.claim) === identity(pending));
 	const against = snapshot.claims.find((entry) => entry.state === "approved" && identity(entry) === identity(pending));
+	assertWritable(paths, [pending, ...(previous ? [previous.claim] : []), ...(against ? [against] : [])]);
 	let replacedDraft: { file: string } | undefined;
 	if (previous) {
 		removeClaim(paths, previous.claim);
@@ -109,6 +128,7 @@ export function approve(paths: BankPaths, key: string, scope: string, today: str
 	if (!pending) return missing(key);
 	const approved: Claim = { ...pending.claim, state: "approved", deferredAt: undefined };
 	const previous = readClaims(paths).claims.find((claim) => claim.state === "approved" && identity(claim) === identity(approved));
+	assertWritable(paths, [pending.claim, approved, ...(previous ? [previous] : [])]);
 	let historyFile: string | undefined;
 	if (previous) historyFile = moveToHistory(paths, previous, { field: "supersededAt", day: today });
 	removeClaim(paths, pending.claim);
@@ -120,6 +140,7 @@ export function approve(paths: BankPaths, key: string, scope: string, today: str
 export function reject(paths: BankPaths, key: string, scope: string, today: string): ReviewOutcome {
 	const pending = findPending(paths, key, scope);
 	if (!pending) return missing(key);
+	assertWritable(paths, [pending.claim]);
 	removeClaim(paths, pending.claim);
 	const historyFile = moveToHistory(paths, pending.claim, { field: "rejectedAt", day: today });
 	return { ok: true, action: "rejected", claim: pending.claim, historyFile };
@@ -129,6 +150,7 @@ export function reject(paths: BankPaths, key: string, scope: string, today: stri
 export function defer(paths: BankPaths, key: string, scope: string, today: string): ReviewOutcome {
 	const pending = findPending(paths, key, scope);
 	if (!pending) return missing(key);
+	assertWritable(paths, [pending.claim]);
 	const kept: Claim = { ...pending.claim, deferredAt: today };
 	removeClaim(paths, pending.claim);
 	upsertClaim(paths, kept);
@@ -141,6 +163,7 @@ export function editPending(paths: BankPaths, key: string, scope: string, change
 	if (!pending) return missing(key);
 	const body = changes.body === undefined ? pending.claim.body : changes.body.replace(/\s+/g, " ").trim();
 	if (body === "") return { ok: false, problem: "an edited body may not be empty" };
+	assertWritable(paths, [pending.claim]);
 	const edited: Claim = {
 		...pending.claim,
 		body,

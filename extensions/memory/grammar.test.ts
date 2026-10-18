@@ -220,3 +220,30 @@ test("grammar: only a rule tagged always is always-on (R35)", () => {
 	assert.ok(!isAlwaysRule(fullClaim({ kind: "rule", tags: ["git"] })));
 	assert.ok(!isAlwaysRule(fullClaim({ kind: "fact", tags: ["always"] })), "a fact is never an always-on rule");
 });
+
+test("grammar: a heading the grammar cannot read keeps its prose out of the claim above (P1)", () => {
+	const text = ["# Claims about git", "", "## git.flow", "kind: rule", "scope: global", "asOf: 2026-01-01", "source: probe", "", "Always rebase before pushing.", "", "## Notes — phase 3", "These are my notes, not a claim.", ""].join("\n");
+	const parsed = parseStore(text, "claims/rules/git.md");
+	assert.equal(parsed.entries.length, 1, "the claim above still reads");
+	assert.equal(parsed.entries[0]!.claim.body, "Always rebase before pushing.", "the note did not join the claim");
+	assert.deepEqual(parsed.errors, []);
+	assert.equal(parsed.unreadable.length, 1);
+	assert.equal(parsed.unreadable[0]!.line, 11);
+	assert.match(parsed.unreadable[0]!.text, /## Notes — phase 3/);
+});
+
+test("grammar: prose below a blank line inside a body is named, and the claim still reads (P1)", () => {
+	const text = ["## git.flow", "kind: rule", "scope: global", "asOf: 2026-01-01", "source: probe", "", "The claim body.", "", "NOTE TO SELF: check this after the migration.", ""].join("\n");
+	const parsed = parseStore(text, "claims/rules/git.md");
+	assert.equal(parsed.entries.length, 1);
+	assert.equal(parsed.unreadable.length, 1);
+	assert.equal(parsed.unreadable[0]!.line, 9, "the note's own line is named");
+	assert.match(parsed.unreadable[0]!.extra ?? "", /one paragraph/);
+});
+
+test("grammar: the file's own title stays the preamble, and a second heading of its own is named (P1)", () => {
+	const parsed = parseStore("# Claims about git\n\nProse under the title.\n\n## a.b\nkind: fact\nscope: global\nasOf: 2026-01-01\nsource: probe\n\nBody.\n\n# Another title\n\nOrphan prose.\n", "claims/rules/git.md");
+	assert.equal(parsed.entries.length, 1);
+	assert.equal(parsed.preamble, "# Claims about git\n\nProse under the title.");
+	assert.deepEqual(parsed.unreadable.map((problem) => problem.line), [13]);
+});

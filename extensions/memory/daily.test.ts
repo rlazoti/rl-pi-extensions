@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -80,7 +80,14 @@ test("daily: memory_log stamps date and time itself; the agent never sets them (
 		const second = appendDailyItem(paths, { section: "completed", text: "Grammar module.", clock: clockAt("2026-10-16T21:40:00") });
 		assert.equal(second.item.stamp, "2026-10-16 21:40");
 		const text = readFileSync(dailyFile(paths), "utf8");
-		assert.equal(text, renderDaily(readDaily(paths, "2026-10-16")), "what was written is what the reader sees");
+		// The log keeps the order the items arrived in. It is a log, not a rendered
+		// artifact: the writer adds lines, it does not rewrite the day.
+		assert.equal(text, "# Daily log — 2026-10-16\n\n## in_progress\n- (2026-10-16 21:05) Wire the injector.\n\n## completed\n- (2026-10-16 21:40) Grammar module.\n");
+		const log = readDaily(paths, "2026-10-16");
+		assert.deepEqual(log.items.map((item) => [item.section, item.text]), [
+			["in_progress", "Wire the injector."],
+			["completed", "Grammar module."],
+		], "what was written is what the reader sees");
 		// R16: the file carries items and nothing else — no auto-persist or summary lines.
 		for (const line of text.split("\n")) {
 			if (line.trim() === "") continue;
@@ -224,6 +231,75 @@ test("daily: status reports freshness, open count and coarse dates", () => {
 		assert.equal(fresh.fresh, true);
 		assert.equal(fresh.futureDated, false);
 		assert.equal(dailyStatus(paths, "2026-10-15").futureDated, true);
+	} finally {
+		cleanup();
+	}
+});
+
+const HAND_LOG = `# Daily log — 2026-10-18
+
+A paragraph someone typed between sections.
+
+## in_progress
+- (2026-10-18 09:00) Ship the analysis.
+
+## someday
+- (2026-10-18 09:10) An item under a section the grammar does not know.
+
+### A subheading, kept where it was
+- an un-stamped item another tool wrote
+`;
+
+test("daily: memory_log keeps what it did not write (P1)", () => {
+	const { paths, cleanup } = scratch();
+	try {
+		writeFileSync(dailyFile(paths), HAND_LOG);
+		// The bug: memory_log re-rendered the log from the items it parsed, which
+		// deleted the paragraph, the unknown section, and the subheading.
+		const before = readFileSync(dailyFile(paths), "utf8").split("\n");
+		const appended = appendDailyItem(paths, { section: "in_progress", text: "Add the regression test.", clock: clockAt("2026-10-18T10:00:00") });
+		const after = readFileSync(dailyFile(paths), "utf8");
+		for (const line of before) assert.ok(after.includes(line), `the log lost a line it did not write: ${line}`);
+		assert.match(after, /A paragraph someone typed between sections\./);
+		assert.match(after, /## someday\n- \(2026-10-18 09:10\) An item under a section/);
+		assert.match(after, /### A subheading, kept where it was/);
+		assert.match(after, /- an un-stamped item another tool wrote/);
+		// The new line went where it belongs, not to the end of the file.
+		assert.ok(after.includes("## in_progress\n- (2026-10-18 09:00) Ship the analysis.\n- (2026-10-18 10:00) Add the regression test."), "the item joins the section it belongs to");
+		assert.equal(appended.item.stamp, "2026-10-18 10:00");
+	} finally {
+		cleanup();
+	}
+});
+
+test("daily: an append leaves no half-written file behind (P1)", () => {
+	const { paths, cleanup } = scratch();
+	try {
+		for (const [index, section] of ["note", "decision", "note"].entries()) {
+			appendDailyItem(paths, { section, text: `Item ${index}.`, clock: clockAt(`2026-10-18T1${index}:00:00`) });
+		}
+		const leftovers = readdirSync(paths.daily).filter((name) => name.includes(".tmp-"));
+		assert.deepEqual(leftovers, [], "write-then-rename leaves no sibling behind");
+		const log = readDaily(paths, "2026-10-18");
+		assert.deepEqual(log.items.map((item) => [item.section, item.text]), [["note", "Item 0."], ["note", "Item 2."], ["decision", "Item 1."]], "both note items joined the one note section");
+	} finally {
+		cleanup();
+	}
+});
+
+test("daily: the archive holds the day's own bytes, not a re-render (P1)", () => {
+	const { paths, cleanup } = scratch();
+	try {
+		writeFileSync(dailyFile(paths), HAND_LOG);
+		const rolled = rolloverDaily(paths, { today: "2026-10-19" });
+		assert.ok(rolled.archivedTo);
+		const archived = readFileSync(rolled.archivedTo!, "utf8");
+		assert.match(archived, /A paragraph someone typed between sections\./, "the archive is the day, not the day's parseable parts");
+		assert.match(archived, /## someday/);
+		// Only open sections carry: `## someday` is not open work, so its item stays
+	// where the archive can still be read, and the bytes it was written in survive.
+		const fresh = readDaily(paths, "2026-10-19");
+		assert.deepEqual(fresh.items.map((item) => item.text), ["Ship the analysis."]);
 	} finally {
 		cleanup();
 	}

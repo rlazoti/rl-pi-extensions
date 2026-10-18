@@ -16,6 +16,7 @@ import {
 	readClaims,
 	removeClaim,
 	storeFileFor,
+	StoreUnreadable,
 	upsertClaim,
 	writeAtomic,
 	writeJson,
@@ -362,6 +363,91 @@ test("store: json state files round-trip and a corrupt one reads as absent", () 
 		writeFileSync(file, "{ not json");
 		assert.equal(readJson(file), undefined);
 		assert.ok(existsSync(`${file}`));
+	} finally {
+		cleanup();
+	}
+});
+
+const UNREADABLE_STORE = `# rule claims about git
+
+## git.flow
+kind: rule
+scope: global
+asOf: 2026-01-01
+source: probe
+
+A healthy rule.
+
+## git.broken
+kind: opinion
+scope: global
+asOf: 2026-01-01
+source: a typo in the field value
+
+A rule the parser refused, which the docs say is reported and left alone.
+
+## Notes — not a key
+Just prose under a heading the grammar cannot read.
+`;
+
+test("store: a write refuses a file it cannot reproduce, and deletes nothing (P1)", () => {
+	const { paths, cleanup } = scratch();
+	try {
+		const file = join(paths.rules, "git.md");
+		writeFileSync(file, UNREADABLE_STORE);
+		const before = readFileSync(file, "utf8");
+		// The bug: proposing an unrelated claim rebuilt the file from the entries that
+		// parsed, which silently deleted the two entries the parser had refused.
+		assert.throws(
+			() => upsertClaim(paths, claim({ key: "git.new", state: "pending" })),
+			(error: unknown) => {
+				assert.ok(error instanceof StoreUnreadable, `expected StoreUnreadable, got ${String(error)}`);
+				assert.match(error.message, /git\.md:11: kind must be rule \| fact/);
+				assert.match(error.message, /git\.md:19: ## Notes — not a key/);
+				assert.match(error.message, /nothing was written/i);
+				return true;
+			},
+		);
+		assert.equal(readFileSync(file, "utf8"), before, "the file is byte-identical: nothing was deleted to get the write through");
+	} finally {
+		cleanup();
+	}
+});
+
+test("store: removeClaim refuses the same file for the same reason (P1)", () => {
+	const { paths, cleanup } = scratch();
+	try {
+		const file = join(paths.rules, "git.md");
+		writeFileSync(file, UNREADABLE_STORE);
+		assert.throws(() => removeClaim(paths, claim({ key: "git.flow" })), StoreUnreadable);
+		assert.match(readFileSync(file, "utf8"), /git\.broken/);
+	} finally {
+		cleanup();
+	}
+});
+
+test("store: a file the writer can reproduce still writes (P1)", () => {
+	const { paths, cleanup } = scratch();
+	try {
+		upsertClaim(paths, claim({ key: "git.flow" }));
+		const before = readFileSync(join(paths.rules, "git.md"), "utf8");
+		upsertClaim(paths, claim({ key: "git.other", state: "pending" }));
+		assert.match(readFileSync(join(paths.rules, "git.md"), "utf8"), new RegExp(before.trim().replaceAll(".", "\\.").replace(/\n/g, "\\n")));
+	} finally {
+		cleanup();
+	}
+});
+
+test("store: health names the lines that block a write (P1)", () => {
+	const { paths, cleanup } = scratch();
+	try {
+		writeFileSync(join(paths.rules, "git.md"), UNREADABLE_STORE);
+		const health = inspectBank(readClaims(paths), paths);
+		assert.equal(health.malformed.length, 1, "one entry the grammar refused");
+		assert.deepEqual(
+			health.unwritable.map((problem) => problem.line).sort((a, b) => a - b),
+			[11, 19],
+		);
 	} finally {
 		cleanup();
 	}

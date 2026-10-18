@@ -134,6 +134,24 @@ per section and what was dropped.
 
 ---
 
+## A writer never deletes what it cannot read
+
+A claim store and the daily log are hand-editable, so they can hold text the
+grammar cannot read: an entry with a bad field, a heading that is not a key, a
+paragraph between sections, a section the tool does not know.
+
+- **A claim store write refuses.** `memory_propose` and `/memory approve|reject|
+  defer|edit` name the file and the line, and write nothing. The unreadable text
+  stays on disk. `/memory doctor` and `/memory status` list the same lines, so you
+  learn them before a proposal wastes a turn. Fix the line, and the write goes
+  through.
+- **A daily-log write inserts one line.** `memory_log` puts the item under its own
+  section heading and rewrites nothing else, so hand-written prose and unknown
+  sections keep their bytes and their place. The archive keeps the day's own bytes
+  for the same reason.
+
+The rule behind both: a writer may rewrite only what it can reproduce.
+
 ## Writes, and the status redirect
 
 `memory_propose` refuses bodies that read as project status — commit SHAs (7–40

@@ -239,6 +239,56 @@ export function readEntryFiles(files: string[]): { claims: Claim[]; errors: Entr
 // ── Writing ────────────────────────────────────────────────────────────────
 
 /**
+ * A store file the extension cannot rewrite. The bytes on disk hold something the
+ * grammar cannot read — an entry it refused, a heading it rejects, or prose below a
+ * blank line inside a body — so the writer would have to drop those bytes to write
+ * anything at all.
+ *
+ * This error is the whole reason a malformed claim used to disappear when an
+ * unrelated claim was proposed into the same file. Nothing is deleted to get a
+ * write through: the write is refused, and the line to fix is named.
+ */
+export class StoreUnreadable extends Error {
+	readonly problems: string[];
+
+	constructor(file: string, problems: string[]) {
+		super(`${file}: this claim store holds text the grammar cannot read, so nothing was written\n${problems.map((problem) => `  ${problem}`).join("\n")}`);
+		this.name = "StoreUnreadable";
+		this.problems = problems;
+	}
+}
+
+/**
+ * Why a store file cannot be rewritten, in the words a person fixes it from.
+ *
+ * Two kinds of blocker. An entry the grammar refused (`errors`) — the writer keeps
+ * the entries it parsed, so writing the file would delete that entry. And text no
+ * entry owns (`unreadable`) — the writer keeps a preamble and entries, so writing
+ * the file would delete that text. Both say the same thing: nothing was changed.
+ */
+export function unreadableProblems(parsed: ParsedStore): string[] {
+	const blockers = [...parsed.unreadable.map((problem) => ({ line: problem.line, text: problem.text, why: problem.extra ?? "it is not a claim, and the writer has nowhere to put it back" }))];
+	for (const error of parsed.errors) blockers.push({ line: error.line, text: error.message.slice(0, 120), why: "the entry is not injected, and a write to this file would delete it" });
+	return blockers
+		.sort((a, b) => a.line - b.line)
+		.map((blocker) => `${parsed.file}:${blocker.line}: ${blocker.text} — ${blocker.why}. Nothing here was changed and nothing was deleted; fix this line, or move the text to a file of its own.`);
+}
+
+/**
+ * Read a store file in order to write it. Refuses while the file holds text the
+ * grammar cannot read: the writer reproduces the preamble and the entries it can
+ * parse, and everything else would be lost.
+ */
+export function readStoreForWrite(file: string): { text: string; preamble: string; entries: Claim[] } {
+	const text = readFileOrNull(file);
+	if (text === undefined) return { text: "", preamble: "", entries: [] };
+	const parsed = parseStore(text, file);
+	const problems = unreadableProblems(parsed);
+	if (problems.length > 0) throw new StoreUnreadable(file, problems);
+	return { text, preamble: parsed.preamble, entries: parsed.entries.map((entry) => entry.claim) };
+}
+
+/**
  * Write through a sibling temp file and rename. A crash leaves a `.tmp-<pid>`
  * sibling, which `inspect` reports rather than hides.
  */
@@ -337,10 +387,9 @@ function slotOf(file: string, namespace: string): number {
  */
 export function upsertClaim(paths: BankPaths, claim: Claim): { file: string; replaced: boolean } {
 	const { file } = storeFileFor(paths, claim);
-	const existingText = readFileOrNull(file);
-	const parsed = existingText === undefined ? undefined : parseStore(existingText, file);
-	const preamble = parsed?.preamble ?? defaultPreamble(claim);
-	const entries: Claim[] = (parsed?.entries ?? []).map((entry) => entry.claim);
+	const current = readStoreForWrite(file);
+	const preamble = current.text === "" ? defaultPreamble(claim) : current.preamble;
+	const entries: Claim[] = [...current.entries];
 	const previous = entries.findIndex((entry) => recordOf(entry) === recordOf(claim));
 	if (previous >= 0) entries[previous] = claim;
 	else entries.push(claim);
@@ -355,12 +404,10 @@ export function defaultPreamble(claim: Claim): string {
 /** Remove one claim (by identity) from its store file. Returns false when absent. */
 export function removeClaim(paths: BankPaths, claim: Claim): boolean {
 	const { file } = storeFileFor(paths, claim);
-	const text = readFileOrNull(file);
-	if (text === undefined) return false;
-	const parsed = parseStore(text, file);
-	const kept = parsed.entries.map((entry) => entry.claim).filter((entry) => recordOf(entry) !== recordOf(claim));
-	if (kept.length === parsed.entries.length) return false;
-	writeAtomic(file, renderStore(parsed.preamble, kept));
+	const current = readStoreForWrite(file);
+	const kept = current.entries.filter((entry) => recordOf(entry) !== recordOf(claim));
+	if (kept.length === current.entries.length) return false;
+	writeAtomic(file, renderStore(current.preamble, kept));
 	return true;
 }
 
@@ -466,6 +513,8 @@ export interface BankHealth {
 	contested: { key: string; scope: string; files: string[] }[];
 	unrooted: string[];
 	unreadable: { file: string; error: string }[];
+	/** Files holding text the writer cannot reproduce; no write touches them until it is fixed. */
+	unwritable: { file: string; line: number; text: string }[];
 	tempFiles: string[];
 	outsideLinks: { file: string; reason: string }[];
 	historyFiles: number;
@@ -509,6 +558,7 @@ export function inspectBank(snapshot: BankSnapshot, paths: BankPaths): BankHealt
 		contested: findContested(snapshot.entries),
 		unrooted: unrootedPathScopes(snapshot.claims).map((claim) => `${claim.key} @ ${claim.scope}`),
 		unreadable: snapshot.unreadable,
+		unwritable: snapshot.stores.flatMap((store) => store.unreadable.map((problem) => ({ file: store.file, line: problem.line, text: problem.text })).concat(store.errors.map((error) => ({ file: error.file, line: error.line, text: error.message.slice(0, 120) })))), 
 		tempFiles: snapshot.tempFiles,
 		outsideLinks: snapshot.outsideLinks,
 		historyFiles: markdownFiles(paths.history, paths.root).length,

@@ -16,7 +16,7 @@ import { applyConfig, loadConfig, describeConfig, describeSettings, type ConfigR
 import { dailyStatus, readDaily, rolloverDaily, appendDailyItem, type DailyLog } from "./daily.js";
 import { gateDaily, gatePropose } from "./gate.js";
 import { buildInjection, formatPreview, type InjectionResult } from "./inject.js";
-import { archiveText, backupBank, ensureBankDirs, inspectBank, readClaims, bankPaths as pathsFor, writeAtomic, type BankPaths, type BankSnapshot, type ExecFn } from "./store.js";
+import { archiveText, backupBank, ensureBankDirs, inspectBank, readClaims, bankPaths as pathsFor, writeAtomic, StoreUnreadable, type BankHealth, type BankPaths, type BankSnapshot, type ExecFn } from "./store.js";
 import { listPending, propose, approve, reject as rejectClaim, defer as deferClaim, editPending, queueCounts, describePending, type PendingEntry, type QueueCounts } from "./queue.js";
 import { reviewNotice, type NoticeOptions } from "./notice.js";
 import { bm25, createRanker, type RankedText } from "./rank.js";
@@ -294,7 +294,12 @@ export class Bank {
 			return { ok: false, text: `refused: ${gate.problems.join("\n")}${gate.redirect ? `\nredirect: ${gate.redirect}` : ""}` };
 		}
 		ensureBankDirs(this.paths);
-		const stored = propose(this.paths, gate.claim, this.today);
+		let stored;
+		try {
+			stored = propose(this.paths, gate.claim, this.today);
+		} catch (error) {
+			return this.refusal(error);
+		}
 		this.invalidate();
 		const waiting = stored.against
 			? ` It waits against the approved claim ("${stored.against.body}") and will not be injected until you approve it.`
@@ -371,18 +376,33 @@ export class Bank {
 
 	review(action: "approve" | "reject" | "defer" | "edit", key: string, scope: string, body?: string): Outcome {
 		ensureBankDirs(this.paths);
-		const outcome =
-			action === "approve"
-				? approve(this.paths, key, scope, this.today)
-				: action === "reject"
-					? rejectClaim(this.paths, key, scope, this.today)
-					: action === "defer"
-						? deferClaim(this.paths, key, scope, this.today)
-						: editPending(this.paths, key, scope, { body });
+		let outcome;
+		try {
+			outcome =
+				action === "approve"
+					? approve(this.paths, key, scope, this.today)
+					: action === "reject"
+						? rejectClaim(this.paths, key, scope, this.today)
+						: action === "defer"
+							? deferClaim(this.paths, key, scope, this.today)
+							: editPending(this.paths, key, scope, { body });
+		} catch (error) {
+			return this.refusal(error);
+		}
 		this.invalidate();
 		if (!outcome.ok) return { ok: false, text: outcome.problem };
 		const extra = outcome.historyFile ? ` — the previous version is in ${outcome.historyFile}` : "";
 		return { ok: true, text: `${outcome.action} ${outcome.claim.key} @ ${outcome.claim.scope}${extra}` };
+	}
+
+	/**
+	 * A write that refused because a store file holds text the grammar cannot read.
+	 * The message names the file and the line, and says the plain fact: nothing was
+	 * written, and nothing was deleted.
+	 */
+	private refusal<T>(error: unknown): Outcome<T> {
+		if (error instanceof StoreUnreadable) return { ok: false, text: `refused: ${error.message}` };
+		throw error instanceof Error ? error : new Error(String(error));
 	}
 
 	// ── Reads ────────────────────────────────────────────────────────────────
@@ -500,6 +520,9 @@ export class Bank {
 			];
 			if (counts.contested.length > 0) lines.push(`contested: ${counts.contested.map((entry) => `${entry.key} @ ${entry.scope}`).join(", ")}`);
 			if (health.malformed.length > 0) lines.push(`malformed: ${health.malformed.map((error) => `${error.file}:${error.line} — ${error.message}`).join("\n  ")}`);
+			if (health.unwritable.length > 0) {
+				lines.push(`cannot read (no write touches these files until it is fixed): ${health.unwritable.map((problem) => `${problem.file}:${problem.line} — ${problem.text}`).join("\n  ")}`);
+			}
 			if (health.unreadable.length > 0) lines.push(`unreadable: ${health.unreadable.map((entry) => entry.file).join(", ")}`);
 			if (health.tempFiles.length > 0) lines.push(`half-written: ${health.tempFiles.join(", ")}`);
 			if (health.outsideLinks.length > 0) lines.push(`links out of the bank: ${health.outsideLinks.map((entry) => `${entry.file} (${entry.reason})`).join(", ")}`);
@@ -515,19 +538,24 @@ export class Bank {
 		const progress = migrationProgress(this.paths);
 		const trial = trialReport(this.paths, { today: this.today });
 		const lines = [
-			health.malformed.length === 0 && health.contested.length === 0 && health.unreadable.length === 0 && health.tempFiles.length === 0 && health.outsideLinks.length === 0
+			isWellFormed(health)
 				? "the bank is well formed"
 				: "the bank needs attention",
 			`  ${health.claims.approved} approved, ${health.claims.pending} pending, ${health.historyFiles} history records, ${health.archiveFiles} archive files`,
 		];
 		if (health.malformed.length > 0) lines.push(`  ${health.malformed.length} malformed entries: ${health.malformed.map((error) => `${error.file}:${error.line}`).join(", ")}`);
+		if (health.unwritable.length > 0) {
+			lines.push(`  ${health.unwritable.length} line(s) no writer can reproduce — memory_propose and /memory approve|reject|defer|edit refuse until it is fixed:`);
+			for (const problem of health.unwritable) lines.push(`    ${problem.file}:${problem.line}: ${problem.text}`);
+			lines.push("    the text is still on disk and nothing was deleted; give it a heading of its own, or move it to a file of its own");
+		}
 		if (health.contested.length > 0) lines.push(`  ${health.contested.length} contested identities: ${health.contested.map((entry) => `${entry.key} @ ${entry.scope}`).join(", ")}`);
 		if (health.unreadable.length > 0) lines.push(`  ${health.unreadable.length} unreadable stores`);
 		if (health.tempFiles.length > 0) lines.push(`  ${health.tempFiles.length} half-written files: ${health.tempFiles.join(", ")}`);
 		if (health.outsideLinks.length > 0) lines.push(`  ${health.outsideLinks.length} links leave the bank: ${health.outsideLinks.map((entry) => entry.file).join(", ")}`);
 		lines.push(`  migration: ${progress.todo} of ${progress.total} source files still to draft${progress.backup ? "" : " (no backup recorded)"}`);
 		lines.push(`  trial: ${trial.turns} turns recorded, median ${trial.medianTokens} tokens`);
-		return { ok: health.malformed.length === 0 && health.contested.length === 0 && health.unreadable.length === 0, text: lines.join("\n") };
+		return { ok: isWellFormed(health), text: lines.join("\n") };
 	}
 
 	flag(key: string, kind: "stale" | "rival", sessionId: string): Outcome {
@@ -609,7 +637,12 @@ export class Bank {
 
 	/** Draft a whole wave in one pass, through the same gate as a hand-written proposal. */
 	migrateApply(opts: { wave?: string; all?: boolean } = {}): Outcome {
-		const result = applyMigration(this.paths, { ...opts, clock: this.clock });
+		let result;
+		try {
+			result = applyMigration(this.paths, { ...opts, clock: this.clock });
+		} catch (error) {
+			return this.refusal(error);
+		}
 		if ("done" in result) return { ok: false, text: result.reason };
 		const lines = [
 			`wave ${result.wave}: ${result.proposed.length} claim(s) proposed from ${result.files.length} file(s). None of them inject until you approve them (D9).`,
@@ -643,6 +676,11 @@ export class Bank {
 
 export function createBank(opts: BankOptions = {}): Bank {
 	return new Bank(opts);
+}
+
+/** Nothing in the bank needs a human's attention before a write can be trusted. */
+function isWellFormed(health: BankHealth): boolean {
+	return health.malformed.length === 0 && health.contested.length === 0 && health.unreadable.length === 0 && health.unwritable.length === 0 && health.tempFiles.length === 0 && health.outsideLinks.length === 0;
 }
 
 function safeReaddir(dir: string): string[] {
