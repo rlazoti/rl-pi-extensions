@@ -108,10 +108,18 @@ in its constraints) and Pi's extension API docs (`session_start` and `before_age
 - R28. Which claims may be injected (D1, D9):
   - approved claims: yes;
   - a pending claim whose identity has an approved claim: no, only the approved claim is injected;
-  - a pending claim for a new identity with `origin: agent`: yes, labelled `[unapproved]` and ranked
-    below approved claims, until it is flagged as old (R20); then no (D13);
+  - a pending claim for a new identity — **and only when no approved claim answers for that key in
+    this session** (D25). A pending claim at a scope the approved one does not share is a second
+    identity (R11), but it is still an unreviewed claim about a subject that already speaks, and a
+    narrower scope shadows (R10), so approving it later is what makes it speak, not injecting it now.
+    It waits, named in `/memory status` and the review notice. With no approved claim for the key:
+    `origin: agent` injects, labelled `[unapproved]` and ranked below approved claims, until it is
+    flagged as old (R20), then never (D13);
   - a pending claim with `origin: migration`: no, until approved;
   - a contested identity (R12): nothing.
+  An excluded claim is always reported with the reason for **its** case: a change waiting against
+  an approved claim, a different identity waiting at a narrower scope, or one waiting behind a
+  narrower approved scope (D25) — one string for all three read like a bug.
 - R29. Nothing is cut silently. A cut never splits an entry. If entries are dropped, a final line
   says how many, of which kind, and to use `memory_search` to find them.
 - R30. Read errors fail open: no injection, one visible warning, and the turn proceeds.
@@ -293,8 +301,9 @@ flowchart LR
   - two approved claims on one identity inject nothing and appear in the notice;
   - approval moves the old claim to history, byte for byte.
 - **Eligibility (R28):** a table covering each row, including pending-over-approved (approved only),
-  new-key agent pending (labelled, ranked below), new-key pending older than 14 days (excluded),
-  and migration pending (excluded).
+  pending at **another scope** beside an approved claim for the same key (excluded, and its reason
+  names that case rather than reusing the same-identity one — D25), new-key agent pending (labelled,
+  ranked below), new-key pending older than 14 days (excluded), and migration pending (excluded).
 - **Retrieval (R32):** the probe table — a query and the keys it must return, in order — with chat
   queries ("yes", "ok do it") returning nothing; word families folding onto one term while "status",
   "alias" and "class" keep theirs; the stopword list checked for holes in the words a prompt really
@@ -387,3 +396,4 @@ flowchart LR
 | D22 | A trial with nothing to inject | Both gates: the clock starts at 3 approved claims, and a go needs 5 recorded turns that retrieved at least one claim. Measured on this bank: 48% of injected turns retrieve something, so 5 costs about 10 turns and one evening cannot fake it. Counts approved claims of any origin and never calls the migration code. | R45 |
 | D23 | The size gate | Keep the 25% ratio **and** add an absolute ceiling of 1,200 tokens on the median, measured from 25 real injections (median 1,077, p90 1,646). Against a 17,232-token baseline the whole 2,000-token budget is 12%, so the ratio alone passes for ever. | R45 |
 | D24 | Blocks that pile up in the conversation | A `context` handler keeps only the newest block, plus the newest block carrying retrieved claims when the newest carries none (marked as carried). Chosen over per-claim dedup (the blocks still grow, and a compaction forgets the dedup) and over measuring only: a nine-turn session of this project carried 10,255 tokens of memory blocks on every model call, where the newest block was 1,085. The vanishing-follow-up case is the reason the second block exists at all. | R25.1, R43 |
+| D25 | A pending claim beside an approved one for the same key | Keep excluding it, correct the reason, narrow the rule's wording. The identity is key + scope (R11), so an approved `global` claim and a pending `project:` claim are two identities, and R28 read as if the second were eligible — while the code excluded every pending claim for a key that an approved claim answered, with a reason written for the same-identity case. Kept because an unreviewed narrower scope **shadows** (R10): injecting it would put text nobody has reviewed in place of the approved claim, which is what R28 exists to prevent. Nothing is lost — the approved claim still speaks, and the pending one is named in `/memory status` and the review notice. | R28, R13 |

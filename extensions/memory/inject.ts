@@ -19,7 +19,7 @@
 import { estimateTokens } from "@earendil-works/pi-coding-agent";
 
 import { identityOf, isAlwaysRule, type Claim } from "./grammar.js";
-import { resolveIdentity, type ScopeContext } from "./scope.js";
+import { parseScope, resolveIdentity, scopeRank, type ScopeContext } from "./scope.js";
 import { BM25_RANKER, type Ranker } from "./rank.js";
 import { OPEN_SECTIONS, formatItem, type DailyItem, type DailyLog } from "./daily.js";
 import type { MemoryConfig } from "./config.js";
@@ -112,11 +112,18 @@ export function dropNotice(droppedClaims: number, rules: number, facts: number, 
 	return `Not shown for the budget: ${parts.join(", ")} — use memory_search to find them.`;
 }
 
+/** Higher is narrower (R10). A scope that does not parse is treated as broadest. */
+function rankOf(scope: string): number {
+	const parsed = parseScope(scope);
+	return parsed ? scopeRank(parsed) : 0;
+}
+
 /**
  * Decide which claims may speak (R28) and which one answers for a key (R10).
  * Approved and pending claims are resolved separately: an approved claim and a
  * proposal waiting against it are not rivals, they are the same identity at two
- * stages (R11).
+ * stages (R11). An identity is key + scope, so a pending claim at a *different*
+ * scope is a second identity, not a change against the approved one (D25).
  */
 export function selectEligible(claims: Claim[], ctx: ScopeContext, opts: { pendingFlagDays: number; ageOf: (claim: Claim) => number }): {
 	candidates: Candidate[];
@@ -158,8 +165,23 @@ export function selectEligible(claims: Claim[], ctx: ScopeContext, opts: { pendi
 		}
 		if (approvedResolved.winner) {
 			candidates.push({ claim: approvedResolved.winner });
+			const winnerRank = rankOf(approvedResolved.winner.scope);
 			for (const claim of pending) {
-				excluded.push({ key: claim.key, scope: claim.scope, reason: "a change is pending against an approved claim; only the approved claim is asserted" });
+				// R11: an identity is key + scope, so a pending claim at another scope is not
+				// a change against the approved one — it is a second identity, and it waits for
+				// review because an unreviewed claim must not be the one that shadows. Saying
+				// "a change is pending against an approved claim" for it read like a bug (D25).
+				const sameIdentity = claim.scope === approvedResolved.winner.scope;
+				const narrower = rankOf(claim.scope) > winnerRank;
+				excluded.push({
+					key: claim.key,
+					scope: claim.scope,
+					reason: sameIdentity
+						? "a change is pending against an approved claim; only the approved claim is asserted"
+						: narrower
+							? `a different identity (${claim.scope}): it waits for review, because an unreviewed claim at a narrower scope would shadow the approved claim for this key`
+							: `a different identity (${claim.scope}): it waits for review, because an approved claim at a narrower scope already answers for this key`,
+				});
 			}
 			continue;
 		}

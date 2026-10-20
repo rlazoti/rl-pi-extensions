@@ -52,7 +52,11 @@ manual cutover step (see [Cutover](#cutover)).
    deleted.
 3. **A pending claim for a new identity injects as `[unapproved]`**, below the
    approved ones, until it is older than `pendingFlagDays` (14) — then it stops
-   injecting but is never dropped.
+   injecting but is never dropped. *New identity* means new **for that key**: a
+   pending `project:` claim beside an approved `global` one waits too (D25),
+   because a narrower scope shadows (rule 6) and an unreviewed claim must not be
+   what stands in place of one that was approved. The approved claim keeps
+   answering; the proposal waits in `/memory status`.
 4. **A pending claim with `origin: migration` never injects** until approved
    (D9): a migrated bank cannot silently become the truth.
 5. **Two approved claims for one identity is *contested*: nothing injects for it**

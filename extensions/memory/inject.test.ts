@@ -216,6 +216,39 @@ test("inject: a claim far behind the top hit is not injected, even with room lef
 	assert.deepEqual(inject(claims, { query: "branch wire transfer naming" }).injected.map((entry) => entry.key).sort(), ["banking.wire", "git.flow"]);
 });
 
+test("inject: a pending claim for the same key at another scope waits for review, and the reason says which case it is (R28, D25)", () => {
+	// R11 makes an identity key + scope, so a pending project claim is not a change
+	// against an approved global one. It is a second identity, and it waits — but
+	// saying "a change is pending against an approved claim" reads like our bug.
+	const narrower = [
+		claim("git.flow", { body: "Branches are named rl-MM-DD-topic." }),
+		claim("git.flow", { scope: "project:github.com/rlazoti/rl-pi-extensions", state: "pending", body: "In this repo a branch is named task/<key>." }),
+	];
+	const result = inject(narrower, { query: "branch naming" });
+	assert.deepEqual(result.injected.map((entry) => `${entry.key}@${entry.scope}`), ["git.flow@global"]);
+	const reason = result.excluded.find((item) => item.scope.startsWith("project:"))!.reason;
+	assert.match(reason, /^a different identity \(project:github\.com\/rlazoti\/rl-pi-extensions\)/);
+	assert.match(reason, /narrower scope would shadow the approved claim/);
+	assert.doesNotMatch(reason, /a change is pending against an approved claim/);
+
+	// The case the old reason did describe: same identity, so it is a change.
+	const change = [
+		claim("git.flow", { body: "Branches are named rl-MM-DD-topic." }),
+		claim("git.flow", { state: "pending", body: "Branches are named <key>-slug." }),
+	];
+	const changed = inject(change, { query: "branch naming" });
+	assert.deepEqual(changed.injected.map((entry) => `${entry.key}@${entry.scope}`), ["git.flow@global"]);
+	assert.match(changed.excluded.find((item) => item.key === "git.flow")!.reason, /^a change is pending against an approved claim/);
+
+	// And a pending identity broader than the approved one says why it is quiet.
+	const broader = [
+		claim("git.flow", { scope: "project:github.com/rlazoti/rl-pi-extensions", body: "In this repo a branch is named task/<key>." }),
+		claim("git.flow", { state: "pending", body: "Branches are named rl-MM-DD-topic." }),
+	];
+	const wider = inject(broader, { query: "branch naming" });
+	assert.match(wider.excluded.find((item) => item.scope === "global")!.reason, /an approved claim at a narrower scope already answers/);
+});
+
 test("inject: the recall cap bounds how many claims one turn gets, whatever the budget leaves (R27.4)", () => {
 	const claims: Claim[] = [];
 	for (let i = 0; i < 12; i++) claims.push(claim(`git.t${i}`, { body: `git flow rule number ${i}` }));
