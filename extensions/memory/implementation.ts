@@ -33,12 +33,6 @@ function toolResult(text: string, details: unknown, isError = false): AgentToolR
 }
 
 /**
- * Overrides recorded in this process, reported per injected turn so the trial can
- * tell whether the status detector is too strict (R24, R43).
- */
-let overridesThisSession = 0;
-
-/**
  * One notice channel per extension instance and mode, so "once per process"
  * really means once: two session_starts in one session do not repeat the notice.
  */
@@ -104,9 +98,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 		if (event.messageType !== "user") return;
 		try {
 			bank.rollover();
-			const { result, warnings } = await bank.injection(event.prompt, ctx.cwd, ctx.sessionManager.getSessionId(), {
-				overridesRecorded: overridesThisSession,
-			});
+			const { result, warnings } = await bank.injection(event.prompt, ctx.cwd, ctx.sessionManager.getSessionId());
 			for (const warning of warnings) warnOnce(ctx, `memory: ${warning}`);
 			if (result.contested.length > 0) warnOnce(ctx, `memory: ${result.contested.length} contested identity(ies) — nothing is asserted for them; /memory review`);
 			if (result.text === "") return;
@@ -220,8 +212,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 			overrideReason: Type.Optional(Type.String({ description: "Required with overrideStatusCheck; stored on the claim and shown in review." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const outcome = bank.proposeClaim(params as Parameters<Bank["proposeClaim"]>[0]);
-			if (params.overrideStatusCheck && outcome.ok) overridesThisSession++;
+			const outcome = bank.proposeClaim({ ...(params as Parameters<Bank["proposeClaim"]>[0]), session: ctx.sessionManager.getSessionId() });
 			const against = outcome.data?.against;
 			if (outcome.ok && against !== undefined && bank.config().config.inlineConflictDialog && ctx.mode === "tui" && ctx.hasUI) {
 				// R19: one dialog, right away, beside the claim it would replace. It is

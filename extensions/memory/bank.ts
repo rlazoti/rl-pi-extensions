@@ -38,7 +38,7 @@ import {
 	readState,
 	type MigrationState,
 } from "./migrate.js";
-import { appendTurn, computeBaseline, formatTrialReport, readFlags, recordFlag, trialReport, writeBaseline, type TrialReport } from "./trial.js";
+import { appendTurn, computeBaseline, formatTrialReport, readFlags, recordFlag, recordOverride, trialReport, writeBaseline, type TrialReport } from "./trial.js";
 
 export interface BankOptions {
 	paths?: BankPaths;
@@ -197,7 +197,7 @@ export class Bank {
 
 	// ── Injection ────────────────────────────────────────────────────────────
 
-	async injection(query: string, cwd: string, sessionId: string, overrides: { overridesRecorded?: number } = {}): Promise<{ result: InjectionResult; warnings: string[]; context: ScopeContext }> {
+	async injection(query: string, cwd: string, sessionId: string, opts: { record?: boolean } = {}): Promise<{ result: InjectionResult; warnings: string[]; context: ScopeContext }> {
 		const context = await this.context(cwd);
 		const { config, warnings } = this.config();
 		const snapshot = this.snapshot();
@@ -217,18 +217,27 @@ export class Bank {
 			ranker,
 			ageOf: (claim) => ages.get(identityOf(claim)) ?? 0,
 		});
-		if (result.text !== "") {
+		// Only a turn that really happened is a measurement. `/memory preview` runs
+		// the same code to show what a turn would cost, and a preview counted as a
+		// turn moved the trial's own median (F2-b).
+		if (result.text !== "" && opts.record !== false) {
 			appendTurn(
 				this.paths,
-				{ tokens: result.tokens, dropped: { claims: result.dropped.rule + result.dropped.fact, dailyItems: result.dropped.dailyItems }, overrides: overrides.overridesRecorded ?? 0, session: sessionId },
+				{
+					tokens: result.tokens,
+					dropped: { claims: result.dropped.rule + result.dropped.fact, dailyItems: result.dropped.dailyItems },
+					claims: snapshot.claims.filter((claim) => claim.state === "approved").length,
+					session: sessionId,
+				},
 				this.clock,
 			);
 		}
 		return { result, warnings: localWarnings, context };
 	}
 
+	/** What a turn would receive, without recording that it happened (R31). */
 	preview(query: string, cwd: string): Promise<Outcome<InjectionResult>> {
-		return this.injection(query, cwd, "preview").then(({ result, warnings }) => ({
+		return this.injection(query, cwd, "preview", { record: false }).then(({ result, warnings }) => ({
 			ok: true,
 			text: [formatPreview(result), ...warnings.map((warning) => `warning: ${warning}`)].join("\n"),
 			data: result,
@@ -277,6 +286,8 @@ export class Bank {
 		origin?: "agent" | "migration";
 		overrideStatusCheck?: boolean;
 		overrideReason?: string;
+		/** The session that asked, recorded on an override so a count has a source. */
+		session?: string;
 	}): Outcome<{ file: string; against?: Claim }> {
 		const claim: Claim = {
 			key: input.key,
@@ -304,6 +315,12 @@ export class Bank {
 			return this.refusal(error);
 		}
 		this.invalidate();
+		// D14 only becomes a number if each override is recorded once, at the
+		// proposal it belongs to. A counter in the extension process counted every
+		// later turn instead, and `/memory trial` never showed it (F2-c).
+		if (gate.claim.statusOverride) {
+			recordOverride(this.paths, { key: gate.claim.key, scope: gate.claim.scope, reason: gate.claim.statusOverride, session: input.session ?? "unknown" }, this.clock);
+		}
 		const waiting = stored.against
 			? ` It waits against the approved claim ("${stored.against.body}") and will not be injected until you approve it.`
 			: gate.claim.origin === "migration"

@@ -99,7 +99,7 @@ history/<key>.md                         superseded and rejected claims, append-
 daily/today.md, daily/archive/YYYY-MM/   the daily log; rolled over once per session
 archive/                                 read-only migrated prose and status text
 migration/state.json                     resumable migration progress, plus the verified backup
-metrics/turns.jsonl, flags.jsonl, baseline.json   trial metrics (never any prompt text)
+metrics/turns.jsonl, flags.jsonl, baseline.json, overrides.jsonl   trial metrics (never any prompt text)
 config.json                              the settings below — hand-editable; the next turn reads it
 ```
 
@@ -296,15 +296,32 @@ what the trial is measuring now.
 The component is measured, not assumed (D6):
 
 - every injected turn appends one line to `metrics/turns.jsonl` — timestamp,
-  tokens per section, entries dropped, status-check overrides. **No prompt text.**
+  tokens per section, entries dropped, and **how many approved claims the bank
+  held**, which is what starts the clock. **No prompt text.**
 - `/memory flag <key> stale|rival` records what the injection got wrong.
+- a `memory_propose` that had to override the status detector appends **one** line
+  to `metrics/overrides.jsonl`, at the proposal it belongs to. That is D14's number.
 - `/memory trial baseline [--days 14] [--marker "# Memory Bank Context"] [--sessions-dir path]`
   measures the *previous* extension's injected block per user turn from Pi session
   files, with the same token estimator, and writes the median to
   `metrics/baseline.json`. If the block is not found it says so and writes
   nothing — the baseline is measured, never estimated.
-- `/memory trial [days]` reports the median against the baseline and the flag
-  count. **Go: median ≤ 25% of baseline, and zero stale/rival flags.**
+- `/memory preview` measures nothing. It runs the same code and writes no metric
+  line, because two previews would otherwise move the median they are judging.
+
+`/memory trial [days]` prints what it measured and every reason a `go` is not yet
+allowed, and **go needs all of them**:
+
+| Gate | Value | Why it is there |
+|---|---|---|
+| clock | the bank held **3** approved claims at a recorded turn | an empty bank injects almost nothing and can offend nobody (D22) |
+| window | **7 days** since that turn, and at least **4** of them carrying turns | three turns in one evening are not a week (D21) |
+| recall used | **5** recorded turns got at least one claim back from the ranker | a block of always-on rules alone measures the caps, not the memory (D22) |
+| size | median ≤ **25%** of the baseline **and** ≤ **1,200** tokens | against a 17,232-token baseline the 2,000-token budget is 12%, so the ratio alone can never fail (D23) |
+| flags | **0** stale or rival flags | the honest signal that a claim was wrong |
+
+Overrides are reported, never gated: a gate there would reward never overriding a
+detector that was wrong.
 
 Not measured, by decision (R46): recall (missing notes) and a head-to-head with
 rl memory.

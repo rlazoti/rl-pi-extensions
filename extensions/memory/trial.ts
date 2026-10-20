@@ -26,8 +26,14 @@ export interface TurnMetric {
 	day: string;
 	tokens: { core: number; daily: number; retrieved: number; total: number };
 	dropped: { claims: number; dailyItems: number };
-	/** Status-check overrides recorded in this session so far (R24, R43). */
-	overrides: number;
+	/**
+	 * Approved claims the bank held when this turn was injected.
+	 *
+	 * The trial clock starts only once the bank is worth measuring (D22), and
+	 * "when" is a fact about that turn, so it is recorded on the turn. A line
+	 * without the field — written before this existed — is unknown, not zero.
+	 */
+	claims: number;
 	session: string;
 }
 
@@ -62,6 +68,10 @@ export function flagsFile(paths: BankPaths): string {
 
 export function baselineFile(paths: BankPaths): string {
 	return join(paths.metrics, "baseline.json");
+}
+
+export function overridesFile(paths: BankPaths): string {
+	return join(paths.metrics, "overrides.jsonl");
 }
 
 function stamp(clock: Clock): { at: string; day: string } {
@@ -138,6 +148,49 @@ export function readFlags(paths: BankPaths, opts: { sinceDay?: string } = {}): F
 		}
 	}
 	return flags;
+}
+
+/**
+ * One status-check override, recorded the moment it happens (R24, D14).
+ *
+ * This used to be a running total in the extension process, written onto every
+ * turn after it and never reported, so the number D14 wanted (how often the
+ * detector was wrong) could not be read and counted the same override again on
+ * every later turn. An override belongs to a proposal, so it gets its own line.
+ */
+export interface OverrideRecord {
+	at: string;
+	day: string;
+	key: string;
+	scope: string;
+	/** The reason the caller insisted, as it was given. */
+	reason: string;
+	session: string;
+}
+
+export function recordOverride(paths: BankPaths, override: { key: string; scope: string; reason: string; session: string }, clock: Clock = systemClock): OverrideRecord {
+	if (!existsSync(paths.metrics)) mkdirSync(paths.metrics, { recursive: true });
+	const { at, day } = stamp(clock);
+	const full: OverrideRecord = { at, day, ...override };
+	writeFileSync(overridesFile(paths), `${JSON.stringify(full)}\n`, { flag: "a" });
+	return full;
+}
+
+export function readOverrides(paths: BankPaths, opts: { sinceDay?: string } = {}): OverrideRecord[] {
+	const text = readOrNull(overridesFile(paths));
+	if (text === undefined) return [];
+	const out: OverrideRecord[] = [];
+	for (const line of text.split("\n")) {
+		if (line.trim() === "") continue;
+		try {
+			const parsed = JSON.parse(line) as OverrideRecord;
+			if (opts.sinceDay && parsed.day < opts.sinceDay) continue;
+			out.push(parsed);
+		} catch {
+			continue;
+		}
+	}
+	return out;
 }
 
 export function median(values: number[]): number {
@@ -317,37 +370,94 @@ export function readBaseline(paths: BankPaths): Baseline | undefined {
 
 export interface TrialReport {
 	days: number;
+	/** Injected turns recorded in the window, whether or not they count as evidence. */
 	turns: number;
+	retrievedTurns: number;
+	/** Approved claims the bank held at the last recorded turn. */
+	approvedClaims: number;
+	clockStarted: boolean;
+	/** Days since the trial clock started, today included. */
+	spanDays: number;
+	/** Days in the window that carry at least one turn since the clock started. */
+	activeDays: number;
+	coverageGate: number;
 	medianTokens: number;
 	baseline?: Baseline;
 	ratio?: number;
 	flags: { stale: number; rival: number; total: number };
+	overrides: number;
+	overrideKeys: string[];
 	go: boolean;
+	/**
+	 * What stops the go, one entry per unmet gate, in the order a reader would
+	 * fix them. The verdict joins them, so a gate can never be reported and then
+	 * overwritten by the next one — the bug that let a one-day burst read as a
+	 * finished trial (D21).
+	 */
+	gates: string[];
 	verdict: string;
 	corruptTurnLines: number;
 }
 
+/** The window `/memory trial` reports, and the gate R45 sets on each number. */
+export const TRIAL_DAYS = 7;
+export const SIZE_RATIO_GATE = 0.25;
 /**
- * `/memory trial` (R45): median injected tokens per turn against the baseline,
- * plus every stale or rival flag. Go means the median is at most 25% of the
- * baseline and there are no flags.
+ * D23: an absolute ceiling beside the relative one, measured on this machine at
+ * 1,077 tokens median over 25 real injections. The ratio alone says nothing here:
+ * against a 17,232-token baseline the 2,000-token budget is 12%, so a bank that
+ * spent its whole budget every turn would pass a 25% gate for ever.
+ */
+export const MAX_MEDIAN_TOKENS = 1200;
+/** D22: the trial clock starts at 3 approved claims… */
+export const MIN_APPROVED_CLAIMS = 3;
+/** …and a go needs 5 turns that actually got something back from the ranker. */
+export const MIN_RETRIEVED_TURNS = 5;
+
+/**
+ * `/memory trial` (R45): the week's numbers and every reason they do not yet
+ * allow a go.
+ *
+ * Nothing is estimated and nothing is dropped: the median is over the turns in
+ * the window, and the gates say whether the window is evidence at all. A trial
+ * that cannot say go says why, gate by gate.
  */
 export function trialReport(paths: BankPaths, opts: { today: string; days?: number }): TrialReport {
-	const days = opts.days ?? 7;
+	const days = opts.days ?? TRIAL_DAYS;
 	const sinceDay = shiftDay(opts.today, -(days - 1));
 	const turns = readTurns(paths, { sinceDay });
 	const flags = readFlags(paths, { sinceDay });
+	const overrides = readOverrides(paths, { sinceDay });
 	const stale = flags.filter((flag) => flag.kind === "stale").length;
 	const rival = flags.filter((flag) => flag.kind === "rival").length;
 	const baseline = readBaseline(paths);
 	const observed = turns.filter((turn) => turn.tokens.total > 0);
+	const coverageGate = Math.ceil(days / 2);
+	// The clock starts at the first turn whose bank was worth measuring. A turn
+	// recorded before that is not evidence, and a run of turns recorded while the
+	// bank was empty is not a trial that finished.
+	const clockDays = turns.filter((turn) => (turn.claims ?? 0) >= MIN_APPROVED_CLAIMS).map((turn) => turn.day);
+	const startDay = clockDays.length === 0 ? undefined : clockDays.sort()[0]!;
+	const sinceClock = startDay === undefined ? [] : turns.filter((turn) => turn.day >= startDay);
+	const spanDays = startDay === undefined ? 0 : daysBetween(startDay, opts.today) + 1;
+	const activeDays = new Set(sinceClock.map((turn) => turn.day)).size;
+	const retrievedTurns = turns.filter((turn) => turn.tokens.retrieved > 0).length;
 	const report: TrialReport = {
 		days,
 		turns: turns.length,
+		retrievedTurns,
+		approvedClaims: turns.length === 0 ? 0 : turns[turns.length - 1]!.claims ?? 0,
+		clockStarted: startDay !== undefined,
+		spanDays,
+		activeDays,
+		coverageGate,
 		medianTokens: median(observed.map((turn) => turn.tokens.total)),
 		baseline,
 		flags: { stale, rival, total: stale + rival },
+		overrides: overrides.length,
+		overrideKeys: [...new Set(overrides.map((entry) => entry.key))],
 		go: false,
+		gates: [],
 		verdict: "",
 		corruptTurnLines: corruptTurnLines(paths),
 	};
@@ -355,37 +465,55 @@ export function trialReport(paths: BankPaths, opts: { today: string; days?: numb
 		report.verdict = `no injected turns recorded in the last ${days} days — the trial has not started`;
 		return report;
 	}
-	if (daysBetween(sinceDay, opts.today) + 1 < days) {
-		report.verdict = `only ${daysBetween(sinceDay, opts.today) + 1} of ${days} days covered`;
-	}
-	if (!baseline) {
-		report.verdict = `${report.turns} turns recorded, but no baseline: run /memory trial baseline first`;
-		return report;
-	}
-	report.ratio = baseline.medianTokens === 0 ? Number.POSITIVE_INFINITY : report.medianTokens / baseline.medianTokens;
-	const sizeOk = report.ratio <= 0.25;
-	const flagsOk = report.flags.total === 0;
-	report.go = sizeOk && flagsOk;
-	const pct = Number.isFinite(report.ratio) ? `${Math.round(report.ratio * 100)}%` : "infinite";
-	const flagPhrase = `${report.flags.total} stale or rival flag${report.flags.total === 1 ? "" : "s"}`;
-	if (report.go) {
-		report.verdict = `go: median ${report.medianTokens} tokens against a baseline of ${baseline.medianTokens} (${pct}, threshold 25%), and ${flagPhrase}`;
-	} else if (!sizeOk && !flagsOk) {
-		report.verdict = `no-go: median ${report.medianTokens} tokens against a baseline of ${baseline.medianTokens} (${pct}, threshold 25%), and ${flagPhrase}`;
-	} else if (!sizeOk) {
-		report.verdict = `not yet: median ${report.medianTokens} tokens is ${pct} of the baseline's ${baseline.medianTokens}; the threshold is 25%`;
+
+	if (!report.clockStarted) {
+		report.gates.push(`the trial clock has not started: the turns recorded so far saw ${report.approvedClaims} approved claim${report.approvedClaims === 1 ? "" : "s"}, and the clock starts at ${MIN_APPROVED_CLAIMS}`);
 	} else {
-		report.verdict = `not yet: the size gate passes (${pct} of baseline), but ${report.flags.total} claim${report.flags.total === 1 ? " was" : "s were"} flagged stale or rival`;
+		if (spanDays < days) report.gates.push(`the trial started ${spanDays} day${spanDays === 1 ? "" : "s"} ago; the window is ${days} days`);
+		if (activeDays < coverageGate) report.gates.push(`only ${activeDays} of ${days} days carry turns (the gate is ${coverageGate})`);
+		if (retrievedTurns < MIN_RETRIEVED_TURNS) report.gates.push(`only ${retrievedTurns} turn${retrievedTurns === 1 ? "" : "s"} retrieved a claim (the gate is ${MIN_RETRIEVED_TURNS})`);
+	}
+
+	if (!baseline) {
+		report.gates.push("no baseline: run /memory trial baseline first");
+	} else {
+		report.ratio = baseline.medianTokens === 0 ? Number.POSITIVE_INFINITY : report.medianTokens / baseline.medianTokens;
+		if (report.ratio > SIZE_RATIO_GATE) {
+			report.gates.push(`median ${report.medianTokens} tokens is ${ratioText(report.ratio)} of the baseline's ${baseline.medianTokens} (the gate is ${Math.round(SIZE_RATIO_GATE * 100)}%)`);
+		}
+		if (report.medianTokens > MAX_MEDIAN_TOKENS) {
+			report.gates.push(`median ${report.medianTokens} tokens is over the ${MAX_MEDIAN_TOKENS}-token ceiling`);
+		}
+	}
+	if (report.flags.total > 0) {
+		const total = report.flags.total;
+		report.gates.push(`${total} claim${total === 1 ? " was" : "s were"} flagged stale or rival`);
+	}
+
+	const pct = report.ratio === undefined ? "" : ratioText(report.ratio);
+	if (report.gates.length === 0) {
+		report.go = true;
+		report.verdict = `go: median ${report.medianTokens} tokens against a baseline of ${baseline!.medianTokens} (${pct}, threshold ${Math.round(SIZE_RATIO_GATE * 100)}%), under the ${MAX_MEDIAN_TOKENS}-token ceiling, and ${report.flags.total} stale or rival flag${report.flags.total === 1 ? "" : "s"}`;
+	} else {
+		report.verdict = `not yet: ${report.gates.join("; ")}`;
 	}
 	return report;
+}
+
+function ratioText(ratio: number): string {
+	return Number.isFinite(ratio) ? `${Math.round(ratio * 100)}%` : "infinite";
 }
 
 export function formatTrialReport(report: TrialReport): string {
 	const lines = [`Trial, last ${report.days} days: ${report.turns} injected turns, median ${report.medianTokens} tokens per turn`];
 	if (report.baseline) lines.push(`  baseline: median ${report.baseline.medianTokens} tokens from ${report.baseline.samples} blocks marked "${report.baseline.marker}", ${report.baseline.from} to ${report.baseline.to}`);
 	else lines.push("  baseline: none recorded — /memory trial baseline computes it from session files (R47)");
-	if (report.ratio !== undefined) lines.push(`  size: ${Math.round(report.ratio * 100)}% of the baseline (the gate is 25%)`);
+	if (report.ratio !== undefined) lines.push(`  size: ${ratioText(report.ratio)} of the baseline (the gate is ${Math.round(SIZE_RATIO_GATE * 100)}%), median ${report.medianTokens} against a ceiling of ${MAX_MEDIAN_TOKENS}`);
+	else lines.push(`  size: median ${report.medianTokens} against a ceiling of ${MAX_MEDIAN_TOKENS}, and the ratio needs a baseline`);
+	lines.push(`  evidence: ${report.clockStarted ? `${report.turns} turns over ${report.spanDays} days` : `${report.turns} turns before the clock started`}, ${report.retrievedTurns} of them retrieved a claim (the gate is ${MIN_RETRIEVED_TURNS}), bank at ${report.approvedClaims} approved claims (the clock starts at ${MIN_APPROVED_CLAIMS})`);
+	lines.push(`  coverage: ${report.activeDays} of ${report.days} days carry turns, over ${report.spanDays} of ${report.days} days (the gate is ${report.coverageGate} days)`);
 	lines.push(`  flags: ${report.flags.stale} stale, ${report.flags.rival} rival`);
+	lines.push(`  overrides: ${report.overrides} in the window${report.overrideKeys.length === 0 ? "" : ` (${report.overrideKeys.slice(0, 5).join(", ")}${report.overrideKeys.length > 5 ? ", …" : ""})`}`);
 	if (report.corruptTurnLines > 0) lines.push(`  metrics damage: ${report.corruptTurnLines} unreadable lines in turns.jsonl`);
 	lines.push(`  ${report.verdict}`);
 	return lines.join("\n");

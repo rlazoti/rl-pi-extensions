@@ -79,8 +79,10 @@ in its constraints) and Pi's extension API docs (`session_start` and `before_age
 - R23. The detector reads the body only. `source` and `links` may carry PR, commit and run
   references, because they are evidence.
 - R24. A refused proposal can be resubmitted with `overrideStatusCheck: true` and a reason. The
-  override is stored on the claim and shown in review. Each override is also counted in the trial
-  metrics (R43), so the trial shows whether the detector is too strict (D14).
+  override is stored on the claim and shown in review. Each override is recorded **once**, as its own
+  event line in `metrics/overrides.jsonl`, at the proposal it belongs to, and the trial reports the
+  count (R43, D14). It is never a per-turn running total, and it is never a gate on the go: a gate
+  there would reward never overriding a detector that was wrong.
 
 ### Injection
 - R25. Injection happens in `before_agent_start` for runs started by the user. It returns one
@@ -107,7 +109,8 @@ in its constraints) and Pi's extension API docs (`session_start` and `before_age
   says how many, of which kind, and to use `memory_search` to find them.
 - R30. Read errors fail open: no injection, one visible warning, and the turn proceeds.
 - R31. `/memory preview [prompt]` shows the exact block that would be injected, with tokens per
-  section.
+  section. It **records nothing**: a preview is a question about the measurement, not a sample of it.
+  Two previews used to append two turn metrics and move the median the trial reports (F2-b).
 
 ### Retrieval
 - R32. The default ranker is BM25 over key, aliases, tags and body. Rankers implement
@@ -169,13 +172,26 @@ in its constraints) and Pi's extension API docs (`session_start` and `before_age
 
 ### Success measure: one-week trial (D6)
 - R43. The extension appends one line per injected turn to `metrics/turns.jsonl`: timestamp, tokens
-  per section, entries dropped, and status-check overrides. No prompt text is stored.
+  per section, entries dropped, and the number of approved claims the bank held (which starts the
+  clock, R45). No prompt text is stored. `/memory preview` appends nothing (R31). Status-check
+  overrides are not a field on this line — they belong to a proposal, not to a turn — and are one
+  line each in `metrics/overrides.jsonl` (R24).
 - R44. `/memory flag <key> stale|rival` records a flag in `metrics/flags.jsonl` with the injected
   claim and the session id.
-- R45. `/memory trial` reports the trial result after 7 days of use:
-  - median injected tokens per turn, against the current extension's baseline;
-  - the count of stale and rival flags.
-  Go: median at most 25% of the baseline, and zero flags.
+- R45. `/memory trial` reports the trial result after 7 days of use. It prints what it measured and
+  **every** unmet gate; a gate is never reported and then overwritten by the next verdict (D21).
+  Go needs all of them:
+  - **clock:** a recorded turn saw at least `MIN_APPROVED_CLAIMS` (3) approved claims — with nothing
+    to inject, a trial proves nothing (D22);
+  - **window:** the span from that first turn to today is at least `days` (7), and at least half of
+    those days carry a turn (D21). Coverage is measured from the first recorded turn, never from the
+    window it is handed, which is what made the old check impossible to fail;
+  - **recall used:** at least `MIN_RETRIEVED_TURNS` (5) recorded turns got at least one claim back
+    from the ranker (D22);
+  - **size:** median at most 25% of the baseline **and** at most `MAX_MEDIAN_TOKENS` (1,200) tokens
+    (D23);
+  - **flags:** zero stale or rival flags.
+  Overrides are reported on the same screen and gate nothing (R24).
 - R46. Recall (missing notes) and a comparison with rl memory are not measured. This is accepted.
 - R47. `/memory trial baseline` computes the baseline from Pi session files (D10):
   - reads `~/.pi/agent/sessions/**/*.jsonl` from the 14 days before the command;
@@ -242,6 +258,7 @@ daily/today.md, daily/archive/YYYY-MM/ the daily log and its archive
 archive/                               read-only migrated prose and status text
 migration/state.json                   resumable migration progress
 metrics/turns.jsonl, metrics/flags.jsonl, metrics/baseline.json  trial metrics
+metrics/overrides.jsonl                one line per status-check override (R24)
 config.json
 ```
 
@@ -280,7 +297,10 @@ flowchart LR
 - **Budget:** invariant sweep over generated stores (tokens ≤ budget, always); section caps;
   flow-through; notice text; no split entries; `always` rules in core, other rules only by rank.
 - **No blocking:** the extension registers no `tool_call` handler.
-- **Trial:** metrics lines carry no prompt text; flag recording; report arithmetic and go rule;
+- **Trial:** metrics lines carry no prompt text and name the bank they were injected into; a preview
+  writes none; a flag records the claim; an override is one event line and is reported, not gated;
+  report arithmetic and every gate (clock, window and coverage, retrieved turns, ratio, absolute
+  ceiling, flags) with a one-day burst held out as not-a-week and an empty bank held out as no-verdict;
   baseline from fixture session files (one block per user turn, same estimator, missing block
   reported with nothing written).
 - **Migration:** refused without a backup; waves; resumes from state; source files untouched before
@@ -349,3 +369,6 @@ flowchart LR
 | D18 | Recall size | Retrieved claims are capped per turn (default 6), not bounded by tokens alone: with the bank at 54 approved claims every prompt spent the whole 2000-token budget, so the trial's go bar (25% of an 880-token baseline) was unreachable by construction. | R27.4, R45 |
 | D19 | Settings surface | A text listing (`/memory settings`) plus live reload of a hand-edited config, now. The TUI editor waits until the trial has a week of measurements, because the panel's value is showing a knob beside the effect it has, and that effect is not measured yet. | R48, R49 |
 | D20 | What counts as a retrieved claim | Stopwords dropped from query and claims, light suffix folding, and a hit must score at least 25% of the top hit (a share, not an absolute score, and not applied to `memory_search`). Chosen over "any non-stopword match" and an absolute floor after measuring 12 queries against a 20-claim bank: every second-place claim a reader wanted scored 25% or more, the noise sat between 14% and 23%, and a 40% floor dropped a claim that was the right answer. | R32.1, R32.2, R33 |
+| D21 | A trial that cannot fail | Coverage is measured from the first recorded turn's day, not from the window handed to the report (the old check compared a window against itself and could never fire), and the verdict lists every unmet gate instead of letting a later one overwrite the coverage reason. Go also needs the window spanned and at least half its days carrying turns. | R45 |
+| D22 | A trial with nothing to inject | Both gates: the clock starts at 3 approved claims, and a go needs 5 recorded turns that retrieved at least one claim. Measured on this bank: 48% of injected turns retrieve something, so 5 costs about 10 turns and one evening cannot fake it. Counts approved claims of any origin and never calls the migration code. | R45 |
+| D23 | The size gate | Keep the 25% ratio **and** add an absolute ceiling of 1,200 tokens on the median, measured from 25 real injections (median 1,077, p90 1,646). Against a 17,232-token baseline the whole 2,000-token budget is 12%, so the ratio alone passes for ever. | R45 |

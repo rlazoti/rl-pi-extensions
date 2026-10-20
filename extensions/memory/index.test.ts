@@ -274,8 +274,49 @@ test("component: every injected turn is measured, with no prompt text stored (R4
 		assert.equal(lines.length, 1);
 		const metric = JSON.parse(lines[0]!);
 		assert.ok(metric.tokens.total > 0);
-		assert.deepEqual(Object.keys(metric).sort(), ["at", "day", "dropped", "overrides", "session", "tokens"]);
+		assert.deepEqual(Object.keys(metric).sort(), ["at", "claims", "day", "dropped", "session", "tokens"]);
+		assert.equal(metric.claims, 1, "the bank the turn was injected into, so the trial clock has a date to start from");
 		assert.ok(!readFileSync(join(paths.metrics, "turns.jsonl"), "utf8").includes("quick brown fox"));
+	} finally {
+		cleanup();
+	}
+});
+
+test("component: /memory preview measures nothing, and an override is one line (F2-b, F2-c)", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		upsertClaim(paths, claim("git.flow", { tags: ["always"], body: "Branches are named rl-MM-DD-topic." }));
+		const { harness, ctx } = install({ paths });
+		const turns = join(paths.metrics, "turns.jsonl");
+		const overrides = join(paths.metrics, "overrides.jsonl");
+		const command = harness.commands.get("memory")!;
+
+		await command.handler("preview branches", ctx);
+		await command.handler("preview branches", ctx);
+		assert.ok(!existsSync(turns), "two previews and no metric line: a preview is not a turn (F2-b)");
+
+		const before = harness.hooks.get("before_agent_start")!;
+		await before({ type: "before_agent_start", messageType: "user", prompt: "branch naming" }, ctx);
+		assert.equal(readFileSync(turns, "utf8").trim().split("\n").length, 1, "the turn itself is still measured");
+		// An override is recorded once, at the proposal it belongs to (F2-c, D14).
+		const propose = harness.tools.get("memory_propose")!;
+		const status = () => readFileSync(turns, "utf8").trim().split("\n").length;
+		const body = "Rodrigo said PR #142 is the reference for this rule.";
+		const refused = await propose.execute("p1", { key: "git.pr", kind: "rule", scope: "global", asOf: "2026-10-16", source: "a thread", body }, undefined, undefined, toolCtx());
+		assert.equal(refused.isError, true);
+		assert.ok(!existsSync(overrides), "a refused proposal recorded nothing");
+		await propose.execute("p2", { key: "git.pr", kind: "rule", scope: "global", asOf: "2026-10-16", source: "a thread", body, overrideStatusCheck: true, overrideReason: "the number is the rule" }, undefined, undefined, toolCtx());
+		assert.equal(readFileSync(overrides, "utf8").trim().split("\n").length, 1);
+		// Two more turns: the old code counted this one override again on every one
+		// of them, because it kept a running total in the process.
+		await before({ type: "before_agent_start", messageType: "user", prompt: "branch naming again" }, ctx);
+		await before({ type: "before_agent_start", messageType: "user", prompt: "and again" }, ctx);
+		assert.equal(status(), 3);
+		assert.equal(readFileSync(overrides, "utf8").trim().split("\n").length, 1, "one override, one line");
+
+		await command.handler("trial", ctx);
+		const trialNote = notificationsOf(ctx).at(-1)!.message;
+		assert.match(trialNote, /overrides: 1 in the window \(git\.pr\)/);
 	} finally {
 		cleanup();
 	}
