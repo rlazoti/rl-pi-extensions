@@ -124,10 +124,21 @@ Budget `budgetTokens` (default **2000**), and the total never exceeds it:
 Unused budget from 1 and 2 flows to 3. The count cap exists because the token
 budget alone does not bound the block: once the bank holds dozens of claims the
 remainder is always spent, and a turn then costs the budget rather than the work
-in front of it. Nothing is cut silently: an entry is never
-split, and if anything is dropped the block ends with how many, of which kind,
-which limit stopped them, and to use `memory_search`. A read error **fails open**:
-no injection, one visible warning, the turn proceeds.
+in front of it. Nothing is cut silently: an entry is never split, and if anything
+is dropped the block ends with how many, of which kind, which limit stopped them,
+and to use `memory_search`. A read error **fails open**: no injection, one visible
+warning, the turn proceeds.
+
+**What one conversation carries** (R25.1, D24). The block is stored in the
+session, and every later model call resends it — so before this, a nine-turn
+session of this project sent **10,255 tokens** of memory blocks on every call,
+where the newest block alone was 1,085. A `context` handler now keeps only the
+newest block, and when that block recalled nothing (you typed "yes"), the newest
+block that did recall comes along marked `[memory: carried from an earlier turn…]`,
+so the claims you are working with do not vanish mid-task. Two blocks, never more.
+The **session file keeps every block**: this bounds the request, not the record,
+and `/memory trial` reports the tokens carried per model call from
+`metrics/context.jsonl`.
 
 **What a match is** (R32.1, R32.2). The ranker compares *terms*: English function
 words ("is", "the", "what", "do") are dropped from the prompt and from the claims,
@@ -410,9 +421,9 @@ glob matcher whose semantics are pinned by tests — `dot: true` (a scope must s
 
 ## Tests
 
-174 tests, one file per module (`time · grammar · scope · store · queue · gate ·
-daily · rank · inject · notice · config · trial · migrate · index`). `index.test.ts`
-drives the real Pi surface — tool registrations, both hooks, `/memory` — against a
+236 tests, one file per module (`time · grammar · scope · store · queue · gate ·
+daily · rank · context · inject · notice · config · trial · migrate · index`). `index.test.ts`
+drives the real Pi surface — tool registrations, all three hooks, `/memory` — against a
 scratch bank with an injected clock and git probe, so no test touches
 `~/.pi/memory`. `bank.ts` is the use-case layer between the modules and that
 adapter, which is why every decision above is testable without a Pi process.

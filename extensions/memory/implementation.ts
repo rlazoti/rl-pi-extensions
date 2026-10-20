@@ -14,6 +14,7 @@ import type { AgentToolResult, ExtensionAPI, ExtensionCommandContext, ExtensionC
 import { Type } from "typebox";
 
 import { createBank, type Bank, type Outcome } from "./bank.js";
+import { pruneMemoryBlocks, type ContextMessageLike } from "./context.js";
 import { createNoticeSink, type NoticeSink } from "./notice.js";
 import { openReview, type ReviewItem } from "./review.js";
 import { DAILY_SECTIONS } from "./daily.js";
@@ -66,6 +67,9 @@ export function setBankForTesting(bank: Bank | null): void {
 export default function memoryExtension(pi: ExtensionAPI): void {
 	const bank: Bank = bankForTesting ?? createBank();
 	let warnedAbout = "";
+	// One context sample per turn: `context` fires before every model call, and a
+	// tool loop calls the model many times per turn (D24).
+	let lastContextSample = "";
 
 	const warnOnce = (ctx: ExtensionContext, message: string): void => {
 		if (warnedAbout === message) return;
@@ -110,6 +114,28 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 			warnOnce(ctx, `memory: injection skipped — ${error instanceof Error ? error.message : String(error)}`);
 			return;
 		}
+	});
+
+	/**
+	 * One block per conversation, not one per turn (R25.1, D24).
+	 *
+	 * A block returned by `before_agent_start` is stored in the session, and Pi
+	 * resends the conversation on every model call, so the same always-on rules were
+	 * sent once per turn: 10,255 tokens of memory blocks in a nine-turn session of
+	 * this very project. The handler changes only what the model is sent — the
+	 * session file keeps every block, and `blocksInSession` still reads what happened.
+	 */
+	pi.on("context", async (event, ctx) => {
+		const { messages, sample } = pruneMemoryBlocks(event.messages as unknown as ContextMessageLike[]);
+		if (sample.blocks === 0) return;
+		const sessionId = ctx.sessionManager.getSessionId();
+		const key = `${sessionId}\u0000${sample.newest}`;
+		if (key !== lastContextSample) {
+			lastContextSample = key;
+			bank.recordContext({ blocks: sample.blocks, keptBlocks: sample.keptBlocks, droppedBlocks: sample.droppedBlocks, keptTokens: sample.keptTokens, droppedTokens: sample.droppedTokens, carried: sample.carried }, sessionId);
+		}
+		if (sample.droppedBlocks === 0) return;
+		return { messages: messages as unknown as typeof event.messages };
 	});
 
 	// ── Read tools (names unchanged, R41) ────────────────────────────────────

@@ -87,6 +87,13 @@ in its constraints) and Pi's extension API docs (`session_start` and `before_age
 ### Injection
 - R25. Injection happens in `before_agent_start` for runs started by the user. It returns one
   added `message`. Runs started by extension messages are skipped.
+  - R25.1. That message is stored in the session, and Pi resends the conversation on every model
+    call, so a block is not one turn's cost — it is a cost of every later call. A `context` handler
+    therefore bounds what the model is sent (D24): the **newest** block always, plus, when the newest
+    carries no retrieved claims, the newest block that does, marked so the model knows it came from an
+    earlier turn. Never more than two blocks. This changes the request only: the session file keeps
+    every block, and the trial's baseline reader still sees what happened. One sample per turn of the
+    tokens carried goes to `metrics/context.jsonl` and is reported by `/memory trial` (R43).
 - R26. Hard budget `budgetTokens`, default 2000, configurable. The total never exceeds it.
 - R27. Budget order (all configurable; tuned from trial metrics, D11):
   1. **Always-on core:** approved in-scope rules tagged `always`, at most 600 tokens.
@@ -243,12 +250,13 @@ in its constraints) and Pi's extension API docs (`session_start` and `before_age
 | `gate.ts` | Write-time checks: grammar, supersession prose, status detector, override (R14, R22–R24). |
 | `daily.ts` | `memory_log`, stamping, open-item selection, date rollover into the archive (R15–R16). |
 | `rank.ts` | `Ranker` interface and BM25 (R32). |
+| `context.ts` | Bounding the memory blocks one conversation sends to the model (R25.1, D24). Pure over the message list. |
 | `inject.ts` | Budget sections, injection eligibility, `[unapproved]` labels, truncation notice, preview (R25–R31, R35). |
 | `notice.ts` | Session-start review notice and its counts (R20). |
 | `trial.ts` | Turn metrics, flags, baseline from session files, trial report (R43–R47). |
 | `migrate.ts` | Backup gate, waves, per-file draft turns, resumable state (R37–R39). |
 | `config.ts` | `~/.pi/memory/config.json` with validated defaults, the settings table the validator and the listing share, `/memory settings` text (R48–R49). Invalid config falls back to defaults with a warning. |
-| `implementation.ts` | Registers tools, commands and both hooks; the subcommand table that renders help, the command-list line and the completions (R25, R41, R50). |
+| `implementation.ts` | Registers tools, commands and the three hooks; the subcommand table that renders help, the command-list line and the completions (R25, R41, R50). |
 
 ### Bank layout (`~/.pi/memory/`)
 ```
@@ -291,6 +299,12 @@ flowchart LR
   queries ("yes", "ok do it") returning nothing; word families folding onto one term while "status",
   "alias" and "class" keep theirs; the stopword list checked for holes in the words a prompt really
   says; and the score floor holding at a share of the top hit, with a lone weak hit surviving.
+- **Context (R25.1):** no blocks → unchanged; many blocks → only the newest, with the other messages
+  in place; a newest block with nothing retrieved → the newest block that retrieved comes back marked
+  as carried, never two of them; another extension's `custom` message is never dropped; pruning
+  twice drops nothing more; a block whose content is a block array is returned byte for byte; and
+  through Pi's real surface, three turns leave the model exactly one or two memory blocks while the
+  session keeps three, with one context sample per turn.
 - **Notice:** counts per category; nothing shown when empty; never blocks; non-TUI path logs once.
 - **Gate:** a table of status and non-status bodies; source/links exemption; override path;
   supersession-prose refusal.
@@ -372,3 +386,4 @@ flowchart LR
 | D21 | A trial that cannot fail | Coverage is measured from the first recorded turn's day, not from the window handed to the report (the old check compared a window against itself and could never fire), and the verdict lists every unmet gate instead of letting a later one overwrite the coverage reason. Go also needs the window spanned and at least half its days carrying turns. | R45 |
 | D22 | A trial with nothing to inject | Both gates: the clock starts at 3 approved claims, and a go needs 5 recorded turns that retrieved at least one claim. Measured on this bank: 48% of injected turns retrieve something, so 5 costs about 10 turns and one evening cannot fake it. Counts approved claims of any origin and never calls the migration code. | R45 |
 | D23 | The size gate | Keep the 25% ratio **and** add an absolute ceiling of 1,200 tokens on the median, measured from 25 real injections (median 1,077, p90 1,646). Against a 17,232-token baseline the whole 2,000-token budget is 12%, so the ratio alone passes for ever. | R45 |
+| D24 | Blocks that pile up in the conversation | A `context` handler keeps only the newest block, plus the newest block carrying retrieved claims when the newest carries none (marked as carried). Chosen over per-claim dedup (the blocks still grow, and a compaction forgets the dedup) and over measuring only: a nine-turn session of this project carried 10,255 tokens of memory blocks on every model call, where the newest block was 1,085. The vanishing-follow-up case is the reason the second block exists at all. | R25.1, R43 |

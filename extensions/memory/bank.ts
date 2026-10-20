@@ -38,7 +38,7 @@ import {
 	readState,
 	type MigrationState,
 } from "./migrate.js";
-import { appendTurn, computeBaseline, formatTrialReport, readFlags, recordFlag, recordOverride, trialReport, writeBaseline, type TrialReport } from "./trial.js";
+import { appendContextMetric, appendTurn, computeBaseline, formatTrialReport, readFlags, recordFlag, recordOverride, trialReport, writeBaseline, type TrialReport } from "./trial.js";
 
 export interface BankOptions {
 	paths?: BankPaths;
@@ -256,6 +256,16 @@ export class Bank {
 	queueCounts(): QueueCounts {
 		const { config } = this.config();
 		return queueCounts(this.snapshot(), { today: this.today, pendingFlagDays: config.pendingFlagDays });
+	}
+
+	/** What one model call was about to carry (D24). Never breaks the call (R30). */
+	recordContext(sample: { blocks: number; keptBlocks: number; droppedBlocks: number; keptTokens: number; droppedTokens: number; carried: boolean }, sessionId: string): void {
+		try {
+			appendContextMetric(this.paths, { ...sample, session: sessionId }, this.clock);
+		} catch {
+			// A metric that cannot be written is not a reason to send the wrong
+			// conversation, or to refuse to send one at all.
+		}
 	}
 
 	// ── Writes ───────────────────────────────────────────────────────────────

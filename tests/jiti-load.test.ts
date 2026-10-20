@@ -74,7 +74,7 @@ test("every component loads under Pi's jiti transform and exports a factory", as
 	}
 });
 
-test("memory registers its tools, its command and exactly two hooks under jiti", async () => {
+test("memory registers its tools, its command and its three hooks under jiti", async () => {
 	const jiti = createJiti(join(getMonorepoRoot(), "tests", "jiti-load.ts"), { moduleCache: false });
 	const module = (await jiti.import("../extensions/memory/index.ts")) as { default: (pi: unknown) => void };
 	const { pi, registration } = stubPi();
@@ -88,5 +88,5 @@ test("memory registers its tools, its command and exactly two hooks under jiti",
 		"memory_search",
 	]);
 	assert.deepEqual(registration.commands, ["memory"]);
-	assert.deepEqual(registration.hooks.sort(), ["before_agent_start", "session_start"]);
+	assert.deepEqual(registration.hooks.sort(), ["before_agent_start", "context", "session_start"]);
 });

@@ -16,7 +16,7 @@ import type { Claim } from "./grammar.ts";
 
 /**
  * The component is driven through Pi's real surface — registerTool,
- * registerCommand, both hooks — against a scratch bank with an injected clock and
+ * registerCommand, all three hooks — against a scratch bank with an injected clock and
  * git probe. Nothing here reads or writes the live ~/.pi/memory.
  */
 
@@ -181,7 +181,7 @@ test("component: rules are context only — no tool_call handler is registered (
 	const { paths, cleanup } = scratchBank();
 	try {
 		const { harness } = install({ paths });
-		assert.deepEqual([...harness.hooks.keys()].sort(), ["before_agent_start", "session_start"]);
+		assert.deepEqual([...harness.hooks.keys()].sort(), ["before_agent_start", "context", "session_start"]);
 		assert.ok(!harness.hooks.has("tool_call"), "nothing blocks a tool call");
 		assert.ok(!harness.hooks.has("tool_result"));
 	} finally {
@@ -317,6 +317,59 @@ test("component: /memory preview measures nothing, and an override is one line (
 		await command.handler("trial", ctx);
 		const trialNote = notificationsOf(ctx).at(-1)!.message;
 		assert.match(trialNote, /overrides: 1 in the window \(git\.pr\)/);
+	} finally {
+		cleanup();
+	}
+});
+
+test("component: blocks pile up in the session and the context handler prunes them (F3, D24)", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		upsertClaim(paths, claim("git.flow", { tags: ["always"], body: "Branches are named rl-MM-DD-topic and squash merged." }));
+		upsertClaim(paths, claim("wire.rule", { body: "The wire transfer form is a pdf at the counter, never an API call." }));
+		const { harness, ctx } = install({ paths });
+		const before = harness.hooks.get("before_agent_start")!;
+		const contextHandler = harness.hooks.get("context")!;
+		const turns = [{ prompt: "wire transfer", retrieved: true }, { prompt: "wire transfer again", retrieved: true }, { prompt: "yes", retrieved: false }];
+		// The conversation as Pi keeps it: every block ever returned is still there.
+		const conversation: Record<string, unknown>[] = [];
+		const injectedContents: string[] = [];
+		let sent: { messages: Record<string, unknown>[] } | undefined;
+		for (const turn of turns) {
+			conversation.push({ role: "user", content: [{ type: "text", text: turn.prompt }] });
+			const injected = (await before({ type: "before_agent_start", messageType: "user", prompt: turn.prompt }, ctx)) as { message?: { customType: string; content: string; display: boolean } } | undefined;
+			assert.ok(injected?.message, `turn ${turn.prompt}: injected something`);
+			const block = { role: "custom", customType: injected!.message!.customType, content: injected!.message!.content, display: false, timestamp: conversation.length };
+			conversation.push(block);
+			injectedContents.push(injected!.message!.content);
+			if (turn.retrieved) assert.match(injected!.message!.content, /### Related claims/);
+			else assert.ok(!injected!.message!.content.includes("### Related claims"), "a one-word reply recalls nothing");
+
+			sent = (await contextHandler({ type: "context", messages: conversation.map((message) => ({ ...message })) }, ctx)) as { messages: Record<string, unknown>[] } | undefined;
+			const blocks = (sent?.messages ?? conversation).filter((message) => message.customType === "memory");
+			const newest = injectedContents.at(-1)!;
+			if (turn.retrieved) {
+				assert.equal(blocks.length, 1, `after "${turn.prompt}" the model is sent the newest block only`);
+				assert.equal(blocks[0]!.content, newest, "and the one it is sent is the newest");
+			} else {
+				assert.equal(blocks.length, 2, "a turn that retrieved nothing keeps the newest block that did");
+				assert.equal(blocks.at(-1)!.content, newest, "the newest block goes as it was written");
+				assert.match(String(blocks[0]!.content), /^\[memory: carried from an earlier turn/, "the older block says it is carried");
+				assert.ok(String(blocks[0]!.content).includes(newest.split("\n")[0]!), "and it is still a memory block, not a summary of one");
+			}
+		}
+		// The session itself is untouched: pruning is about the request, not the record.
+		assert.equal(conversation.filter((message) => message.customType === "memory").length, 3);
+		// And the cost of it is now a number.
+		const context = readFileSync(join(paths.metrics, "context.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+		assert.equal(context.length, 3, "one context sample per turn, not one per model call");
+		assert.equal(context[2]!.blocks, 3);
+		assert.equal(context[2]!.keptBlocks, 2);
+		assert.equal(context[2]!.carried, true);
+		assert.ok(context[2]!.droppedTokens > 0);
+		// A second model call in the same turn samples nothing more.
+		await contextHandler({ type: "context", messages: conversation }, ctx);
+		assert.equal(readFileSync(join(paths.metrics, "context.jsonl"), "utf8").trim().split("\n").length, 3);
 	} finally {
 		cleanup();
 	}

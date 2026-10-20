@@ -80,6 +80,13 @@ export function headerFor(project: string): string {
 	return `## Memory — rules and facts for this context (project: ${project})`;
 }
 
+/**
+ * The section title of the recalled claims, exported because `context.ts` reads
+ * it back: "did this turn get anything back?" is the question the conversation
+ * pruner asks, and a renamed section would silently change its answer (D24).
+ */
+export const RETRIEVED_TITLE = "Related claims";
+
 export function formatClaim(claim: Claim, label?: string): string {
 	const tag = label ? ` ${label}` : "";
 	return `- [${claim.kind} · ${claim.scope} · ${claim.asOf}]${tag} ${claim.key}: ${claim.body}`;
@@ -265,7 +272,7 @@ export function buildInjection(input: InjectionInput): InjectionResult {
 	const cappedOut = recallCap > 0 ? rankedAll.slice(recallCap) : [];
 	const reserve = tokensOf(header) + tokensOf(dropNotice(pool.length, 0, 0, open.length, recallCap > 0 ? Math.max(0, pool.length - recallCap) : 0, recallCap));
 	const retrievedCap = Math.max(0, input.config.budgetTokens - coreFill.section.tokens - dailySection.tokens - reserve);
-	const retrievedFill = fillSection({ title: "Related claims", candidates: ranked, cap: retrievedCap, label: true });
+	const retrievedFill = fillSection({ title: RETRIEVED_TITLE, candidates: ranked, cap: retrievedCap, label: true });
 
 	// What did not fit, whole (R29): stopped by the count cap, or by the tokens.
 	const droppedCandidates = [...coreFill.leftOver, ...retrievedFill.leftOver, ...cappedOut];

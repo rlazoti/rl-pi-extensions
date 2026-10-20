@@ -74,6 +74,54 @@ export function overridesFile(paths: BankPaths): string {
 	return join(paths.metrics, "overrides.jsonl");
 }
 
+/**
+ * One sample per turn of what the model was about to be sent (R43, D24).
+ *
+ * The turn metric says what one block cost. This says what the conversation
+ * carried, which is the number that grew without bound before the context handler
+ * existed — 10,255 tokens of memory blocks in a nine-turn session.
+ */
+export interface ContextMetric {
+	at: string;
+	day: string;
+	blocks: number;
+	keptBlocks: number;
+	droppedBlocks: number;
+	keptTokens: number;
+	droppedTokens: number;
+	carried: boolean;
+	session: string;
+}
+
+export function contextFile(paths: BankPaths): string {
+	return join(paths.metrics, "context.jsonl");
+}
+
+export function appendContextMetric(paths: BankPaths, metric: Omit<ContextMetric, "at" | "day">, clock: Clock = systemClock): ContextMetric {
+	if (!existsSync(paths.metrics)) mkdirSync(paths.metrics, { recursive: true });
+	const { at, day } = stamp(clock);
+	const full: ContextMetric = { at, day, ...metric };
+	writeFileSync(contextFile(paths), `${JSON.stringify(full)}\n`, { flag: "a" });
+	return full;
+}
+
+export function readContextMetrics(paths: BankPaths, opts: { sinceDay?: string } = {}): ContextMetric[] {
+	const text = readOrNull(contextFile(paths));
+	if (text === undefined) return [];
+	const out: ContextMetric[] = [];
+	for (const line of text.split("\n")) {
+		if (line.trim() === "") continue;
+		try {
+			const parsed = JSON.parse(line) as ContextMetric;
+			if (opts.sinceDay && parsed.day < opts.sinceDay) continue;
+			out.push(parsed);
+		} catch {
+			continue;
+		}
+	}
+	return out;
+}
+
 function stamp(clock: Clock): { at: string; day: string } {
 	const now = clock();
 	const time = `${now.toTimeString().slice(0, 8)}`;
@@ -387,6 +435,11 @@ export interface TrialReport {
 	flags: { stale: number; rival: number; total: number };
 	overrides: number;
 	overrideKeys: string[];
+	/**
+	 * What the conversation carried, from `metrics/context.jsonl` (D24). Absent
+	 * until a turn has been sampled.
+	 */
+	context?: { samples: number; medianKept: number; medianDropped: number; medianBlocks: number };
 	go: boolean;
 	/**
 	 * What stops the go, one entry per unmet gate, in the order a reader would
@@ -432,6 +485,7 @@ export function trialReport(paths: BankPaths, opts: { today: string; days?: numb
 	const rival = flags.filter((flag) => flag.kind === "rival").length;
 	const baseline = readBaseline(paths);
 	const observed = turns.filter((turn) => turn.tokens.total > 0);
+	const contextSamples = readContextMetrics(paths, { sinceDay });
 	const coverageGate = Math.ceil(days / 2);
 	// The clock starts at the first turn whose bank was worth measuring. A turn
 	// recorded before that is not evidence, and a run of turns recorded while the
@@ -456,6 +510,14 @@ export function trialReport(paths: BankPaths, opts: { today: string; days?: numb
 		flags: { stale, rival, total: stale + rival },
 		overrides: overrides.length,
 		overrideKeys: [...new Set(overrides.map((entry) => entry.key))],
+		context: contextSamples.length === 0
+			? undefined
+			: {
+					samples: contextSamples.length,
+					medianKept: median(contextSamples.map((sample) => sample.keptTokens)),
+					medianDropped: median(contextSamples.map((sample) => sample.droppedTokens)),
+					medianBlocks: median(contextSamples.map((sample) => sample.blocks)),
+				},
 		go: false,
 		gates: [],
 		verdict: "",
@@ -514,6 +576,7 @@ export function formatTrialReport(report: TrialReport): string {
 	lines.push(`  coverage: ${report.activeDays} of ${report.days} days carry turns, over ${report.spanDays} of ${report.days} days (the gate is ${report.coverageGate} days)`);
 	lines.push(`  flags: ${report.flags.stale} stale, ${report.flags.rival} rival`);
 	lines.push(`  overrides: ${report.overrides} in the window${report.overrideKeys.length === 0 ? "" : ` (${report.overrideKeys.slice(0, 5).join(", ")}${report.overrideKeys.length > 5 ? ", …" : ""})`}`);
+	if (report.context) lines.push(`  context: ${report.context.samples} samples, median ${report.context.medianKept} memory tokens carried per model call, median ${report.context.medianDropped} dropped (from ${report.context.medianBlocks} blocks)`);
 	if (report.corruptTurnLines > 0) lines.push(`  metrics damage: ${report.corruptTurnLines} unreadable lines in turns.jsonl`);
 	lines.push(`  ${report.verdict}`);
 	return lines.join("\n");
