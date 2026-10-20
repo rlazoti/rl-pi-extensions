@@ -242,9 +242,11 @@ malformed: reported, not injected.
 
 ## Review
 
-`session_start` for a new session shows **one** notice when anything waits —
-agent proposals, the migration backlog (counted separately), contested identities,
-and claims pending longer than `pendingFlagDays` — naming `/memory review`. With
+`session_start` shows **one** notice when a session starts (`new`, `startup`,
+`fork` — not a resume, which has been told, and not a reload, which is the same
+session) and anything waits — agent proposals, the migration backlog (counted
+separately), contested identities, and claims pending longer than
+`pendingFlagDays` — naming `/memory review`. With
 nothing waiting, nothing is shown; outside the TUI it is logged once. Claims are
 never dropped automatically, however long they wait.
 

@@ -210,10 +210,16 @@ test("component: a new session opens with the review notice; a resume does not (
 		propose(paths, claim("m.one", { state: "pending", origin: "migration", body: "migrated" }), "2026-10-14");
 		const { harness, ctx } = install({ paths, mode: "tui" });
 		const sessionStart = harness.hooks.get("session_start")!;
-		await sessionStart({ type: "session_start", reason: "new" }, ctx);
+		await sessionStart({ type: "session_start", reason: "startup" }, ctx);
 		const notes = notificationsOf(ctx);
-		assert.equal(notes.length, 1);
+		// `startup` is how an AgentSession begins when nothing named a reason, so the
+		// notice cannot depend on `new` alone (F5).
+		assert.equal(notes.length, 1, "a startup is a start: the notice shows");
 		assert.match(notes[0]!.message, /2 claims await review — 1 proposal from the agent; 1 migrated claim \(migration backlog\)/);
+
+		const { harness: reloaded, ctx: reloadedCtx } = install({ paths, mode: "tui" });
+		await reloaded.hooks.get("session_start")!({ type: "session_start", reason: "reload" }, reloadedCtx);
+		assert.deepEqual(notificationsOf(reloadedCtx), [], "a reload is not a new session");
 
 		const { harness: second, ctx: secondCtx } = install({ paths, mode: "tui" });
 		await second.hooks.get("session_start")!({ type: "session_start", reason: "resume" }, secondCtx);

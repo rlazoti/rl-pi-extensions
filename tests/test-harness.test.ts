@@ -5,7 +5,7 @@
 // different version than production runs.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -106,4 +106,117 @@ test("test harness: jiti-style relative .js specifiers map to .ts inside the rep
 	assert.ok(
 		import.meta.resolve("../extensions/session-banner/implementation.js").endsWith("/implementation.ts"),
 	);
+});
+
+/** A directory that looks like a Pi install root holding one release. */
+function fakeInstall(root: string, version: string): string {
+	const pkg = path.join(root, "node_modules", "@earendil-works", "pi-coding-agent");
+	mkdirSync(path.join(pkg, "dist"), { recursive: true });
+	writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version }));
+	writeFileSync(path.join(pkg, "dist", "index.js"), "export const __fake = true;\n");
+	return root;
+}
+
+function captureStderr(run: () => unknown): { result: unknown; output: string } {
+	const write = process.stderr.write.bind(process.stderr);
+	let output = "";
+	try {
+		process.stderr.write = (chunk: string) => {
+			output += chunk;
+			return true;
+		};
+		return { result: run(), output };
+	} finally {
+		process.stderr.write = write;
+	}
+}
+
+test("test harness: the Pi the launcher runs wins over the newest directory on disk", () => {
+	const home = mkdtempSync(path.join(os.tmpdir(), "fake-home-"));
+	const managed = path.join(home, ".pi", "agent", "install");
+	try {
+		fakeInstall(path.join(managed, "releases", "1.2.0"), "1.2.0");
+		fakeInstall(path.join(managed, "releases", "1.3.0"), "1.3.0");
+		// `pi` is a shell script that reads this file; the tests read it too, so a
+		// machine holding two releases runs the suite against the one `pi` runs.
+		writeFileSync(path.join(managed, "current-version"), "1.2.0\n");
+		assert.equal(findPiInstallNodeModulesDir({}, home), path.join(managed, "releases", "1.2.0", "node_modules"));
+
+		// With nothing to read, the newest release is the best answer, version-sorted
+		// so 1.10.0 beats 1.9.0 (a text sort gets that backwards).
+		rmSync(path.join(managed, "current-version"));
+		fakeInstall(path.join(managed, "releases", "1.10.0"), "1.10.0");
+		assert.equal(findPiInstallNodeModulesDir({}, home), path.join(managed, "releases", "1.10.0", "node_modules"));
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+});
+
+test("test harness: PI_PACKAGE_DIR finds a Pi built from source or vendored elsewhere", () => {
+	const tmp = mkdtempSync(path.join(os.tmpdir(), "vendored-pi-"));
+	try {
+		const release = fakeInstall(path.join(tmp, "checkout"), "1.1.0");
+		const nodeModules = path.join(release, "node_modules");
+		const pkg = path.join(nodeModules, "@earendil-works", "pi-coding-agent");
+		for (const [shape, value] of [
+			["the node_modules itself", nodeModules],
+			["the package directory", pkg],
+			["a directory holding node_modules", release],
+		] as const) {
+			assert.equal(findPiInstallNodeModulesDir({ PI_PACKAGE_DIR: value }, path.join(tmp, "empty-home")), nodeModules, shape);
+		}
+		// PI_MANAGED_INSTALL_ROOT moves the whole layout, which is how a CI box with
+		// no ~/.pi at all still tests against a real Pi.
+		const managed = path.join(tmp, "managed");
+		fakeInstall(path.join(managed, "releases", "2.0.0"), "2.0.0");
+		writeFileSync(path.join(managed, "current-version"), "2.0.0\n");
+		assert.equal(
+			findPiInstallNodeModulesDir({ PI_MANAGED_INSTALL_ROOT: managed }, path.join(tmp, "empty-home")),
+			path.join(managed, "releases", "2.0.0", "node_modules"),
+		);
+	} finally {
+		rmSync(tmp, { recursive: true, force: true });
+	}
+});
+
+test("test harness: ~/.pi/pkg/pi-<version> is searched newest first", () => {
+	const home = mkdtempSync(path.join(os.tmpdir(), "pkg-home-"));
+	try {
+		fakeInstall(path.join(home, ".pi", "pkg", "pi-1.2.0"), "1.2.0");
+		fakeInstall(path.join(home, ".pi", "pkg", "pi-1.10.0"), "1.10.0");
+		assert.equal(findPiInstallNodeModulesDir({}, home), path.join(home, ".pi", "pkg", "pi-1.10.0", "node_modules"));
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+});
+
+test("test harness: an override that points at nothing says so instead of choosing quietly", () => {
+	const home = mkdtempSync(path.join(os.tmpdir(), "bogus-override-"));
+	const managed = path.join(home, ".pi", "agent", "install");
+	try {
+		fakeInstall(path.join(managed, "releases", "1.3.0"), "1.3.0");
+		writeFileSync(path.join(managed, "current-version"), "1.3.0\n");
+		const { result, output } = captureStderr(() => findPiInstallNodeModulesDir({ PI_PACKAGE_DIR: path.join(home, "nowhere") }, home));
+		assert.equal(result, path.join(managed, "releases", "1.3.0", "node_modules"), "the live install is still found");
+		assert.match(output, /PI_PACKAGE_DIR is set to .*nowhere, which holds no @earendil-works\/pi-coding-agent/);
+
+		// And when nothing at all resolves, the fallback is the repo's copy — which is
+		// the wrong version the moment Pi moves, so it is said out loud.
+		const { result: none, output: said } = captureStderr(() => findPiInstallNodeModulesDir({ PI_CODING_AGENT_DIR: path.join(home, "also-nowhere") }, path.join(home, "empty")));
+		assert.equal(none, null);
+		assert.match(said, /PI_CODING_AGENT_DIR is set to/);
+		assert.match(said, /falling back to this repo's node_modules/);
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+});
+
+test("test harness: the repo says which Node it needs, because the suite needs it (F5)", () => {
+	// `--experimental-strip-types` (npm test) and the mock-timer behaviour the
+	// session-banner tests rely on are both Node 26 things; on an older Node the
+	// suite does not fail, it does not run.
+	const engines = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8")).engines;
+	assert.deepEqual(engines, { node: ">=26" });
+	const [major] = process.versions.node.split(".").map(Number);
+	assert.ok(major >= 26, `the suite is running on Node ${process.versions.node}, below what package.json declares`);
 });

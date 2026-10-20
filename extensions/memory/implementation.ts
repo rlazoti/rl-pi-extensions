@@ -116,7 +116,10 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 		if (!existsSync(bank.paths.root)) return;
 		const damage = bankDamage();
 		if (damage.length > 0) reportFailure(ctx, "claim store", damage.join("; "));
-		if (event.reason === "resume") return;
+		// A resumed session has been told already, and a reload is not a new session —
+		// the damage above is reported either way, because a bank nobody can write is
+		// not a fact that waits for the right reason (R51).
+		if (event.reason === "resume" || event.reason === "reload") return;
 		const rolled = bank.rollover();
 		if (rolled.archivedTo && ctx.mode === "tui") ctx.ui.notify(`memory: yesterday's log is archived (${rolled.archivedTo}), ${rolled.carried} open item(s) carried`, "info");
 		const notice = await bank.notice(ctx.cwd, { bankDamage: damage });

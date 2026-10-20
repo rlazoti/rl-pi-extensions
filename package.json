@@ -4,6 +4,9 @@
 	"description": "Personal Pi coding agent extensions — tmux feedback, session banner, session attention, snippets, emacs feedback",
 	"type": "module",
 	"license": "MIT",
+	"engines": {
+		"node": ">=26"
+	},
 	"author": "Rodrigo Lazoti",
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",

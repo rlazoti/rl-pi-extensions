@@ -59,8 +59,9 @@ in its constraints) and Pi's extension API docs (`session_start` and `before_age
   tool call.
 
 ### Review notice (D1)
-- R20. On `session_start` for a new session, if anything waits for Rodrigo, the extension shows one
-  notice with counts:
+- R20. On `session_start` for a start that begins a session (`new`, `startup`, `fork`) — not `resume`,
+  which has been told, and not `reload`, which is the same session — if anything waits for Rodrigo,
+  the extension shows one notice with counts:
   - new proposals (`origin: agent`);
   - migration backlog (`origin: migration`), counted separately (D9);
   - contested identities (R12);
@@ -252,9 +253,9 @@ in its constraints) and Pi's extension API docs (`session_start` and `before_age
   - `bank.describeDamage()` answers "what is wrong with the bank" in one line per problem — malformed
     entries, lines no writer can reproduce, contested identities, unreadable stores, half-written
     files, links out of the bank;
-  - every `session_start` reports it, whatever the reason (`startup`, `new`, `fork`, `resume`, and a
-    `reload` is a start too), because a bank nobody can write must not wait for the one reason that
-    happens to look for damage. The review notice still skips a resumed session; the damage does not;
+  - every `session_start` reports it, whatever the reason (`new`, `startup`, `fork`, `resume`, and a
+    `reload` — the damage does not wait for the reason that happens to match the review notice),
+    because a bank nobody can write must not go unnoticed. The review notice keeps its own rule (R20);
   - `metrics/errors.jsonl` holds one line per failure — `at`, `day`, `where`, `message`, `session` —
     with the same failure deduplicated inside 5 minutes, so a warning that fires every turn does not
     become a file nobody reads. `/memory doctor` prints the last three;

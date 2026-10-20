@@ -1,37 +1,136 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const PI_PACKAGE_RE = /^@(?:earendil-works|mariozechner)\/pi-[a-z0-9-]+(\/.*)?$/;
+const PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
+
+/** Does this directory hold the Pi packages (that is, is it a node_modules)? */
+function isPiNodeModules(dir) {
+	return existsSync(path.join(dir, "@earendil-works", "pi-coding-agent"));
+}
+
+/**
+ * The node_modules directory behind any path that points into a Pi install: a
+ * node_modules itself, the pi-coding-agent package directory, or any directory
+ * that contains one (a release dir, a checkout, a vendored tree).
+ */
+function nodeModulesFor(dir) {
+	if (!dir) return null;
+	const abs = path.resolve(dir);
+	if (isPiNodeModules(abs)) return abs;
+	const nested = path.join(abs, "node_modules");
+	if (isPiNodeModules(nested)) return nested;
+	// .../<node_modules>/@earendil-works/pi-coding-agent[/...]
+	const marker = `${path.sep}@earendil-works${path.sep}pi-coding-agent`;
+	const at = abs.lastIndexOf(marker);
+	if (at >= 0) {
+		const candidate = abs.slice(0, at);
+		if (isPiNodeModules(candidate)) return candidate;
+	}
+	return null;
+}
 
 /**
  * Find the node_modules dir of a local Pi install (the packages Pi itself
- * runs), or null when Pi is not installed here. Override the layout with
- * PI_CODING_AGENT_DIR pointing at a .../@earendil-works/pi-coding-agent dir.
+ * runs), or null when Pi is not installed here.
  *
- * The highest installed version wins, matching how Pi picks a release.
+ * The order is the order of trust, because "the Pi on this machine" is not one
+ * question when a machine holds several installs:
+ *  1. `PI_CODING_AGENT_DIR` — an explicit `.../@earendil-works/pi-coding-agent`.
+ *  2. `PI_PACKAGE_DIR` — an explicit directory in any of the shapes above, for a
+ *     Pi built from source or vendored outside the managed install.
+ *  3. `$PI_MANAGED_INSTALL_ROOT` (else `~/.pi/agent/install`), and inside it the
+ *     release named by `current-version` — the same file the `pi` launcher reads,
+ *     so the tests resolve what `pi` runs and not the newest directory lying
+ *     around.
+ *  4. `~/.pi/pkg/pi-<version>`, newest first, for a packaged install.
+ *  5. the managed releases directory, newest first, when there is no
+ *     `current-version` to read.
+ *
+ * An override that points at nothing is reported, not ignored silently: a test
+ * run that quietly falls back to this repo's pinned copy is a test run against
+ * the wrong version.
  */
-export function findPiInstallNodeModulesDir() {
-	const override = process.env.PI_CODING_AGENT_DIR;
-	if (override) {
-		if (!existsSync(override)) return null;
-		return path.dirname(path.dirname(override));
+export function findPiInstallNodeModulesDir(env = process.env, homedir = os.homedir()) {
+	const notes = [];
+	const found = pickPiInstall(env, homedir, notes);
+	if (notes.length > 0) process.stderr.write(`[test-support] ${notes.join("; ")}\n`);
+	return found;
+}
+
+function pickPiInstall(env, homedir, notes) {
+	const named = [
+		["PI_CODING_AGENT_DIR", env.PI_CODING_AGENT_DIR],
+		["PI_PACKAGE_DIR", env.PI_PACKAGE_DIR],
+	];
+	for (const [name, value] of named) {
+		if (!value) continue;
+		const found = nodeModulesFor(value);
+		if (found) return found;
+		notes.push(`${name} is set to ${value}, which holds no ${PI_PACKAGE_NAME}`);
 	}
-	const releases = path.join(os.homedir(), ".pi", "agent", "install", "releases");
-	if (!existsSync(releases)) return null;
-	for (const version of readdirSync(releases).sort().reverse()) {
-		const candidate = path.join(
-			releases,
-			version,
-			"node_modules",
-			"@earendil-works",
-			"pi-coding-agent",
-		);
-		if (existsSync(candidate)) return path.join(releases, version, "node_modules");
+
+	const managedRoot = env.PI_MANAGED_INSTALL_ROOT || path.join(homedir, ".pi", "agent", "install");
+	const current = currentVersionOf(managedRoot);
+	if (current) {
+		const found = nodeModulesFor(path.join(managedRoot, "releases", current));
+		if (found) return found;
+		notes.push(`${managedRoot}/current-version says ${current}, which is not installed`);
 	}
+
+	for (const dir of newestFirst(path.join(homedir, ".pi", "pkg"), /^pi-(\d.*)$/)) {
+		const found = nodeModulesFor(dir);
+		if (found) return found;
+	}
+	for (const dir of newestFirst(path.join(managedRoot, "releases"), /^(\d.*)$/)) {
+		const found = nodeModulesFor(dir);
+		if (found) return found;
+	}
+	if (notes.length > 0) notes.push("falling back to this repo's node_modules, so the suite tests that version and not the running Pi");
 	return null;
+}
+
+/** The version the `pi` launcher runs, or null when this is not a managed install. */
+function currentVersionOf(managedRoot) {
+	try {
+		return readFileSync(path.join(managedRoot, "current-version"), "utf8").trim() || null;
+	} catch {
+		return null;
+	}
+}
+
+/** Subdirectories of `dir` matching `pattern`, highest version first, as paths. */
+function newestFirst(dir, pattern) {
+	let names;
+	try {
+		names = readdirSync(dir);
+	} catch {
+		return [];
+	}
+	return names
+		.filter((name) => pattern.test(name) && statSync(path.join(dir, name), { throwIfNoEntry: false })?.isDirectory())
+		.sort((a, b) => {
+			const byNumber = compareVersions(matchOf(b, pattern), matchOf(a, pattern));
+			return byNumber !== 0 ? byNumber : matchOf(b, pattern).localeCompare(matchOf(a, pattern));
+		})
+		.map((name) => path.join(dir, name));
+}
+
+function matchOf(name, pattern) {
+	return name.match(pattern)[1];
+}
+
+function compareVersions(a, b) {
+	const left = a.split(".").map(Number);
+	const right = b.split(".").map(Number);
+	for (let index = 0; index < Math.max(left.length, right.length); index++) {
+		const delta = (left[index] ?? 0) - (right[index] ?? 0);
+		if (delta !== 0) return delta;
+	}
+	return 0;
 }
 
 export function packageVersion(packageDir) {
