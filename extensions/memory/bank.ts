@@ -12,7 +12,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-import { applyConfig, loadConfig, describeConfig, describeSettings, type ConfigResult } from "./config.js";
+import { applyConfig, loadConfig, describeConfig, describeConfigSource, describeSettings, type ConfigResult } from "./config.js";
 import { dailyStatus, readDaily, rolloverDaily, appendDailyItem, type DailyLog } from "./daily.js";
 import { gateDaily, gatePropose } from "./gate.js";
 import { buildInjection, formatPreview, type InjectionResult } from "./inject.js";
@@ -21,7 +21,7 @@ import { listPending, propose, approve, reject as rejectClaim, defer as deferCla
 import { reviewNotice, type NoticeOptions } from "./notice.js";
 import { bm25, createRanker, type RankedText } from "./rank.js";
 import { deriveProjectId, type ScopeContext } from "./scope.js";
-import { dayOf, describeAge, systemClock, type Clock } from "./time.js";
+import { dayOf, describeAge, shiftDay, systemClock, type Clock } from "./time.js";
 import { identityOf, parseStore, type Claim } from "./grammar.js";
 import {
 	cutoverSources,
@@ -38,7 +38,7 @@ import {
 	readState,
 	type MigrationState,
 } from "./migrate.js";
-import { appendContextMetric, appendTurn, computeBaseline, formatTrialReport, readFlags, recordFlag, recordOverride, trialReport, writeBaseline, type TrialReport } from "./trial.js";
+import { appendContextMetric, appendErrorMetric, appendTurn, computeBaseline, errorFile, formatTrialReport, readErrorMetrics, readFlags, recordFlag, recordOverride, trialReport, writeBaseline, type TrialReport } from "./trial.js";
 
 export interface BankOptions {
 	paths?: BankPaths;
@@ -193,6 +193,61 @@ export class Bank {
 
 	daily(): DailyLog {
 		return readDaily(this.paths, this.today);
+	}
+
+	/**
+	 * What is wrong with the bank right now, one line per problem (R36). Empty means
+	 * healthy. This exists because a `StoreUnreadable` used to be a string inside a
+	 * caught `Outcome`: a bank whose store no writer could reproduce produced no output
+	 * at all, in any mode.
+	 */
+	describeDamage(): string[] {
+		const health = inspectBank(this.snapshot(), this.paths);
+		const lines: string[] = [];
+		if (health.malformed.length > 0) lines.push(`${health.malformed.length} malformed entries: ${health.malformed.map((error) => `${error.file}:${error.line} — ${error.message}`).join("; ")}`);
+		if (health.unwritable.length > 0) lines.push(`${health.unwritable.length} line(s) no writer can reproduce: ${health.unwritable.map((problem) => `${problem.file}:${problem.line} — ${problem.text}`).join("; ")}`);
+		if (health.contested.length > 0) lines.push(`${health.contested.length} contested identities: ${health.contested.map((entry) => `${entry.key} @ ${entry.scope}`).join(", ")}`);
+		if (health.unreadable.length > 0) lines.push(`${health.unreadable.length} unreadable stores: ${health.unreadable.map((entry) => entry.file).join(", ")}`);
+		if (health.tempFiles.length > 0) lines.push(`${health.tempFiles.length} half-written files: ${health.tempFiles.join(", ")}`);
+		if (health.outsideLinks.length > 0) lines.push(`${health.outsideLinks.length} links leave the bank: ${health.outsideLinks.map((entry) => entry.file).join(", ")}`);
+		return lines;
+	}
+
+	/**
+	 * One line in `metrics/errors.jsonl` for a failure that otherwise disappears (R36).
+	 * Never throws: the failure being reported has already happened, and a broken
+	 * logger must not add a second one.
+	 */
+	recordError(where: string, message: string, sessionId?: string): boolean {
+		try {
+			ensureBankDirs(this.paths);
+			return appendErrorMetric(this.paths, { where, message, ...(sessionId === undefined ? {} : { session: sessionId }) }, this.clock);
+		} catch {
+			return false;
+		}
+	}
+
+	/**
+	 * The measurement behind the trial (F6). It used to be reachable only as
+	 * "trial: never", which said neither how old the data was nor where it came from.
+	 */
+	measurement(): string[] {
+		const report = trialReport(this.paths, { today: this.today });
+		if (report.turns === 0) {
+			return [`measure: no injected turn recorded in the last ${report.days} days — the first one writes ${join(this.paths.metrics, "turns.jsonl")}`];
+		}
+		const context = report.context === undefined
+			? "no model call sampled yet"
+			: `${report.context.samples} model calls sampled, median ${report.context.medianKept} memory tokens carried and ${report.context.medianDropped} dropped`;
+		const lines = [`measure: ${report.turns} injected turn${report.turns === 1 ? "" : "s"}, median ${report.medianTokens} tokens${report.newestAt === undefined ? "" : `, newest ${report.newestAt}`}; ${context}`];
+		const baseline = report.baseline === undefined
+			? "no baseline — /memory trial baseline computes one from session files (R47)"
+			: `baseline ${report.baseline.medianTokens} tokens from ${report.baseline.samples} blocks marked "${report.baseline.marker}", ${describeAge(report.baseline.generatedAt.slice(0, 10), this.today)} old (${report.baseline.from} to ${report.baseline.to})`;
+		const sinceDay = shiftDay(this.today, -(report.days - 1));
+		const errors = readErrorMetrics(this.paths, { sinceDay }).length;
+		const flags = report.flags.total;
+		lines.push(`window: ${baseline}; ${flags} flagged stale or rival, ${errors} error${errors === 1 ? "" : "s"} recorded in the last ${report.days} days — /memory trial report [days] [--last n]; files: ${this.paths.metrics}`);
+		return lines;
 	}
 
 	// ── Injection ────────────────────────────────────────────────────────────
@@ -541,7 +596,8 @@ export class Bank {
 	// ── Health, trial, migration ─────────────────────────────────────────────
 
 	status(cwd: string): Promise<Outcome> {
-		const { config, warnings } = this.config();
+		const result = this.config();
+		const { config, warnings } = result;
 		const counts = this.queueCounts();
 		const daily = dailyStatus(this.paths, this.today);
 		const health = inspectBank(this.snapshot(), this.paths);
@@ -550,9 +606,11 @@ export class Bank {
 				`bank: ${this.paths.root}`,
 				`project: ${context.projectId} (root ${context.rootPath})`,
 				`config: ${describeConfig(config)}`,
+				`source: ${describeConfigSource(result, { file: this.paths.config, present: existsSync(this.paths.config) })}`,
 				`claims: ${health.claims.approved} approved, ${health.claims.pending} pending (${counts.agentProposals} agent, ${counts.migrationBacklog} migration); ${health.claims.byKind.rule} rules, ${health.claims.byKind.fact} facts`,
 				`daily: ${daily.day === this.today ? "today" : `${describeAge(daily.day, this.today)} old`}, ${daily.open} open items${daily.undated > 0 ? `, ${daily.undated} without their own date` : ""}`,
 				`history: ${health.historyFiles} records; archive: ${health.archiveFiles} files`,
+				...this.measurement(),
 			];
 			if (counts.contested.length > 0) lines.push(`contested: ${counts.contested.map((entry) => `${entry.key} @ ${entry.scope}`).join(", ")}`);
 			if (health.malformed.length > 0) lines.push(`malformed: ${health.malformed.map((error) => `${error.file}:${error.line} — ${error.message}`).join("\n  ")}`);
@@ -590,7 +648,11 @@ export class Bank {
 		if (health.tempFiles.length > 0) lines.push(`  ${health.tempFiles.length} half-written files: ${health.tempFiles.join(", ")}`);
 		if (health.outsideLinks.length > 0) lines.push(`  ${health.outsideLinks.length} links leave the bank: ${health.outsideLinks.map((entry) => entry.file).join(", ")}`);
 		lines.push(`  migration: ${progress.todo} of ${progress.total} source files still to draft${progress.backup ? "" : " (no backup recorded)"}`);
-		lines.push(`  trial: ${trial.turns} turns recorded, median ${trial.medianTokens} tokens`);
+		lines.push(`  measure: ${trial.turns} turns recorded, median ${trial.medianTokens} tokens${trial.newestAt === undefined ? "" : `, newest ${trial.newestAt}`}`);
+		const errors = readErrorMetrics(this.paths).slice(-3);
+		lines.push(errors.length === 0
+			? "  errors: none recorded"
+			: `  errors: ${errors.map((error) => `${error.at} ${error.where}: ${error.message}`).join("\n    ")}`);
 		return { ok: isWellFormed(health), text: lines.join("\n") };
 	}
 
@@ -606,8 +668,8 @@ export class Bank {
 		}
 	}
 
-	reportTrial(days?: number): Outcome<TrialReport> {
-		const report = trialReport(this.paths, { today: this.today, days });
+	reportTrial(days?: number, last?: number): Outcome<TrialReport> {
+		const report = trialReport(this.paths, { today: this.today, days, last });
 		return { ok: report.go, text: formatTrialReport(report), data: report };
 	}
 

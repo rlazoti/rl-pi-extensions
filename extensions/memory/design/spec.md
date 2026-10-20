@@ -190,9 +190,15 @@ in its constraints) and Pi's extension API docs (`session_start` and `before_age
   per section, entries dropped, and the number of approved claims the bank held (which starts the
   clock, R45). No prompt text is stored. `/memory preview` appends nothing (R31). Status-check
   overrides are not a field on this line — they belong to a proposal, not to a turn — and are one
-  line each in `metrics/overrides.jsonl` (R24).
+  line each in `metrics/overrides.jsonl` (R24). The other files beside them are `context.jsonl` (what
+  one model call was about to carry, R25.1), `flags.jsonl` (R44), `errors.jsonl` (R51) and
+  `baseline.json` (R47). `/memory status` names the directory, the newest turn and how many errors
+  were recorded, because a number nobody can trace to a file is not a measurement (F6, D26).
 - R44. `/memory flag <key> stale|rival` records a flag in `metrics/flags.jsonl` with the injected
   claim and the session id.
+- R44.1. `/memory trial report [days] [--last n]` narrows the report to the newest `n` turn samples
+  (F6). A tail is a look at the numbers, not a window: the day gates describe a window, so a `--last`
+  report always ends `not yet` with that stated, and the plain report never mentions tails.
 - R45. `/memory trial` reports the trial result after 7 days of use. It prints what it measured and
   **every** unmet gate; a gate is never reported and then overwritten by the next verdict (D21).
   Go needs all of them:
@@ -223,6 +229,10 @@ in its constraints) and Pi's extension API docs (`session_start` and `before_age
   in use, its default, the range the validator enforces, and where that value came from: the file, a
   default, or the section interlock. It also shows the recall size the caps leave, marked as derived.
   The listing and the validator read the same table, so a listing cannot drift from what is enforced.
+  `/memory status` carries the one-line version of the same answer (F6): after the values in force,
+  a `source:` line naming the config file, how many keys it sets, how many values are defaults, and
+  how many were refused or adjusted — a block size that reads like a decision nobody made is usually
+  a default nobody chose.
   A knob never appears as a plain number: without its range the reader cannot tell a wrong value
   from an unusual one.
 - R49.1. With no config file, the listing also carries a paste-ready template generated from that same
@@ -238,6 +248,23 @@ in its constraints) and Pi's extension API docs (`session_start` and `before_age
   name the table lists but the code does not handle is reported as our bug, not as the reader's typo. A
   hand-written list drifted when `settings` was added; the list and the code that answers it share one
   source now. The README's command list is checked against the table.
+- R51. **Nothing fails silently** (D26). A failure inside the component reaches a person and a file:
+  - `bank.describeDamage()` answers "what is wrong with the bank" in one line per problem — malformed
+    entries, lines no writer can reproduce, contested identities, unreadable stores, half-written
+    files, links out of the bank;
+  - every `session_start` reports it, whatever the reason (`startup`, `new`, `fork`, `resume`, and a
+    `reload` is a start too), because a bank nobody can write must not wait for the one reason that
+    happens to look for damage. The review notice still skips a resumed session; the damage does not;
+  - `metrics/errors.jsonl` holds one line per failure — `at`, `day`, `where`, `message`, `session` —
+    with the same failure deduplicated inside 5 minutes, so a warning that fires every turn does not
+    become a file nobody reads. `/memory doctor` prints the last three;
+  - the metric and the warning are independent channels: when the metrics directory is the thing that
+    failed, the warning still arrives (and the turn still proceeds, R30);
+  - the handler on `context` never breaks a model call: our own pruning failing is reported and the
+    conversation goes as it was.
+  A `StoreUnreadable` used to be a string inside a caught `Outcome`, and a broken claim store produced
+  no output in any mode; the pin that it now says so lives in the jiti loader test, because a failure
+  only visible under Pi's transform is invisible to every other gate.
 
 ## Design
 
@@ -261,9 +288,9 @@ in its constraints) and Pi's extension API docs (`session_start` and `before_age
 | `context.ts` | Bounding the memory blocks one conversation sends to the model (R25.1, D24). Pure over the message list. |
 | `inject.ts` | Budget sections, injection eligibility, `[unapproved]` labels, truncation notice, preview (R25–R31, R35). |
 | `notice.ts` | Session-start review notice and its counts (R20). |
-| `trial.ts` | Turn metrics, flags, baseline from session files, trial report (R43–R47). |
+| `trial.ts` | Turn metrics, flags, baseline from session files, trial report, the error log (R43–R47, R51). |
 | `migrate.ts` | Backup gate, waves, per-file draft turns, resumable state (R37–R39). |
-| `config.ts` | `~/.pi/memory/config.json` with validated defaults, the settings table the validator and the listing share, `/memory settings` text (R48–R49). Invalid config falls back to defaults with a warning. |
+| `config.ts` | `~/.pi/memory/config.json` with validated defaults, the settings table the validator and the listing share, `/memory settings` text, and the one-line answer to "where did this value come from" (R48–R49, F6). Invalid config falls back to defaults with a warning. |
 | `implementation.ts` | Registers tools, commands and the three hooks; the subcommand table that renders help, the command-list line and the completions (R25, R41, R50). |
 
 ### Bank layout (`~/.pi/memory/`)
@@ -320,6 +347,13 @@ flowchart LR
 - **Budget:** invariant sweep over generated stores (tokens ≤ budget, always); section caps;
   flow-through; notice text; no split entries; `always` rules in core, other rules only by rank.
 - **No blocking:** the extension registers no `tool_call` handler.
+- **Nothing fails silently (R51):** a store no writer can reproduce warns once per session at every
+  `session_start` reason and writes one `errors.jsonl` line per distinct failure per 5 minutes; the
+  same damage in three sessions is one line; a failing metrics write still warns (the file is not the
+  only channel) and still fails open; `describeDamage()` is empty on a healthy bank; `/memory status`
+  names the numbers, their age, the config source and the metrics directory; `--last n` narrows a
+  report and says it is a tail; and under Pi's jiti transform the warning really arrives — the case
+  every other gate cannot see.
 - **Trial:** metrics lines carry no prompt text and name the bank they were injected into; a preview
   writes none; a flag records the claim; an override is one event line and is reported, not gated;
   report arithmetic and every gate (clock, window and coverage, retrieved turns, ratio, absolute
@@ -397,3 +431,5 @@ flowchart LR
 | D23 | The size gate | Keep the 25% ratio **and** add an absolute ceiling of 1,200 tokens on the median, measured from 25 real injections (median 1,077, p90 1,646). Against a 17,232-token baseline the whole 2,000-token budget is 12%, so the ratio alone passes for ever. | R45 |
 | D24 | Blocks that pile up in the conversation | A `context` handler keeps only the newest block, plus the newest block carrying retrieved claims when the newest carries none (marked as carried). Chosen over per-claim dedup (the blocks still grow, and a compaction forgets the dedup) and over measuring only: a nine-turn session of this project carried 10,255 tokens of memory blocks on every model call, where the newest block was 1,085. The vanishing-follow-up case is the reason the second block exists at all. | R25.1, R43 |
 | D25 | A pending claim beside an approved one for the same key | Keep excluding it, correct the reason, narrow the rule's wording. The identity is key + scope (R11), so an approved `global` claim and a pending `project:` claim are two identities, and R28 read as if the second were eligible — while the code excluded every pending claim for a key that an approved claim answered, with a reason written for the same-identity case. Kept because an unreviewed narrower scope **shadows** (R10): injecting it would put text nobody has reviewed in place of the approved claim, which is what R28 exists to prevent. Nothing is lost — the approved claim still speaks, and the pending one is named in `/memory status` and the review notice. | R28, R13 |
+| D26 | How a failure surfaces | Two independent channels, deduplicated differently: a warning (once per distinct failure per session, in the TUI or on stderr) and `metrics/errors.jsonl` (once per distinct failure per 5 minutes). Chosen over warn-only — nobody sees a session that already ended — and over log-only, because the metrics directory can itself be the thing that failed. The damage report runs on every `session_start` reason, not the one that matches the review notice. | R51, R30 |
+| D27 | Where the measurement is read | `/memory status` names the numbers, their age, the baseline, the flags, the error count and the metrics directory; `/memory doctor` prints the last three errors. A number that cannot be traced to a file is not a measurement, and "trial: never" said neither how old the data was nor where it came from. | R43, F6 |

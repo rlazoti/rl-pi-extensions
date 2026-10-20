@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+	appendErrorMetric,
 	appendTurn,
 	baselineFile,
 	blocksInSession,
@@ -12,6 +13,7 @@ import {
 	corruptTurnLines,
 	formatTrialReport,
 	median,
+	readErrorMetrics,
 	readFlags,
 	readOverrides,
 	readTurns,
@@ -403,6 +405,54 @@ test("trial: the report says what it measured, in the order the decision needs",
 		assert.match(text, /flags: 0 stale, 0 rival/);
 		assert.match(text, /overrides: 0 in the window/);
 		assert.match(text, /^  go: median 190/m);
+	} finally {
+		cleanup();
+	}
+});
+
+test("trial: one line per failure, and a repeat inside the window is one line (R36)", () => {
+	const { paths, cleanup } = scratch();
+	try {
+		const text = "line 11   is\nnot a claim";
+		assert.equal(appendErrorMetric(paths, { where: "claim store", message: text, session: "s1" }, clockAt("2026-10-16T10:00:00")), true, "the first failure is written");
+		assert.equal(appendErrorMetric(paths, { where: "claim store", message: "line 11 is not a claim", session: "s1" }, clockAt("2026-10-16T10:02:00")), false, "the same failure two minutes later is the same event, however the whitespace differs");
+		assert.equal(appendErrorMetric(paths, { where: "injection", message: "line 11 is not a claim" }, clockAt("2026-10-16T10:02:30")), true, "the same words from another place are another failure");
+		assert.equal(appendErrorMetric(paths, { where: "claim store", message: text }, clockAt("2026-10-16T10:06:00")), true, "and after the window the failure is back, which is worth saying twice");
+		const lines = readFileSync(join(paths.metrics, "errors.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+		assert.equal(lines.length, 3);
+		assert.deepEqual(lines.map((line) => line.where), ["claim store", "injection", "claim store"]);
+		assert.equal(lines[0].at, "2026-10-16 10:00:00", "the extension stamps the time");
+		assert.equal(lines[0].day, "2026-10-16");
+		assert.equal(lines[0].session, "s1");
+		assert.ok(!lines[0].message.includes("\n"), "one failure is one line, so the file stays greppable");
+		assert.equal(lines[0].message, "line 11 is not a claim");
+		assert.ok(!("session" in lines[1]), "a failure with no session does not carry an empty one");
+		assert.deepEqual(readErrorMetrics(paths, { sinceDay: "2026-10-16" }).length, 3);
+		assert.deepEqual(readErrorMetrics(paths, { sinceDay: "2026-10-17" }).length, 0, "the window is a day window like every other metric");
+	} finally {
+		cleanup();
+	}
+});
+
+test("trial: --last N reports the newest samples and says it is not a window (F6)", () => {
+	const { paths, cleanup } = scratch();
+	try {
+		for (const [index, day] of ["2026-10-13", "2026-10-14", "2026-10-15", "2026-10-16", "2026-10-17", "2026-10-18", "2026-10-19"].entries()) {
+			appendTurn(paths, { tokens: { core: 100, daily: 50, retrieved: 40, total: 100 + index * 100 }, dropped: { claims: 0, dailyItems: 0 }, claims: 12, session: "s" }, clockAt(`${day}T12:00:00`));
+		}
+		const full = trialReport(paths, { today: "2026-10-19" });
+		assert.equal(full.turns, 7);
+		assert.equal(full.medianTokens, 400, "the median of the window");
+		assert.equal(full.newestAt, "2026-10-19 12:00:00", "and how old the numbers are (F6)");
+
+		const tail = trialReport(paths, { today: "2026-10-19", last: 3 });
+		assert.equal(tail.turns, 3);
+		assert.equal(tail.medianTokens, 600, "the median of the newest three: 500, 600, 700");
+		assert.equal(tail.go, false, "a tail is never a go");
+		const text = formatTrialReport(tail);
+		assert.match(text, /^Trial, newest 3 turn samples of the last 7 days: median 600 tokens per turn/);
+		assert.match(text, /the newest 3 turn samples, which is a look at the tail and not a window — run \/memory trial for the decision/);
+		assert.doesNotMatch(formatTrialReport(full), /a look at the tail/, "the window report says nothing about tails");
 	} finally {
 		cleanup();
 	}

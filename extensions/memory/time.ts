@@ -66,3 +66,14 @@ export function describeAge(day: string, today: string): string {
 	if (days < 60) return `${Math.round(days / 7)} weeks`;
 	return `${Math.round(days / 30)} months`;
 }
+
+/**
+ * One day moved by a whole number of days, on the UTC clock so daylight saving
+ * cannot make a day 23 or 25 hours long. A window start and a window end are both
+ * `YYYY-MM-DD` strings.
+ */
+export function shiftDay(day: string, delta: number): string {
+	const date = new Date(`${day}T12:00:00Z`);
+	date.setUTCDate(date.getUTCDate() + delta);
+	return date.toISOString().slice(0, 10);
+}

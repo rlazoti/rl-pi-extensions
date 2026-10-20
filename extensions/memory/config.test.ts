@@ -4,7 +4,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { DEFAULT_CONFIG, SETTINGS, applyConfig, configTemplate, describeConfig, describeSettings, loadConfig } from "./config.ts";
+import { DEFAULT_CONFIG, SETTINGS, applyConfig, configTemplate, describeConfig, describeConfigSource, describeSettings, loadConfig } from "./config.ts";
 import { bankPaths } from "./store.ts";
 
 function scratchFile(): { file: string; paths: ReturnType<typeof bankPaths>; cleanup: () => void } {
@@ -286,6 +286,37 @@ test("config: the settings listing speaks to a person, not to the spec (R49.2)",
 			assert.match(setting.spec, /^R\d+(\.\d+)?$/, `${setting.key} still names the requirement it serves, off screen`);
 			assert.ok(setting.meaning.length > 0 && !setting.meaning.includes("("), `${setting.key} explains itself without parenthetical IDs`);
 		}
+	} finally {
+		cleanup();
+	}
+});
+
+test("config: the source line says where the values in force came from (F6)", () => {
+	const { file, paths, cleanup } = scratchFile();
+	const view = { file, present: false };
+	const escaped = file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	try {
+		assert.match(
+			describeConfigSource(loadConfig(paths), view),
+			new RegExp(`^no config file at ${escaped}, so every value is a default — /memory settings lists the keys with their defaults$`),
+		);
+
+		writeFileSync(file, JSON.stringify({ budgetTokens: 1200, ranker: "bm25" }), "utf8");
+		assert.match(describeConfigSource(loadConfig(paths), { file, present: true }), new RegExp(`^${escaped}: 2 of 8 keys set, 6 defaults — /memory settings lists them all$`));
+
+		// A key the file named is not always a key that survived: this one is out of
+		// range, so its default is in use and the line has to say so.
+		writeFileSync(file, JSON.stringify({ budgetTokens: 100, ranker: "bm25" }), "utf8");
+		const refused = describeConfigSource(loadConfig(paths), { file, present: true });
+		assert.match(refused, /: 1 of 8 keys set, 7 defaults, 1 refused or adjusted \(what is in use is not what the file says\)/);
+
+		// The section interlock moving a share is the other way a value changes hands.
+		writeFileSync(file, JSON.stringify({ budgetTokens: 1000, coreTokens: 900, dailyTokens: 900 }), "utf8");
+		assert.match(describeConfigSource(loadConfig(paths), { file, present: true }), /: 3 of 8 keys set, 5 defaults, 1 refused or adjusted/);
+
+		// A file that is not JSON at all is every default, and says which file lied.
+		writeFileSync(file, "{ not json", "utf8");
+		assert.match(describeConfigSource(loadConfig(paths), { file, present: true }), new RegExp(`^${escaped}: 0 of 8 keys set, 8 defaults, 1 refused or adjusted`));
 	} finally {
 		cleanup();
 	}

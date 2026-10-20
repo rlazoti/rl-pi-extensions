@@ -77,21 +77,49 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 		ctx.ui.notify(message, "warning");
 	};
 
+	/**
+	 * A failure nobody would otherwise see (R36): one line in `metrics/errors.jsonl`
+	 * and one warning, each deduplicated. Before this, `StoreUnreadable` lived inside a
+	 * caught `Outcome` and a broken claim store was silent in every mode.
+	 */
+	const shown = new Set<string>();
+	const reportFailure = (ctx: ExtensionContext, where: string, message: string): void => {
+		// Best effort, and never the only gate: when the metrics directory is the thing
+		// that failed, the warning is the last channel left.
+		bank.recordError(where, message, ctx.sessionManager.getSessionId());
+		const id = `${where}\u0000${message}`;
+		if (shown.has(id)) return;
+		shown.add(id);
+		const text = `memory: ${where} failed — ${message}`;
+		if (ctx.mode === "tui") ctx.ui.notify(text, "warning");
+		else console.warn(text);
+	};
+
 	const bankDamage = (): string[] => {
 		const damage: string[] = [];
 		if (!bankExists(bank.paths)) damage.push(`no memory bank yet at ${bank.paths.root}`);
+		try {
+			damage.push(...bank.describeDamage());
+		} catch (error) {
+			// A bank this broken cannot describe itself; that is the report.
+			damage.push(`the claim store cannot be read: ${error instanceof Error ? error.message : String(error)}`);
+		}
 		return damage;
 	};
 
 	// ── Hooks ────────────────────────────────────────────────────────────────
 
 	pi.on("session_start", async (event, ctx) => {
-		// A resumed session has been told already; a reload is not a new session.
-		if (event.reason !== "new" && event.reason !== "startup" && event.reason !== "fork") return;
+		// Every start, whatever the reason: a bank that cannot be written says so at
+		// once instead of waiting for a session started with the one reason that looks
+		// for damage (F5, R36).
 		if (!existsSync(bank.paths.root)) return;
+		const damage = bankDamage();
+		if (damage.length > 0) reportFailure(ctx, "claim store", damage.join("; "));
+		if (event.reason === "resume") return;
 		const rolled = bank.rollover();
 		if (rolled.archivedTo && ctx.mode === "tui") ctx.ui.notify(`memory: yesterday's log is archived (${rolled.archivedTo}), ${rolled.carried} open item(s) carried`, "info");
-		const notice = await bank.notice(ctx.cwd, { bankDamage: bankDamage() });
+		const notice = await bank.notice(ctx.cwd, { bankDamage: damage });
 		if (notice.text === "") return;
 		noticeSinkFor(ctx).deliver(notice.text);
 	});
@@ -104,6 +132,8 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 			bank.rollover();
 			const { result, warnings } = await bank.injection(event.prompt, ctx.cwd, ctx.sessionManager.getSessionId());
 			for (const warning of warnings) warnOnce(ctx, `memory: ${warning}`);
+			const damage = bankDamage().filter((line) => !line.startsWith("no memory bank yet"));
+			if (damage.length > 0) reportFailure(ctx, "claim store", damage.join("; "));
 			if (result.contested.length > 0) warnOnce(ctx, `memory: ${result.contested.length} contested identity(ies) — nothing is asserted for them; /memory review`);
 			if (result.text === "") return;
 			return {
@@ -111,7 +141,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 			};
 		} catch (error) {
 			// Fail open (R30): one visible warning, and the turn proceeds without memory.
-			warnOnce(ctx, `memory: injection skipped — ${error instanceof Error ? error.message : String(error)}`);
+			reportFailure(ctx, "injection", error instanceof Error ? error.message : String(error));
 			return;
 		}
 	});
@@ -126,7 +156,16 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 	 * session file keeps every block, and `blocksInSession` still reads what happened.
 	 */
 	pi.on("context", async (event, ctx) => {
-		const { messages, sample } = pruneMemoryBlocks(event.messages as unknown as ContextMessageLike[]);
+		let messages: ContextMessageLike[];
+		let sample: ReturnType<typeof pruneMemoryBlocks>["sample"];
+		try {
+			({ messages, sample } = pruneMemoryBlocks(event.messages as unknown as ContextMessageLike[]));
+		} catch (error) {
+			// This handler is on the path of every model call. If our own pruning breaks,
+			// the conversation still goes (R30 fails open, and here it must).
+			reportFailure(ctx, "context", error instanceof Error ? error.message : String(error));
+			return;
+		}
 		if (sample.blocks === 0) return;
 		const sessionId = ctx.sessionManager.getSessionId();
 		const key = `${sessionId}\u0000${sample.newest}`;
@@ -408,7 +447,8 @@ export default function memoryExtension(pi: ExtensionAPI): void {
 			return bank.baseline({ days: days === undefined ? undefined : Number(days), marker, sessionsDir });
 		}
 		const days = rest[0] === "report" ? flagValue(rest, "--days") : rest[0];
-		return bank.reportTrial(days === undefined ? undefined : Number(days));
+		const last = flagValue(rest, "--last");
+		return bank.reportTrial(days === undefined ? undefined : Number(days), last === undefined ? undefined : Number(last));
 	}
 
 	async function migrate(rest: string[]): Promise<Outcome> {
@@ -488,7 +528,7 @@ export const MEMORY_SUBCOMMANDS: readonly MemorySubcommand[] = [
 	{ name: "paths", summary: "where the bank's files live" },
 	{ name: "flag", args: "<key> stale|rival", summary: "mark an injected claim as stale or rival (input to the trial)" },
 	{ name: "flags", summary: "every flag recorded" },
-	{ name: "trial", args: "[days] | baseline", summary: "the week's numbers against the baseline, and the go/no-go", forms: ["baseline [--days n] [--marker text] [--sessions-dir path]"] },
+	{ name: "trial", args: "[days] | baseline", summary: "the week's numbers against the baseline, and the go/no-go", forms: ["baseline [--days n] [--marker text] [--sessions-dir path]", "report [days] [--last n]"] },
 	{ name: "migrate", summary: "move an old bank in, under a backup gate", forms: ["backup | plan | status | draft [--wave w] [--file f | --batch n] | drafted <file> <n>", "apply [--wave w | --all] | daily | cutover"] },
 	{ name: "help", summary: "this list" },
 ];

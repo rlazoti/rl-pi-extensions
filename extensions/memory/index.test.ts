@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,6 +11,7 @@ import { MEMORY_SUBCOMMANDS, paletteDescription, setBankForTesting } from "./imp
 import { createBank } from "./bank.ts";
 import { bankPaths, ensureBankDirs } from "./store.ts";
 import { upsertClaim } from "./store.ts";
+import { appendTurn } from "./trial.ts";
 import { propose } from "./queue.ts";
 import type { Claim } from "./grammar.ts";
 
@@ -126,6 +127,19 @@ function toolCtx(options: { mode?: "tui" | "print" | "rpc"; select?: (title: str
 	const ctx = fake.ctx as unknown as ExtensionToolContext & { asks: { title: string; options: string[] }[] };
 	ctx.asks = fake.selects;
 	return ctx;
+}
+
+/** A print-mode command context that collects what the extension said. */
+function printCtx(notes: string[], cwd = "/repo/rl-pi-extensions"): ExtensionCommandContext {
+	return {
+		...(fakeContext({ mode: "print", cwd }).ctx as object),
+		ui: { notify: (message: string) => notes.push(message), select: async () => undefined, editor: async () => undefined, input: async () => undefined, confirm: async () => true },
+		mode: "print",
+		hasUI: false,
+		signal: undefined,
+		cwd,
+		sessionManager: { getSessionId: () => "s1" },
+	} as unknown as ExtensionCommandContext;
 }
 
 function notificationsOf(ctx: ExtensionCommandContext): { message: string; level?: string }[] {
@@ -379,15 +393,17 @@ test("component: damage inside the bank is reported, not swallowed, and a failed
 	const { paths, cleanup } = scratchBank();
 	try {
 		upsertClaim(paths, claim("git.flow", { tags: ["always"] }));
-		// A directory where a store file belongs: the store reports it and still
-		// injects what it can read.
-		mkdirSync(join(paths.rules, "broken.md"));
+		// A heading the grammar cannot read, appended by hand: the writer will refuse
+		// this file until it is fixed, and the good claim in it still injects.
+		appendFileSync(join(paths.rules, "git.md"), "\n## Notes — not a key\nJust prose under a heading nobody approved.\n", "utf8");
 		const { harness, ctx } = install({ paths, mode: "tui" });
 		const before = harness.hooks.get("before_agent_start")!;
 		const good = (await before({ type: "before_agent_start", messageType: "user", prompt: "git flow" }, ctx)) as { message: { content: string } };
 		assert.match(good.message.content, /### Always-on rules/);
 
-		// The metrics write failing must not take the turn down with it.
+		// The metrics write failing must not take the turn down with it — and the
+		// warning still has to arrive, because the metrics file it would also be
+		// written to is the thing that just failed.
 		chmodSync(paths.metrics, 0o000);
 		try {
 			const after = await before({ type: "before_agent_start", messageType: "user", prompt: "git flow" }, ctx);
@@ -400,8 +416,18 @@ test("component: damage inside the bank is reported, not swallowed, and a failed
 			chmodSync(paths.metrics, 0o755);
 		}
 		const warnings = notificationsOf(ctx).filter((note) => note.level === "warning");
-		assert.equal(warnings.length, 1, "one warning, not one per turn");
-		assert.match(warnings[0]!.message, /memory: injection skipped/);
+		const store = warnings.filter((note) => /claim store failed/.test(note.message));
+		const injection = warnings.filter((note) => /injection failed/.test(note.message));
+		assert.equal(store.length, 1, `one warning per distinct failure, not one per turn: ${warnings.map((note) => note.message).join(" | ")}`);
+		assert.match(store[0]!.message, /no writer can reproduce/);
+		assert.equal(injection.length, 1, "a failing metrics write warns once and still fails open");
+		// The damage was written down where a later session can find it, while the
+		// metrics directory was still writable.
+		const errors = readFileSync(join(paths.metrics, "errors.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+		assert.equal(errors.length, 1);
+		assert.equal(errors[0].where, "claim store");
+		assert.match(errors[0].message, /no writer can reproduce/);
+		assert.ok(errors[0].at, "the extension stamps the time");
 	} finally {
 		cleanup();
 	}
@@ -1033,6 +1059,83 @@ test("component: an unreadable claim blocks the write instead of vanishing under
 		assert.notEqual(accepted.isError, true, accepted.content[0]!.text);
 		assert.match(readFileSync(file, "utf8"), /## git\.new/);
 		assert.match(readFileSync(file, "utf8"), /A rule the parser refused/);
+	} finally {
+		cleanup();
+	}
+});
+
+test("component: a claim store no writer can reproduce says so at every kind of session start (F5, R36)", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		upsertClaim(paths, claim("git.flow", { body: "Never push without confirmation." }));
+		appendFileSync(join(paths.rules, "git.md"), "\n## Notes — not a key\nJust prose under a heading nobody approved.\n", "utf8");
+		for (const reason of ["startup", "fork", "resume"] as const) {
+			const { harness, ctx } = install({ paths, mode: "tui" });
+			await harness.hooks.get("session_start")!({ type: "session_start", reason }, ctx);
+			const warnings = notificationsOf(ctx).filter((note) => note.level === "warning");
+			assert.equal(warnings.length, 1, `${reason}: one warning about the store`);
+			assert.match(warnings[0]!.message, /^memory: claim store failed — .*no writer can reproduce/);
+			assert.match(warnings[0]!.message, /Notes — not a key/);
+			if (reason === "resume") {
+				assert.ok(!notificationsOf(ctx).some((note) => /waiting/.test(note.message)), "a resumed session is not told the backlog again");
+			}
+		}
+		// Three sessions, one event: the same damage is not three lines of noise.
+		const errors = readFileSync(join(paths.metrics, "errors.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+		assert.equal(errors.length, 1, `one error line, got ${errors.length}`);
+		assert.equal(errors[0].where, "claim store");
+		assert.equal(errors[0].session, "session-abc", "which session saw it first");
+	} finally {
+		cleanup();
+	}
+});
+
+test("component: /memory status says where the config came from and how old the numbers are (F6)", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		upsertClaim(paths, claim("git.flow", { tags: ["always"], body: "Never push without confirmation." }));
+		writeFileSync(paths.config, JSON.stringify({ budgetTokens: 1200 }), "utf8");
+		appendTurn(paths, { tokens: { core: 100, daily: 0, retrieved: 50, total: 150 }, dropped: { claims: 0, dailyItems: 0 }, claims: 1, session: "s" }, () => new Date(2026, 9, 17, 12, 0, 0));
+		const { harness } = install({ paths, mode: "print", cwd: "/repo/rl-pi-extensions" });
+		const command = harness.commands.get("memory")!;
+		const notes: string[] = [];
+		const ctx = printCtx(notes);
+
+		await command.handler("status", ctx);
+		assert.match(notes[0]!, /^source: .*config\.json: 1 of 8 keys set, 7 defaults — \/memory settings lists them all$/m);
+		assert.match(notes[0]!, /measure: 1 injected turn, median 150 tokens, newest 2026-10-17 12:00:00; no model call sampled yet/);
+		assert.match(notes[0]!, /window: no baseline — \/memory trial baseline computes one from session files \(R47\); 0 flagged stale or rival, 0 errors recorded in the last 7 days/);
+		assert.match(notes[0]!, new RegExp(`files: ${paths.metrics.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m"));
+
+		// A bank with nothing measured yet says that instead of a line of zeroes.
+		rmSync(join(paths.metrics, "turns.jsonl"));
+		notes.length = 0;
+		await command.handler("status", ctx);
+		assert.match(notes[0]!, /measure: no injected turn recorded in the last 7 days — the first one writes .*metrics\/turns\.jsonl/);
+	} finally {
+		cleanup();
+	}
+});
+
+test("component: /memory trial report --last n narrows the report to the newest samples (F6)", async () => {
+	const { paths, cleanup } = scratchBank();
+	try {
+		upsertClaim(paths, claim("git.flow", { tags: ["always"] }));
+		for (const [index, day] of ["2026-10-14", "2026-10-15", "2026-10-16"].entries()) {
+			appendTurn(paths, { tokens: { core: 100, daily: 0, retrieved: 0, total: 100 + index * 100 }, dropped: { claims: 0, dailyItems: 0 }, claims: 12, session: "s" }, () => new Date(2026, 9, 14 + index, 12, 0, 0));
+		}
+		const { harness } = install({ paths, mode: "print", cwd: "/repo/rl-pi-extensions" });
+		const command = harness.commands.get("memory")!;
+		const notes: string[] = [];
+		const ctx = printCtx(notes);
+
+		await command.handler("trial", ctx);
+		assert.match(notes[0]!, /^Trial, last 7 days: 3 injected turns, median 200 tokens per turn/);
+		assert.doesNotMatch(notes[0]!, /a look at the tail/);
+
+		await command.handler("trial report --last 2", ctx);
+		assert.match(notes[1]!, /^Trial, newest 2 turn samples of the last 7 days: median 250 tokens per turn/);
+		assert.match(notes[1]!, /the newest 2 turn samples, which is a look at the tail and not a window — run \/memory trial for the decision/);
 	} finally {
 		cleanup();
 	}

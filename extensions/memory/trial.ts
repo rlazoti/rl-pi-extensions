@@ -14,7 +14,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { daysBetween, dayOf, systemClock, type Clock } from "./time.js";
+import { daysBetween, dayOf, shiftDay, systemClock, type Clock } from "./time.js";
 import { readJson, writeJson, type BankPaths } from "./store.js";
 import { tokensOf } from "./inject.js";
 
@@ -103,6 +103,80 @@ export function appendContextMetric(paths: BankPaths, metric: Omit<ContextMetric
 	const full: ContextMetric = { at, day, ...metric };
 	writeFileSync(contextFile(paths), `${JSON.stringify(full)}\n`, { flag: "a" });
 	return full;
+}
+
+export interface ErrorMetric {
+	at: string;
+	day: string;
+	/** Where it happened: `injection`, `session_start`, `context`, a subcommand name. */
+	where: string;
+	message: string;
+	session?: string;
+}
+
+/**
+ * The same failure once (F6). A warning that fires every turn is a file nobody
+ * reads, so a repeat inside this window is one event.
+ */
+export const ERROR_DEDUPE_MS = 5 * 60 * 1000;
+
+export function errorFile(paths: BankPaths): string {
+	return join(paths.metrics, "errors.jsonl");
+}
+
+/**
+ * One line per reportable failure (R36). Returns false when the same failure was
+ * already written moments ago — never an error to the caller, because the thing
+ * being reported has already happened.
+ */
+export function appendErrorMetric(paths: BankPaths, metric: { where: string; message: string; session?: string }, clock: Clock = systemClock, dedupeMs = ERROR_DEDUPE_MS): boolean {
+	const message = metric.message.replace(/\s+/g, " ").trim().slice(0, 400);
+	const now = clock().getTime();
+	if (recentError(paths, metric.where, message, now, dedupeMs)) return false;
+	if (!existsSync(paths.metrics)) mkdirSync(paths.metrics, { recursive: true });
+	const { at, day } = stamp(clock);
+	const full: ErrorMetric = { at, day, where: metric.where, message, ...(metric.session === undefined ? {} : { session: metric.session }) };
+	writeFileSync(errorFile(paths), `${JSON.stringify(full)}\n`, { flag: "a" });
+	return true;
+}
+
+function recentError(paths: BankPaths, where: string, message: string, now: number, dedupeMs: number): boolean {
+	const text = readOrNull(errorFile(paths));
+	if (text === undefined) return false;
+	const lines = text.split("\n");
+	for (let index = lines.length - 1; index >= 0 && index >= lines.length - 50; index--) {
+		const line = lines[index]!.trim();
+		if (line === "") continue;
+		let parsed: Partial<ErrorMetric>;
+		try {
+			parsed = JSON.parse(line) as Partial<ErrorMetric>;
+		} catch {
+			continue;
+		}
+		if (parsed.where !== where || parsed.message !== message) continue;
+		const at = Date.parse(String(parsed.at ?? ""));
+		// The newest match decides: an old one outside the window means the failure is
+		// back, and that is worth a second line.
+		return Number.isFinite(at) && now - at < dedupeMs;
+	}
+	return false;
+}
+
+export function readErrorMetrics(paths: BankPaths, opts: { sinceDay?: string } = {}): ErrorMetric[] {
+	const text = readOrNull(errorFile(paths));
+	if (text === undefined) return [];
+	const out: ErrorMetric[] = [];
+	for (const line of text.split("\n")) {
+		if (line.trim() === "") continue;
+		try {
+			const parsed = JSON.parse(line) as ErrorMetric;
+			if (opts.sinceDay && parsed.day < opts.sinceDay) continue;
+			out.push(parsed);
+		} catch {
+			continue;
+		}
+	}
+	return out;
 }
 
 export function readContextMetrics(paths: BankPaths, opts: { sinceDay?: string } = {}): ContextMetric[] {
@@ -401,12 +475,6 @@ export function computeBaseline(opts: {
 	return { ok: true, baseline, filesScanned: files.length, blocksFound: blocks.length };
 }
 
-function shiftDay(day: string, delta: number): string {
-	const date = new Date(`${day}T12:00:00Z`);
-	date.setUTCDate(date.getUTCDate() + delta);
-	return date.toISOString().slice(0, 10);
-}
-
 export function writeBaseline(paths: BankPaths, baseline: Baseline): void {
 	if (!existsSync(paths.metrics)) mkdirSync(paths.metrics, { recursive: true });
 	writeJson(baselineFile(paths), baseline);
@@ -420,6 +488,8 @@ export interface TrialReport {
 	days: number;
 	/** Injected turns recorded in the window, whether or not they count as evidence. */
 	turns: number;
+	/** When the newest turn sample was taken — how old the numbers above are (F6). */
+	newestAt?: string;
 	retrievedTurns: number;
 	/** Approved claims the bank held at the last recorded turn. */
 	approvedClaims: number;
@@ -441,6 +511,12 @@ export interface TrialReport {
 	 */
 	context?: { samples: number; medianKept: number; medianDropped: number; medianBlocks: number };
 	go: boolean;
+	/**
+	 * The newest N turn samples the medians were computed from (F6). Absent means the
+	 * whole day window, which is what the go decision is about: a tail of a long trial
+	 * is a look at the numbers, not a finished trial.
+	 */
+	last?: number;
 	/**
 	 * What stops the go, one entry per unmet gate, in the order a reader would
 	 * fix them. The verdict joins them, so a gate can never be reported and then
@@ -475,17 +551,24 @@ export const MIN_RETRIEVED_TURNS = 5;
  * the window, and the gates say whether the window is evidence at all. A trial
  * that cannot say go says why, gate by gate.
  */
-export function trialReport(paths: BankPaths, opts: { today: string; days?: number }): TrialReport {
+export function trialReport(paths: BankPaths, opts: { today: string; days?: number; last?: number }): TrialReport {
 	const days = opts.days ?? TRIAL_DAYS;
+	// `--last N` narrows the *sample* streams (turns, context) to their newest rows.
+	// Flags and overrides stay on the day window: they are counts of events, not
+	// samples of a measurement, and "the last 20 turns had 2 flags" is a sentence
+	// about turns nobody asked about.
+	const last = opts.last && opts.last > 0 ? Math.floor(opts.last) : undefined;
 	const sinceDay = shiftDay(opts.today, -(days - 1));
-	const turns = readTurns(paths, { sinceDay });
+	const allTurns = readTurns(paths, { sinceDay });
+	const turns = last === undefined ? allTurns : allTurns.slice(-last);
 	const flags = readFlags(paths, { sinceDay });
 	const overrides = readOverrides(paths, { sinceDay });
 	const stale = flags.filter((flag) => flag.kind === "stale").length;
 	const rival = flags.filter((flag) => flag.kind === "rival").length;
 	const baseline = readBaseline(paths);
 	const observed = turns.filter((turn) => turn.tokens.total > 0);
-	const contextSamples = readContextMetrics(paths, { sinceDay });
+	const allContextSamples = readContextMetrics(paths, { sinceDay });
+	const contextSamples = last === undefined ? allContextSamples : allContextSamples.slice(-last);
 	const coverageGate = Math.ceil(days / 2);
 	// The clock starts at the first turn whose bank was worth measuring. A turn
 	// recorded before that is not evidence, and a run of turns recorded while the
@@ -499,6 +582,7 @@ export function trialReport(paths: BankPaths, opts: { today: string; days?: numb
 	const report: TrialReport = {
 		days,
 		turns: turns.length,
+		newestAt: turns.length === 0 ? undefined : turns[turns.length - 1]!.at,
 		retrievedTurns,
 		approvedClaims: turns.length === 0 ? 0 : turns[turns.length - 1]!.claims ?? 0,
 		clockStarted: startDay !== undefined,
@@ -521,6 +605,7 @@ export function trialReport(paths: BankPaths, opts: { today: string; days?: numb
 		go: false,
 		gates: [],
 		verdict: "",
+		last,
 		corruptTurnLines: corruptTurnLines(paths),
 	};
 	if (turns.length === 0) {
@@ -551,6 +636,11 @@ export function trialReport(paths: BankPaths, opts: { today: string; days?: numb
 		const total = report.flags.total;
 		report.gates.push(`${total} claim${total === 1 ? " was" : "s were"} flagged stale or rival`);
 	}
+	if (last !== undefined) {
+		// Stated last so the numbers above still get read: the day gates describe a
+		// window, and a tail is not one (F6).
+		report.gates.push(`this report is the newest ${last} turn sample${last === 1 ? "" : "s"}, which is a look at the tail and not a window — run /memory trial for the decision`);
+	}
 
 	const pct = report.ratio === undefined ? "" : ratioText(report.ratio);
 	if (report.gates.length === 0) {
@@ -567,7 +657,9 @@ function ratioText(ratio: number): string {
 }
 
 export function formatTrialReport(report: TrialReport): string {
-	const lines = [`Trial, last ${report.days} days: ${report.turns} injected turns, median ${report.medianTokens} tokens per turn`];
+	const lines = [report.last === undefined
+		? `Trial, last ${report.days} days: ${report.turns} injected turns, median ${report.medianTokens} tokens per turn`
+		: `Trial, newest ${report.turns} turn sample${report.turns === 1 ? "" : "s"} of the last ${report.days} days: median ${report.medianTokens} tokens per turn`];
 	if (report.baseline) lines.push(`  baseline: median ${report.baseline.medianTokens} tokens from ${report.baseline.samples} blocks marked "${report.baseline.marker}", ${report.baseline.from} to ${report.baseline.to}`);
 	else lines.push("  baseline: none recorded — /memory trial baseline computes it from session files (R47)");
 	if (report.ratio !== undefined) lines.push(`  size: ${ratioText(report.ratio)} of the baseline (the gate is ${Math.round(SIZE_RATIO_GATE * 100)}%), median ${report.medianTokens} against a ceiling of ${MAX_MEDIAN_TOKENS}`);

@@ -103,7 +103,8 @@ history/<key>.md                         superseded and rejected claims, append-
 daily/today.md, daily/archive/YYYY-MM/   the daily log; rolled over once per session
 archive/                                 read-only migrated prose and status text
 migration/state.json                     resumable migration progress, plus the verified backup
-metrics/turns.jsonl, flags.jsonl, baseline.json, overrides.jsonl   trial metrics (never any prompt text)
+metrics/turns.jsonl, flags.jsonl, baseline.json,
+        overrides.jsonl, context.jsonl, errors.jsonl                trial metrics (never any prompt text)
 config.json                              the settings below — hand-editable; the next turn reads it
 ```
 
@@ -177,6 +178,32 @@ paragraph between sections, a section the tool does not know.
   for the same reason.
 
 The rule behind both: a writer may rewrite only what it can reproduce.
+
+## When something inside it fails
+
+Nothing here is allowed to fail quietly (R51). A failure has two channels, each
+deduplicated on its own terms:
+
+- **You are told.** Every `session_start` — `new`, `resume`, `startup`, `fork`,
+  `reload` — reports what is wrong with the bank: unreadable stores, lines no
+  writer can reproduce, contested identities, half-written files, links leaving the
+  bank. One warning per distinct failure per session, in the TUI or on stderr. A
+  bank nobody can write must not wait for the one start reason that happens to look
+  for damage. The review notice still skips a resumed session; the damage does not.
+- **It is written down.** `metrics/errors.jsonl`, one line per failure: time, day,
+  `where`, `message`, `session`. The same failure inside five minutes is one line,
+  so a warning that fires every turn does not become a file nobody reads; after the
+  window it is written again, because it came back. `/memory doctor` prints the
+  last three.
+- **The channels are independent.** When the metrics directory is the thing that
+  failed, the warning still arrives — and the turn still runs: a read error means no
+  injection and one visible warning, never a lost turn (R30).
+- **`context` never breaks a call.** It sits on the path of every model call, so our
+  own pruning failing is reported and the conversation goes as it was.
+
+The pin that any of this happens lives in `tests/jiti-load.test.ts`, under Pi's real
+loader: a failure only visible under jiti is invisible to every other gate, and
+before this a broken claim store produced no output in any mode.
 
 ## One writer at a time
 
@@ -285,6 +312,15 @@ Three things that listing exists to make visible:
 - **No knob is a bare number.** Without its range, a wrong value and an unusual
   one look identical.
 
+`/memory status` gives the one-line version of the same answer (F6), because a
+block size that reads like a decision nobody made is usually a default nobody
+chose:
+
+```
+config: budget 2000 tokens (core 600, daily 500, retrieved 900), retrieved claims at most 6 per turn, pending flag after 14 days, inline conflict dialog on, ranker bm25
+source: ~/.pi/memory/config.json: 1 of 8 keys set, 7 defaults — /memory settings lists them all
+```
+
 The table and the validator read the same data (`SETTINGS` in `config.ts`), so a
 listing cannot drift from what is enforced. Nothing on screen carries a requirement
 ID: `R…` numbers belong in tests, commits and this README, and each row keeps its
@@ -323,6 +359,13 @@ The component is measured, not assumed (D6):
   nothing — the baseline is measured, never estimated.
 - `/memory preview` measures nothing. It runs the same code and writes no metric
   line, because two previews would otherwise move the median they are judging.
+- `/memory trial report [days] [--last n]` narrows the report to the newest `n` turn
+  samples. A tail is a look at the numbers, not a window: a `--last` report always
+  ends `not yet`, with that said, so a good evening cannot read as a finished trial.
+- `/memory status` carries the same numbers without the verdict — the median, the
+  newest turn, the baseline and its age, the flags, the errors recorded this week,
+  and the directory the files are in. A number you cannot trace to a file is not a
+  measurement.
 
 `/memory trial [days]` prints what it measured and every reason a `go` is not yet
 allowed, and **go needs all of them**:
@@ -425,7 +468,7 @@ glob matcher whose semantics are pinned by tests — `dot: true` (a scope must s
 
 ## Tests
 
-236 tests, one file per module (`time · grammar · scope · store · queue · gate ·
+243 tests, one file per module (`time · grammar · scope · store · queue · gate ·
 daily · rank · context · inject · notice · config · trial · migrate · index`). `index.test.ts`
 drives the real Pi surface — tool registrations, all three hooks, `/memory` — against a
 scratch bank with an injected clock and git probe, so no test touches

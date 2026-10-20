@@ -231,3 +231,18 @@ export function configTemplate(): string {
 export function describeConfig(config: MemoryConfig): string {
 	return `budget ${config.budgetTokens} tokens (core ${config.coreTokens}, daily ${config.dailyTokens}, retrieved ${config.budgetTokens - config.coreTokens - config.dailyTokens}), retrieved claims at most ${config.maxRetrievedClaims === 0 ? "unbounded" : config.maxRetrievedClaims} per turn, pending flag after ${config.pendingFlagDays} days, inline conflict dialog ${config.inlineConflictDialog ? "on" : "off"}, ranker ${config.ranker}`;
 }
+
+/**
+ * Where the values in force came from (F6). A line that reads "budget 2000 tokens"
+ * without saying so looks like a decision somebody made when it is usually the
+ * default nobody chose.
+ */
+export function describeConfigSource(result: ConfigResult, view: { file: string; present: boolean }): string {
+	if (!view.present) return `no config file at ${view.file}, so every value is a default — /memory settings lists the keys with their defaults`;
+	// A key the file named is not always a key that survived: a bad value is refused
+	// and the section interlock moves the shares. Both are named as one thing here
+	// because the reader's next step is the same — look at the table.
+	const moved = result.warnings.length > 0 ? `, ${result.warnings.length} refused or adjusted (what is in use is not what the file says)` : "";
+	const defaults = SETTINGS.length - result.explicit.length;
+	return `${view.file}: ${result.explicit.length} of ${SETTINGS.length} keys set, ${defaults} default${defaults === 1 ? "" : "s"}${moved} — /memory settings lists them all`;
+}
