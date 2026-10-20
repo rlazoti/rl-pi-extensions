@@ -203,6 +203,19 @@ test("inject: the drop notice counts by kind and names memory_search (R29)", () 
 	assert.match(result.text, new RegExp(`Not shown for the budget: ${result.dropped.rule + result.dropped.fact} claims \\(${result.dropped.rule} rules, ${result.dropped.fact} facts\\)`));
 });
 
+test("inject: a claim far behind the top hit is not injected, even with room left (R32.2, D20)", () => {
+	// `banking.wire` does contain the word "rule", so it scores above nothing. It is
+	// still 6% of the top hit, and D20 says a turn does not pay for that.
+	const claims = [
+		claim("git.flow", { body: "the branch naming rule: branches are named rl-MM-DD-topic" }),
+		claim("banking.wire", { body: "a wire transfer is a pdf form, and nobody writes this rule on it" }),
+	];
+	assert.deepEqual(inject(claims, { query: "branch naming rule" }).injected.map((entry) => entry.key), ["git.flow"]);
+	// A query that asks for both gets both: the floor is a share of the top hit, not
+	// one answer per turn.
+	assert.deepEqual(inject(claims, { query: "branch wire transfer naming" }).injected.map((entry) => entry.key).sort(), ["banking.wire", "git.flow"]);
+});
+
 test("inject: the recall cap bounds how many claims one turn gets, whatever the budget leaves (R27.4)", () => {
 	const claims: Claim[] = [];
 	for (let i = 0; i < 12; i++) claims.push(claim(`git.t${i}`, { body: `git flow rule number ${i}` }));

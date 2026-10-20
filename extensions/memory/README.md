@@ -129,6 +129,17 @@ split, and if anything is dropped the block ends with how many, of which kind,
 which limit stopped them, and to use `memory_search`. A read error **fails open**:
 no injection, one visible warning, the turn proceeds.
 
+**What a match is** (R32.1, R32.2). The ranker compares *terms*: English function
+words ("is", "the", "what", "do") are dropped from the prompt and from the claims,
+and one word's inflections are folded together, so "branch" finds a claim that
+says "Branches" and "wire transfers" finds one that says "wire transfer". Before
+this, "what is the branch naming rule" was a query about "is", and it ranked a
+wire-transfer fact above the branch rule. A prompt made only of small talk
+("yes", "ok do it") has no term left and recalls nothing — which is right: it asks
+for nothing. A claim also has to come within **25% of the best hit** to be
+injected, so the weak tail stays out of the block; `memory_search` keeps showing
+it, because there you asked for it and it costs no budget.
+
 `/memory preview [prompt]` prints the exact block a turn would get, with tokens
 per section and what was dropped.
 

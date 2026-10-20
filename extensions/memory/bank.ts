@@ -496,7 +496,12 @@ export class Bank {
 		}
 
 		const byRank = new Map(documents.map((document) => [document.rank, document]));
-		const scored = bm25(query, documents.map((document) => document.rank));
+		// No score floor here (R32.2). The floor exists because injection spends a
+		// budget on claims that only just matched; a search is the human asking, the
+		// results are labelled with where they came from, and the count is already
+		// bounded by `searchLimit`. A claim matching one of two query words is a
+		// candidate here, and is not a claim injected into a turn.
+		const scored = bm25(query, documents.map((document) => document.rank), { minShare: 0 });
 		const hits: SearchHit[] = scored.slice(0, take).flatMap((hit) => {
 			const document = byRank.get(hit.entry);
 			return document === undefined ? [] : [{ origin: document.origin, label: document.label, text: document.text, score: hit.score }];

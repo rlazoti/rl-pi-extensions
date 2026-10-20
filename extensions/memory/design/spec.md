@@ -113,6 +113,17 @@ in its constraints) and Pi's extension API docs (`session_start` and `before_age
 - R32. The default ranker is BM25 over key, aliases, tags and body. Rankers implement
   `rank(query, entries) → scored[]`. This spec builds no semantic ranker. The interface is the only
   hook for one.
+  - R32.1. A ranker compares **terms**, never words as typed (D20). An English stopword list is
+    dropped from the query and from the claims, and inflections are folded (plural `-s`/`-es`,
+    `-ies`, `-ing`, `-ed`, doubled final consonant, a silent final `e`). A query left with no term
+    after that retrieves nothing: "yes" asks for nothing, so it recalls nothing. Left unsaid, this
+    is what the bank is ranked by — "what is the branch naming rule" is a query about "is", and a
+    claim about wire transfers answers it.
+  - R32.2. A claim is a **hit** when it scores at least `MIN_SCORE_SHARE` (25%) of the best hit
+    (D20). A share, never an absolute score: BM25 scores scale with the size of the bank, so a fixed
+    number rots as the bank grows, and one hit on its own always survives. Automatic recall applies
+    it, because a turn pays tokens for what it is given. `memory_search` does not (R33): the human
+    asked, the count is bounded, and a claim matching one of two words is a candidate there.
 - R33. `memory_search` covers approved claims, pending claims (including migration backlog),
   history, the daily-log archive and the migration archive, with each result labelled by origin.
   History and archives are never injected (D12). `memory_read` can open them by path.
@@ -259,6 +270,10 @@ flowchart LR
 - **Eligibility (R28):** a table covering each row, including pending-over-approved (approved only),
   new-key agent pending (labelled, ranked below), new-key pending older than 14 days (excluded),
   and migration pending (excluded).
+- **Retrieval (R32):** the probe table — a query and the keys it must return, in order — with chat
+  queries ("yes", "ok do it") returning nothing; word families folding onto one term while "status",
+  "alias" and "class" keep theirs; the stopword list checked for holes in the words a prompt really
+  says; and the score floor holding at a share of the top hit, with a lone weak hit surviving.
 - **Notice:** counts per category; nothing shown when empty; never blocks; non-TUI path logs once.
 - **Gate:** a table of status and non-status bodies; source/links exemption; override path;
   supersession-prose refusal.
@@ -333,3 +348,4 @@ flowchart LR
 | D17 | Review surface | A custom card, not `ui.select`: the claim's own words and its rival are on screen, and the whole batch is one dialog. | R18.1, R18.2 |
 | D18 | Recall size | Retrieved claims are capped per turn (default 6), not bounded by tokens alone: with the bank at 54 approved claims every prompt spent the whole 2000-token budget, so the trial's go bar (25% of an 880-token baseline) was unreachable by construction. | R27.4, R45 |
 | D19 | Settings surface | A text listing (`/memory settings`) plus live reload of a hand-edited config, now. The TUI editor waits until the trial has a week of measurements, because the panel's value is showing a knob beside the effect it has, and that effect is not measured yet. | R48, R49 |
+| D20 | What counts as a retrieved claim | Stopwords dropped from query and claims, light suffix folding, and a hit must score at least 25% of the top hit (a share, not an absolute score, and not applied to `memory_search`). Chosen over "any non-stopword match" and an absolute floor after measuring 12 queries against a 20-claim bank: every second-place claim a reader wanted scored 25% or more, the noise sat between 14% and 23%, and a 40% floor dropped a claim that was the right answer. | R32.1, R32.2, R33 |
