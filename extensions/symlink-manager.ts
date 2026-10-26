@@ -134,6 +134,12 @@ export function getAvailableExtensions(monorepoRoot: string): ExtensionDescripto
 			description: "Entry-keyed memory bank: one authority per claim, rival claims refused, working state injected",
 			path: join(monorepoRoot, "extensions", "memory"),
 		},
+		{
+			name: "co-authored-by-ai",
+			label: "co-authored-by-ai",
+			description: "Add a Co-authored-by: AI (Pi/<model>) trailer to commits Pi creates",
+			path: join(monorepoRoot, "extensions", "co-authored-by-ai"),
+		},
 	];
 }
 

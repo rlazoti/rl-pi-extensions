@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **co-authored-by-ai**: attributes the commits Pi creates. A `tool_call` hook appends `--trailer "Co-authored-by: AI (Pi/<model>) <noreply@pi.dev>"` to `git commit` commands before they run, so the model that made the commit is named in git history and human commits stay unattributed by construction (the hook only ever sees the agent's own tool calls). Ported from a standalone extension, with the shell-aware core kept intact because that is where the bugs were: appending the flag to the end of the string lands it on the wrong command in `git commit … | tail -5` and on the `rm` of a newline-separated cleanup, slices `git commit -m "fix; thing"` in half, and matches the `git commit` inside `node -e 'const c = "git commit"'`. **Graphite (`gt cc -m "…"`) support was dropped**, and with it the only path that rewrote a commit message rather than appending a flag — that rewriting is how a message containing `$&` got expanded by `String.replace` (reproduced: `-m "cost $& here"` came back with the whole command spliced into its own argument) and how `-am "msg"` silently received no trailer. `gt` is not installed here. **`git commit --amend --no-edit` is no longer skipped** — the skip assumed there was no message to attach to, but there is the reused one, and git's `addIfDifferent` default means re-running the injection never stacks a second trailer (measured on git 2.56.0: three amends, one trailer). Skipping only dropped attribution from the commit-then-amend flow. 48 tests: the trailer contract, the quote-aware splitter/matcher with all four regressions, the handler's skip rules through a fake Pi, and five that **run real git** in a temp repo — the patched string is handed to `bash` and the recorded message read back, because this extension produces a command, not a string (trailer exactly once, a message full of `; && || |` surviving intact, three amends still one trailer, the post-commit cleanup still running). Requires git ≥ 2.32 for `--trailer`; `git -C <dir> commit` and other global-option forms deliberately do not match (documented limit, not an oversight).
+
+### Changed
+
+- **deps**: pinned `@earendil-works/*` devDependencies to `1.4.0` to match the running Pi install. `tests/test-harness.test.ts` had caught the drift — `npm run typecheck` was checking the extensions against a 1.3.0 API while they execute against 1.4.0 — and said so in the only way that works: `1.3.0 !== 1.4.0`, with instructions.
+
 ## [1.5.0] - 2026-10-16
 
 ### Added

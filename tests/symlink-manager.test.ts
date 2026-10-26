@@ -115,12 +115,12 @@ function makeExt(srcDir: string, name: string): string {
 
 // --- Registry & path derivation ---
 
-test("getAvailableExtensions returns the 6 managed extensions under the given root", () => {
+test("getAvailableExtensions returns the 7 managed extensions under the given root", () => {
 	const exts = getAvailableExtensions("/fake/path");
-	assert.equal(exts.length, 6);
+	assert.equal(exts.length, 7);
 	assert.deepEqual(
 		exts.map((e) => e.name),
-		["tmux-feedback", "session-banner", "session-attention", "snippets", "emacs-feedback", "memory"],
+		["tmux-feedback", "session-banner", "session-attention", "snippets", "emacs-feedback", "memory", "co-authored-by-ai"],
 	);
 	assert.equal(exts[0].description, "Inline feedback for tmux scrollback selection");
 	assert.equal(exts[1].description, "Colored banner + auto-naming for Pi sessions");
@@ -130,6 +130,9 @@ test("getAvailableExtensions returns the 6 managed extensions under the given ro
 	// The description is what the picker shows before someone enables a live
 	// component: it says what the thing does, not where its migration is up to.
 	assert.match(exts[5].description, /one authority per claim/);
+	// Says what the patch does to the command, because that is the part a reader
+	// has to trust before enabling something that rewrites their git invocations.
+	assert.match(exts[6].description, /Co-authored-by: AI/);
 	for (const ext of exts) {
 		assert.equal(resolve(ext.path), resolve("/fake/path", "extensions", ext.name));
 	}

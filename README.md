@@ -12,6 +12,7 @@ Personal Pi coding agent extensions, managed as a single package with a TUI for 
 | **snippets** | Insert predefined text snippets into the prompt |
 | **emacs-feedback** | Source-region and Magit diff-line feedback from Emacs |
 | **memory** | Entry-keyed knowledge store: one authority per claim per context, rival claims refused until you decide. Also injects the day's open work, and `memory_read` / `memory_list` reach every file in the bank. Spec in `extensions/memory/README.md` |
+| **co-authored-by-ai** | Adds a `Co-authored-by: AI (Pi/<model>)` trailer to the commits Pi creates, by patching `git commit` before it runs |
 
 ## Usage
 
@@ -100,6 +101,12 @@ rl-pi-extensions/
 │   │   └── emacs/
 │   │       ├── pi-feedback.el      # Emacs client (source-region feedback)
 │   │       └── pi-feedback-test.el # Emacs ERT tests
+│   ├── memory/
+│   │   ├── index.ts                # Extension entry point
+│   │   └── ...                     # schema/resolver/gate/inject/rollover (see its README)
+│   ├── co-authored-by-ai/
+│   │   ├── index.ts                # Extension entry point
+│   │   └── implementation.ts       # tool_call hook + the shell-aware patching
 │   └── rl-extensions/
 │       ├── index.ts                # TUI extension manager
 │       └── picker.ts               # Picker overlay
