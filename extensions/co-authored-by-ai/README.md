@@ -63,6 +63,14 @@ whatever model they actually used.
 
 ## Limits, stated
 
+- **`--trailer` turns "no message at all" into a commit.** `git commit -F -`
+  fed an empty stdin aborts with `Aborting commit due to empty commit message`
+  and exit 1 — a loud authoring mistake. With the trailer appended, the trailer
+  *is* the message: git exits 0 and records a commit whose entire message is
+  `Co-authored-by: …`. This is not hypothetical; it happened on the extension's
+  first day of use, to a mistyped here-document. The hook cannot see stdin, so
+  no guard is possible — the asymmetry is pinned by a test and stated here
+  instead.
 - **`git commit` only, written that way.** `git -c user.name=x commit …`,
   `git --git-dir=… commit …` and any other global option between `git` and
   `commit` do not match, and neither does a commit inside `$(…)` or a backtick.
@@ -103,13 +111,14 @@ AI trailer, and re-running the injection never stacks a second copy.
 
 `npm test` runs `implementation.test.ts`: the trailer contract, the quote-aware
 splitter and matcher (including the four regressions above), the handler's skip
-rules through a fake Pi, and **five tests that run real git** in a temp repo —
+rules through a fake Pi, and **six tests that run real git** in a temp repo —
 the patched command string is handed to `bash`, then the recorded commit message
 is read back with `git log --format=%B`. The extension produces a command, so
 that is what gets tested, not the string it built. Those tests verify the trailer
 appears exactly once, that a message full of `; && || |` survives intact, that
-three amends still leave one trailer, and that a newline-separated cleanup after
-the commit still runs.
+three amends still leave one trailer, that a newline-separated cleanup after the
+commit still runs, and — the one that earned its place by happening in real use —
+that an empty message fails loudly without the flag and silently succeeds with it.
 
 ## License
 

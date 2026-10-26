@@ -517,6 +517,30 @@ describe("real git runs the patched command", { skip: git ? false : "git is not 
 		assert.ok(message.includes(TRAILER), message);
 		assert.equal(trailerCount(message), 1);
 	});
+
+	it("rescues a commit that had no message at all, which is how a typo becomes a commit", () => {
+		// Measured, not hypothetical: this extension shipped into a live session
+		// where `git commit -F - <<'EOF'` was typed with no here-document body.
+		// Unpatched, git aborts an empty message with exit 1 and the author sees
+		// the mistake. Patched, the trailer *is* a message: git exits 0 and the
+		// entire commit message is the trailer line. Stdin is not visible to a
+		// tool_call hook, so nothing here can detect it at patch time — hence a
+		// test that pins the asymmetry instead of a guard that cannot exist.
+		const empty = `printf '' | `;
+		const failing = makeRepo();
+		repoDirs.push(failing);
+		assert.throws(
+			() => runIn(failing, `${empty}git commit -q -F -`),
+			(err: unknown) => (err as { status?: number }).status === 1,
+			"an empty message must fail loudly when the extension is not involved",
+		);
+		assert.throws(() => commitMessage(failing), "and it really did not commit");
+
+		const rescued = makeRepo();
+		repoDirs.push(rescued);
+		runIn(rescued, empty + injectGitTrailer("git commit -q -F -", TRAILER));
+		assert.equal(commitMessage(rescued).trim(), TRAILER, "the trailer became the whole message");
+	});
 });
 
 after(() => {
