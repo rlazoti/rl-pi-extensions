@@ -19,7 +19,8 @@ Hooks `tool_call`, looks at `bash` commands before they run, and appends
 `--trailer "…"` to the ones that are `git commit`. It patches the command the
 agent is about to run — it never runs anything itself, and it cannot see a
 commit you make in another terminal, so human commits stay unattributed by
-construction.
+construction. A second hook, `tool_result`, exists only to undo the damage the
+flag does to empty messages ([see below](#the-empty-message-hazard-why-there-are-two-hooks)).
 
 | Command | Becomes |
 |---|---|
@@ -29,6 +30,7 @@ construction.
 | `git commit -m "a; b && c \|\| d \| e"` | trailer appended; the message keeps every one of those characters |
 | `git commit -m "x" --trailer "Co-authored-by: Human"` | untouched |
 | `echo "git commit -m x"`, `node -e '…git commit…'` | untouched — the match has to be outside the quotes |
+| `git commit -m ""` | **untouched on purpose** — see [the empty-message hazard](#the-empty-message-hazard-why-there-are-two-hooks) |
 
 The trailer is **git's own `--trailer` flag**, so git parses it, git places it,
 and git deduplicates it: amending the same commit three times leaves exactly one
@@ -37,6 +39,42 @@ Existing trailers in the message are appended to, never replaced.
 
 `--trailer` needs git ≥ 2.32 (May 2021). On older git the commit still happens
 and git reports the unknown option — the extension does not detect the version.
+
+## The empty-message hazard (why there are two hooks)
+
+`--trailer` is message content. That means it also defeats the check git runs
+for free: an empty message no longer fails. Measured on git 2.56.0, with and
+without the flag this extension adds:
+
+| message source | without `--trailer` | with `--trailer` |
+|---|---|---|
+| `-m ""` | `Aborting commit due to empty commit message`, exit 1 | committed, message **is** the trailer |
+| `-m "   "` | exit 1 | committed, trailer only |
+| `-m "$MSG"` with `$MSG` empty | exit 1 | committed, trailer only |
+| `-F -` with empty stdin | exit 1 | committed, trailer only |
+
+Silently turning "loud authoring mistake" into "a commit whose whole message is
+attribution" is not an acceptable trade, and it is not hypothetical: this is
+what the first release commit of this extension looked like (subject line = the
+trailer, body = nothing), after a mistyped here-document. So:
+
+1. **`tool_call` refuses to patch what it can see is empty** — a commit whose
+   only message is a blank literal (`-m ""`, `-m ''`, `-m "   "`, `--message ""`)
+   is left exactly as the agent wrote it, git rejects it, and the failure stays
+   where it belongs. A warning says why nothing was added.
+2. **`tool_result` checks the commit it caused** — for `-m "$MSG"`, `-F -`, or
+   anything else whose emptiness is invisible before execution, HEAD is recorded
+   before the command runs and read back after: same sha means no commit
+   happened, and a message that is nothing but this extension's trailer means
+   the author's message was empty. The warning then goes to **both** audiences:
+   appended to the tool result, so the agent reads it in the result it is about
+   to act on and can `git commit --amend`, and `notify(…, "error")` for the
+   human.
+
+Only commits **this hook patched** are ever inspected, by tool call id; git is
+never run for anyone else's call, and if `git log` fails or exec throws, the
+hook says nothing rather than guessing. A commit whose message is fine produces
+no output of any kind from the second hook.
 
 ## Requirements
 
@@ -63,14 +101,13 @@ whatever model they actually used.
 
 ## Limits, stated
 
-- **`--trailer` turns "no message at all" into a commit.** `git commit -F -`
-  fed an empty stdin aborts with `Aborting commit due to empty commit message`
-  and exit 1 — a loud authoring mistake. With the trailer appended, the trailer
-  *is* the message: git exits 0 and records a commit whose entire message is
-  `Co-authored-by: …`. This is not hypothetical; it happened on the extension's
-  first day of use, to a mistyped here-document. The hook cannot see stdin, so
-  no guard is possible — the asymmetry is pinned by a test and stated here
-  instead.
+- **An empty message is caught after the commit, not before, when nothing can
+  see it coming.** `-m "$MSG"` and `-F -` are patchable and `$MSG` may be empty
+  by the time git runs; the trailer then lets the commit through (see
+  [the hazard](#the-empty-message-hazard-why-there-are-two-hooks)). Detection is
+  immediate and loud, but the commit does exist until someone amends it — by
+  then it is one `git commit --amend -m "…"` away, usually done by the agent that
+  read the warning.
 - **`git commit` only, written that way.** `git -c user.name=x commit …`,
   `git --git-dir=… commit …` and any other global option between `git` and
   `commit` do not match, and neither does a commit inside `$(…)` or a backtick.
@@ -109,16 +146,28 @@ AI trailer, and re-running the injection never stacks a second copy.
 
 ## Testing
 
-`npm test` runs `implementation.test.ts`: the trailer contract, the quote-aware
-splitter and matcher (including the four regressions above), the handler's skip
-rules through a fake Pi, and **six tests that run real git** in a temp repo —
-the patched command string is handed to `bash`, then the recorded commit message
-is read back with `git log --format=%B`. The extension produces a command, so
-that is what gets tested, not the string it built. Those tests verify the trailer
-appears exactly once, that a message full of `; && || |` survives intact, that
-three amends still leave one trailer, that a newline-separated cleanup after the
-commit still runs, and — the one that earned its place by happening in real use —
-that an empty message fails loudly without the flag and silently succeeds with it.
+Two colocated files, 69 tests.
+
+`implementation.test.ts` (51) is the machinery: the trailer contract, the
+quote-aware splitter and matcher (including the four append-to-the-wrong-place
+regressions), `hasOnlyEmptyMessageLiteral`, `messageIsOnlyTrailer`, and **seven
+tests that run real git** in a temp repo — the patched command string is handed
+to `bash`, then the recorded commit message is read back with
+`git log --format=%B`. The extension produces a command, so that is what gets
+tested, not the string it built. Those seven verify the trailer appears exactly
+once, that a message full of `; && || |` survives intact, that three amends still
+leave one trailer, that a newline-separated cleanup after the commit still runs,
+that a human trailer is appended to, and that the four empty-message shapes in
+the table above really do commit once `--trailer` is present — the hazard is
+pinned against git itself, not against this file's opinion of it.
+
+`hooks.test.ts` (18) drives the extension through its own registration surface
+with a fake Pi, because the interesting behaviour is a sequence: patch or refuse
+at `tool_call`, report or stay silent at `tool_result`. It pins the refusal list,
+the flags that mean "unknown, do not refuse", the warning reaching both the
+tool result and the notification, silence when the message is fine, when nothing
+was committed, when the call was not ours, and when git cannot answer, and that
+the bookkeeping stays bounded when tool calls are abandoned.
 
 ## License
 

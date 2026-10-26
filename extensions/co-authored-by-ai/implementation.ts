@@ -23,6 +23,20 @@
  *    trailer (interpret-trailer's default is `addIfDifferent`). Skipping it
  *    instead dropped attribution from the common commit-then-amend flow.
  *    Pinned by the real-git tests at the bottom of `implementation.test.ts`.
+ *
+ * The flag also weakens a check git offers for free, which the two hooks here
+ * exist to put back. `--trailer` *is* message content, so an empty message no
+ * longer fails: measured on git 2.56.0, `-m ""`, `-m "   "`, `-m "$UNSET"` and
+ * `-F -` with empty stdin all commit successfully with the trailer as the
+ * entire message, where unpatched each one exits 1 with "Aborting commit due to
+ * empty commit message". So:
+ *
+ *  - `hasOnlyEmptyMessageLiteral` refuses to patch a commit whose only message
+ *    is a blank literal, leaving git's own failure intact and loud.
+ *  - For the emptiness no tool call can see (`-m "$VAR"`, stdin), a
+ *    `tool_result` hook reads HEAD back for the commits *this* hook patched and,
+ *    when the message is nothing but our trailer, tells the agent in the result
+ *    it is about to read and the human by notification.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -31,6 +45,19 @@ import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 const GIT_COMMIT_RE = /\bgit\s+commit\b/;
 
 const FALLBACK_TRAILER = "Co-authored-by: AI (Pi) <noreply@pi.dev>";
+
+/**
+ * A `-m`/`--message` whose value is a quoted literal, attached (`-m"…"`) or
+ * spaced (`-m "…"`). Only matches a leading `-m`, never a `-am` cluster, so an
+ * unparseable cluster is treated as unknown rather than as an empty message.
+ */
+const MESSAGE_LITERAL_RE = /(?:^|\s)(?:-m|--message)\s*("(?:[^"\\]|\\.)*"|'[^']*')/g;
+
+/** Flags that supply a message beside `-m`, so an empty `-m` is not the whole story. */
+const OTHER_MESSAGE_SOURCE_RE = /(?:^|\s)(?:-F|--file|-C|-c|--reuse-message|--reedit-message|--fixup|--squash|--template)(?:\s|=|$)/;
+
+/** Matches any trailer this extension could have written, whatever model it named. */
+const OUR_TRAILER_RE = /^\s*co-authored-by:\s*ai\s*\(pi(?:\/[^)]*)?\)\s*<noreply@pi\.dev>\s*$/i;
 
 /**
  * Build a Co-authored-by trailer.
@@ -47,7 +74,15 @@ export function buildTrailer(model?: { name: string; provider: string }): string
 }
 
 export default function (pi: ExtensionAPI) {
-	pi.on("tool_call", (event, ctx: ExtensionContext) => {
+	/**
+	 * Commits this extension patched, keyed by tool call id. The after-the-fact
+	 * check only ever looks at HEAD for one of these, and a result for any other
+	 * call is ignored — that is what keeps it from warning about a commit some
+	 * other command made.
+	 */
+	const patched = new Map<string, { cwd: string; headBefore: string | null }>();
+
+	pi.on("tool_call", async (event, ctx: ExtensionContext) => {
 		if (!isToolCallEventType("bash", event)) return;
 
 		const cmd = event.input.command;
@@ -55,9 +90,123 @@ export default function (pi: ExtensionAPI) {
 		if (hasCoAuthoredBy(cmd)) return;
 		if (!containsUnquoted(cmd, GIT_COMMIT_RE)) return;
 
+		// Refusing here is the cheap half of the fix. `--trailer` makes an empty
+		// message commit (see `hasOnlyEmptyMessageLiteral`), so patching such a
+		// command would trade git's loud "empty commit message" failure for a
+		// quiet commit whose entire message is attribution. Left unpatched, git
+		// rejects it exactly as it would have without this extension.
+		if (hasOnlyEmptyMessageLiteral(cmd)) {
+			ctx.ui.notify(
+				"co-authored-by-ai: left this git commit unpatched — its -m message is empty, and --trailer would have made git accept an empty message",
+				"warning",
+			);
+			return;
+		}
+
 		const trailer = buildTrailer(ctx.model ? { name: ctx.model.name, provider: ctx.model.provider } : undefined);
-		event.input.command = injectGitTrailer(cmd, trailer);
+		const patchedCmd = injectGitTrailer(cmd, trailer);
+		if (patchedCmd === cmd) return; // matched the regex but no segment was patchable
+
+		event.input.command = patchedCmd;
+
+		// Remember HEAD as it stands now, so the after-the-fact check reads the
+		// message of the commit this command made and not some older one.
+		let headBefore: string | null = null;
+		try {
+			const head = await pi.exec("git", ["rev-parse", "--verify", "--quiet", "HEAD"], { cwd: ctx.cwd, timeout: 2_000 });
+			if (head.code === 0 && head.stdout.trim()) headBefore = head.stdout.trim();
+		} catch {
+			headBefore = null; // no exec, no baseline: the check degrades to "is this trailer-only commit new?"
+		}
+
+		// Aborted calls never reach tool_result; keep the map from growing forever.
+		if (patched.size >= 32) patched.delete(patched.keys().next().value as string);
+		patched.set(event.toolCallId, { cwd: ctx.cwd, headBefore });
 	});
+
+	pi.on("tool_result", async (event, ctx: ExtensionContext) => {
+		const mine = patched.get(event.toolCallId);
+		if (!mine) return; // not a commit this extension patched
+		patched.delete(event.toolCallId);
+		if (event.isError) return; // git refused the command: nothing was committed
+
+		const EMPTY_MESSAGE_WARNING =
+			"co-authored-by-ai: this commit's message is nothing but the Co-authored-by trailer. " +
+			"The command supplied an empty message, which git would have rejected — it accepted it because this extension adds --trailer. " +
+			'Repair with: git commit --amend -m "<subject>"';
+
+		let out;
+		try {
+			out = await pi.exec("git", ["log", "-1", "--format=%H%n%B"], { cwd: mine.cwd, timeout: 2_000 });
+		} catch {
+			return; // no git, no answer: say nothing rather than warn on a guess
+		}
+		if (out.code !== 0) return;
+
+		const newline = out.stdout.indexOf("\n");
+		if (newline < 0) return;
+		const headNow = out.stdout.slice(0, newline).trim();
+		const body = out.stdout.slice(newline + 1);
+		if (mine.headBefore !== null && headNow === mine.headBefore) return; // no new commit happened
+		if (!messageIsOnlyTrailer(body)) return;
+
+		// Both audiences: the human sees the notification, and the agent that
+		// made the commit reads the warning in the very result it is about to act on.
+		ctx.ui.notify(EMPTY_MESSAGE_WARNING, "error");
+		return {
+			content: [...event.content, { type: "text" as const, text: EMPTY_MESSAGE_WARNING }],
+			structuredContent: event.structuredContent,
+		};
+	});
+}
+
+/**
+ * True when the command supplies a message only through `-m`/`--message` and
+ * every one of those literals is blank — `-m ""`, `-m ''`, `-m "   "`.
+ *
+ * This exists because `git commit --trailer` turns an empty message into a
+ * commit whose whole message is the trailer, killing the "Aborting commit due
+ * to empty commit message" exit 1 that git otherwise raises. Measured on git
+ * 2.56.0, all four empty-message shapes are affected: `-m ""`, `-m "   "`,
+ * `-m "$UNSET"`, and `-F -` with empty stdin. The statically visible ones are
+ * caught here; the dynamic two cannot be seen from a tool call and are caught
+ * afterwards instead.
+ *
+ * Returns false — "unknown", do not refuse — when there is no literal to read
+ * (`-F -`, `-F file`, `--amend --no-edit`, an editor, `-m "$VAR"`, `-m $'…'`)
+ * or when another message source is present alongside an empty literal.
+ */
+export function hasOnlyEmptyMessageLiteral(cmd: string): boolean {
+	for (const segment of segmentList(cmd)) {
+		const matched = GIT_COMMIT_RE.exec(segment);
+		if (!matched) continue;
+		// Only what follows `git commit` counts: `-c` before it is a config option
+		// (`git -c user.name=x commit`), after it means "reedit this commit's
+		// message", which is a message source like -F.
+		const after = segment.slice(matched.index + matched[0].length);
+		if (OTHER_MESSAGE_SOURCE_RE.test(after)) return false;
+		const literals = [...after.matchAll(MESSAGE_LITERAL_RE)];
+		if (literals.length > 0 && literals.every((m) => (m[1] ?? "").slice(1, -1).trim() === "")) return true;
+	}
+	return false;
+}
+
+/**
+ * The command's segments that bash would run — the even indices of the
+ * quote-aware `splitShellCommand` array, which puts separators between them.
+ */
+function segmentList(cmd: string): string[] {
+	return splitShellCommand(cmd).filter((_, index) => index % 2 === 0);
+}
+
+/**
+ * True when a commit message carries no content beyond this extension's own
+ * trailer — the shape that means the author's message was empty.
+ */
+export function messageIsOnlyTrailer(message: string): boolean {
+	return message
+		.split(/\n/)
+		.every((line) => line.trim() === "" || OUR_TRAILER_RE.test(line));
 }
 
 /**

@@ -4,17 +4,18 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import coAuthoredByAi, {
+import {
 	buildTrailer,
 	containsUnquoted,
 	hasCoAuthoredBy,
+	hasOnlyEmptyMessageLiteral,
 	injectGitTrailer,
+	messageIsOnlyTrailer,
 	splitShellCommand,
 } from "./implementation.ts";
 
 const TEST_MODEL = { name: "Claude Sonnet 4", provider: "anthropic" };
 const TRAILER = buildTrailer(TEST_MODEL);
-const FALLBACK_TRAILER = buildTrailer();
 
 // =============================================================================
 // buildTrailer
@@ -322,98 +323,82 @@ describe("injectGitTrailer", () => {
 });
 
 // =============================================================================
-// tool_call handler
+// hasOnlyEmptyMessageLiteral — the check that keeps git's own failure loud
 // =============================================================================
 
-type ToolCallHandler = (event: { toolName: string; input: Record<string, unknown> }, ctx: unknown) => void;
-
-function fakePi(): { handlers: Map<string, ToolCallHandler>; model: unknown } {
-	const handlers = new Map<string, ToolCallHandler>();
-	const pi = {
-		on(name: string, handler: ToolCallHandler) {
-			handlers.set(name, handler);
-		},
-	};
-	coAuthoredByAi(pi as never);
-	return { handlers, model: undefined };
-}
-
-function runHandler(command: string | undefined, model: unknown): string | undefined {
-	const { handlers } = fakePi();
-	const handler = handlers.get("tool_call");
-	assert.ok(handler, "the extension registers a tool_call handler");
-	const event = { type: "tool_call", toolCallId: "call-1", toolName: "bash", input: { command } };
-	handler(event as never, { model });
-	return event.input.command as string | undefined;
-}
-
-describe("tool_call handler", () => {
-	it("registers a tool_call listener", () => {
-		assert.ok(fakePi().handlers.has("tool_call"));
-	});
-
-	it("leaves commands it is not about", () => {
-		for (const command of [
-			"",
-			undefined,
-			"git push origin main",
-			"git status",
-			"git add -A && git push",
-			'echo "commit this" && git log',
+describe("hasOnlyEmptyMessageLiteral", () => {
+	it("is true when the only message is a blank literal", () => {
+		for (const cmd of [
+			'git commit -m ""',
+			"git commit -m ''",
+			'git commit -m "   "',
+			'git commit -m "\n\n"',
+			'git commit --message ""',
+			'git commit -q -m ""',
+			'git commit -m "" -m ""',
+			'git commit --amend -m ""',
+			'git add -A && git commit -m ""',
 		]) {
-			assert.equal(runHandler(command, TEST_MODEL), command);
+			assert.equal(hasOnlyEmptyMessageLiteral(cmd), true, cmd);
 		}
 	});
 
-	it("ignores non-bash tool calls that mention a command", () => {
-		const { handlers } = fakePi();
-		const handler = handlers.get("tool_call")!;
-		const event = { type: "tool_call", toolCallId: "c", toolName: "read", input: { command: 'git commit -m "x"' } };
-		handler(event as never, { model: TEST_MODEL });
-		assert.equal(event.input.command, 'git commit -m "x"');
-	});
-
-	it("never touches a command that already has a Co-authored-by trailer", () => {
-		for (const command of [
-			`git commit -m "x" --trailer "${TRAILER}"`,
-			'git commit -m "x" --trailer "Co-authored-by: AI"',
-			'git commit -m "fix\\n\\nCO-AUTHORED-BY: someone"',
-			'git commit -m "fix\\n\\nCo-Authored-By: someone <noreply@test.com>"',
-		]) {
-			assert.equal(runHandler(command, TEST_MODEL), command);
+	it("is false when any message literal carries content", () => {
+		for (const cmd of ['git commit -m "subject"', 'git commit -m "" -m "body"', 'git commit -m "a" -m "b"']) {
+			assert.equal(hasOnlyEmptyMessageLiteral(cmd), false, cmd);
 		}
 	});
 
-	it("names the model that made the commit, or just Pi", () => {
-		assert.equal(
-			runHandler('git commit -m "hello"', TEST_MODEL),
-			`git commit -m "hello" --trailer "${TRAILER}"`,
-		);
-		assert.equal(
-			runHandler('git commit -m "hello"', undefined),
-			`git commit -m "hello" --trailer "${FALLBACK_TRAILER}"`,
-		);
-	});
-
-	it("injects into an amend of any shape, including --amend --no-edit", () => {
-		for (const command of [
-			'git commit --amend -m "fix"',
+	it("is false when the message is not a literal it can read", () => {
+		// "unknown" means do not refuse: patching proceeds and tool_result checks.
+		for (const cmd of [
+			'git commit -m "$MSG"',
+			"git commit -m $'subject'",
+			"git commit -F -",
+			"git commit -F msg.txt",
 			"git commit --amend --no-edit",
-			"git commit -q --amend --no-edit",
+			"git commit",
+			'git commit -m "x" && git push',
 		]) {
-			assert.match(runHandler(command, TEST_MODEL) ?? "", /--trailer "/);
+			assert.equal(hasOnlyEmptyMessageLiteral(cmd), false, cmd);
 		}
 	});
 
-	it("keeps quoted punctuation and newline cleanup intact while injecting", () => {
-		assert.equal(
-			runHandler('git commit -m "fix bug; clean up comment"', TEST_MODEL),
-			`git commit -m "fix bug; clean up comment" --trailer "${TRAILER}"`,
-		);
-		assert.equal(
-			runHandler("git commit -F /tmp/msg.txt\nrm /tmp/msg.txt", TEST_MODEL),
-			`git commit -F /tmp/msg.txt --trailer "${TRAILER}"\nrm /tmp/msg.txt`,
-		);
+	it("is false when another message source accompanies the blank literal", () => {
+		for (const cmd of ['git commit -F - -m ""', 'git commit -c HEAD~1 -m ""', 'git commit --reuse-message=HEAD~1 -m ""']) {
+			assert.equal(hasOnlyEmptyMessageLiteral(cmd), false, cmd);
+		}
+	});
+
+	it("reads flags after `git commit`, not the config options before it", () => {
+		// -c before commit is configuration; after it, "reedit this message".
+		assert.equal(hasOnlyEmptyMessageLiteral('git commit -c HEAD~1 -m ""'), false);
+		// And a -m belonging to another command in the chain is not this commit's.
+		assert.equal(hasOnlyEmptyMessageLiteral('git commit -m "" && echo -m "unrelated"'), true);
+	});
+
+	it("does not mistake a -m inside a quoted argument for a message flag", () => {
+		assert.equal(hasOnlyEmptyMessageLiteral('echo "git commit -m \\"\\""'), false);
+	});
+});
+
+// =============================================================================
+// messageIsOnlyTrailer — the shape that means the author's message was empty
+// =============================================================================
+
+describe("messageIsOnlyTrailer", () => {
+	it("is true when nothing but the trailer remains", () => {
+		assert.equal(messageIsOnlyTrailer(`${TRAILER}\n`), true);
+		assert.equal(messageIsOnlyTrailer(`\n\n${TRAILER}\n\n`), true);
+		assert.equal(messageIsOnlyTrailer("Co-authored-by: AI (Pi) <noreply@pi.dev>\n"), true);
+		assert.equal(messageIsOnlyTrailer(""), true, "an empty message is not a message");
+	});
+
+	it("is false once any content is there", () => {
+		assert.equal(messageIsOnlyTrailer(`fix: the bug\n\n${TRAILER}\n`), false);
+		assert.equal(messageIsOnlyTrailer("subject only\n"), false);
+		assert.equal(messageIsOnlyTrailer("Co-authored-by: Human <h@example.com>\n"), false, "not our trailer");
+		assert.equal(messageIsOnlyTrailer("Co-authored-by: AI (GPT) <h@example.com>\n"), false, "not our format");
 	});
 });
 
@@ -540,6 +525,27 @@ describe("real git runs the patched command", { skip: git ? false : "git is not 
 		repoDirs.push(rescued);
 		runIn(rescued, empty + injectGitTrailer("git commit -q -F -", TRAILER));
 		assert.equal(commitMessage(rescued).trim(), TRAILER, "the trailer became the whole message");
+	});
+
+	it("rescues the dynamic empty message, which no patch-time check can see", () => {
+		// The shape agents really write: assemble a message, then commit it. When
+		// the assembly yields nothing, git's empty-message check is the only thing
+		// between a typo and a commit, and --trailer disables it. Prevention at
+		// tool_call cannot help here (-m "$MSG" is not readable), so the
+		// tool_result hook is what puts the failure back (see hooks.test.ts).
+		const raw = 'git commit -q -m "$MSG"';
+		const unpatched = makeRepo();
+		repoDirs.push(unpatched);
+		assert.throws(
+			() => runIn(unpatched, `MSG=""; ${raw}`),
+			(err: unknown) => (err as { status?: number }).status === 1,
+			"git catches the empty variable on its own when the extension stays out of it",
+		);
+
+		const patched = makeRepo();
+		repoDirs.push(patched);
+		runIn(patched, `MSG=""; ${injectGitTrailer(raw, TRAILER)}`);
+		assert.equal(commitMessage(patched).trim(), TRAILER);
 	});
 });
 
