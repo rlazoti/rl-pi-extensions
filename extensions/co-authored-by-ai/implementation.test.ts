@@ -7,8 +7,8 @@ import { after, describe, it } from "node:test";
 import {
 	buildTrailer,
 	containsUnquoted,
-	hasCoAuthoredBy,
 	hasOnlyEmptyMessageLiteral,
+	hasOurTrailer,
 	injectGitTrailer,
 	messageIsOnlyTrailer,
 	splitShellCommand,
@@ -55,27 +55,57 @@ describe("buildTrailer", () => {
 });
 
 // =============================================================================
-// hasCoAuthoredBy
+// hasOurTrailer — the only thing that stops the injection
 // =============================================================================
 
-describe("hasCoAuthoredBy", () => {
-	it("matches the trailer in any casing, flag or message body", () => {
+describe("hasOurTrailer", () => {
+	it("recognises its own trailer in any casing, flag or message body", () => {
 		for (const cmd of [
-			'git commit --trailer "Co-authored-by: AI"',
 			`git commit --trailer "${TRAILER}"`,
-			'gt cc -m "co-authored-by: ai"',
-			'gt cc -m "CO-AUTHORED-BY: AI"',
-			'gt cc -m "Co-Authored-By: AI"',
-			'git commit -m "fix\\n\\nCo-authored-by: AI (Pi) <noreply@pi.dev>"',
-			'git commit -m "fix\\n\\nCo-authored-by: someone <a@b.c>"',
+			'git commit --trailer "Co-authored-by: AI (Pi) <noreply@pi.dev>"',
+			'git commit --trailer="Co-authored-by: AI (Pi/GPT-9) <noreply@pi.dev>"',
+			'git commit --trailer "CO-AUTHORED-BY: AI (Pi/Whatever) <noreply@pi.dev>"',
+			`git commit -m "subject\\n\\nbody" --trailer "${TRAILER}" && git push`,
+			// A real line of a message the command carries with it, in both the
+			// quoting styles an agent writes messages in.
+			'git commit -m "subject\n\n' + TRAILER + '"',
+			"git commit -m $'subject\n\n" + TRAILER + "'",
+			`cat > m.txt <<'MSGEOF'\nsubject\n\n${TRAILER}\nMSGEOF\ngit commit -F m.txt`,
+			// Whitespace inside the closing quote and after it. The second one is
+			// the case that keeps the `\\s` in the line regex honest: an unescaped
+			// `\s` in a template literal silently means the letter s, and only a
+			// space *after* the quote notices.
+			`git commit -m "subject\n\n${TRAILER}  "`,
+			`cat > m.txt <<'MSGEOF'\nsubject\n\n${TRAILER}"  \nMSGEOF\ngit commit -F m.txt`,
 		]) {
-			assert.equal(hasCoAuthoredBy(cmd), true, cmd);
+			assert.equal(hasOurTrailer(cmd), true, cmd);
 		}
 	});
 
-	it("does not match unrelated or partial text", () => {
-		assert.equal(hasCoAuthoredBy('git commit -m "fix bug"'), false);
-		assert.equal(hasCoAuthoredBy('git commit -m "co-authored"'), false);
+	it("refuses to mistake a lookalike, a human or prose for its own trailer", () => {
+		for (const cmd of [
+			// The shape that actually ate twelve commits.
+			'git commit -F m.txt --trailer "Co-authored-by: AI"',
+			'git commit -m "fix" --trailer "Co-authored-by: AI (Pi)"',
+			// Right prefix, somebody else's address.
+			'git commit -m "fix" --trailer "Co-authored-by: AI (Pi/x) <noreply@example.com>"',
+			'git commit -m "fix" --trailer "Co-authored-by: Human <h@example.com>"',
+			// A sentence that happens to contain the trailer, not a trailer line.
+			'git commit -m "Adds the extension: it writes Co-authored-by: AI (Pi/m) <noreply@pi.dev> for you"',
+			// A literal backslash-n inside the -m is two characters, so this is one
+			// line: not a trailer, and git would not read one out of it either.
+			'git commit -m "subject\\n\\n' + TRAILER + '"',
+			'git commit -m "fix bug"',
+			'git commit -m "co-authored"',
+		]) {
+			assert.equal(hasOurTrailer(cmd), false, cmd);
+		}
+	});
+
+	it("answers the same way twice — the matcher is not sticky", () => {
+		const cmd = `git commit -m "x" --trailer "${TRAILER}"`;
+		assert.equal(hasOurTrailer(cmd), true);
+		assert.equal(hasOurTrailer(cmd), true, "a global regex would alternate here");
 	});
 });
 
@@ -394,11 +424,21 @@ describe("messageIsOnlyTrailer", () => {
 		assert.equal(messageIsOnlyTrailer(""), true, "an empty message is not a message");
 	});
 
+	it("is true when nothing but somebody else's attribution remains", () => {
+		// Since a lookalike no longer stops the patching, the empty message that
+		// --trailer rescues can be recorded under another tool's name too. The
+		// check is about there being no subject, not about whose trailer it is.
+		assert.equal(messageIsOnlyTrailer("Co-authored-by: Human <h@example.com>\n"), true);
+		assert.equal(messageIsOnlyTrailer("Co-authored-by: AI (GPT) <h@example.com>\n"), true);
+		assert.equal(messageIsOnlyTrailer("Co-authored-by: AI\n"), true, "the lookalike on its own");
+		assert.equal(messageIsOnlyTrailer(`Co-authored-by: AI\n${TRAILER}\n`), true, "theirs beside ours");
+	});
+
 	it("is false once any content is there", () => {
 		assert.equal(messageIsOnlyTrailer(`fix: the bug\n\n${TRAILER}\n`), false);
 		assert.equal(messageIsOnlyTrailer("subject only\n"), false);
-		assert.equal(messageIsOnlyTrailer("Co-authored-by: Human <h@example.com>\n"), false, "not our trailer");
-		assert.equal(messageIsOnlyTrailer("Co-authored-by: AI (GPT) <h@example.com>\n"), false, "not our format");
+		assert.equal(messageIsOnlyTrailer("subject\n\nCo-authored-by: Human <h@example.com>\n"), false);
+		assert.equal(messageIsOnlyTrailer("Co-authored-by\n"), false, "not a trailer line at all");
 	});
 });
 
@@ -462,6 +502,32 @@ describe("real git runs the patched command", { skip: git ? false : "git is not 
 		const { message } = commit('git commit -q -m "fix: the bug"');
 		assert.ok(message.includes(TRAILER), message);
 		assert.equal(trailerCount(message), 1);
+	});
+
+	it("adds its trailer beside the lookalike an agent wrote, keeping both", () => {
+		// The regression, through real git. Twelve commits of a real session
+		// carried `--trailer "Co-authored-by: AI"` from the agent itself, and the
+		// old guard obeyed it; this is the command shape that was typed, a
+		// here-document message file and then the commit reading it.
+		const raw =
+			"cat > m.txt <<'MSGEOF'\nFix rollover: carried items died after one day\n\n" +
+			"The rollover wrote unfinished work into a section.\nMSGEOF\n" +
+			'git add -A && git commit -q -F m.txt --trailer "Co-authored-by: AI"';
+		const { message } = commit(raw);
+		assert.match(message, /^Fix rollover: carried items died after one day$/m, "subject intact");
+		assert.match(message, /^The rollover wrote unfinished work into a section\.$/m, "body intact");
+		assert.ok(message.includes(TRAILER), message);
+		assert.match(message, /^Co-authored-by: AI$/m, "the agent's own line is kept, not rewritten");
+		assert.equal(trailerCount(message), 2, "different values, so git records both attributions");
+	});
+
+	it("does not stack a second copy when the message already carries ours", () => {
+		// Why `hasOurTrailer` standing down is a courtesy and not load-bearing:
+		// git's addIfDifferent dedups the identical value, so a patched command
+		// whose message file already had this exact trailer still yields one.
+		const { message } = commit(`git commit -q -m $'subject\\n\\n${TRAILER}'`);
+		assert.ok(message.includes(TRAILER), message);
+		assert.equal(trailerCount(message), 1, message);
 	});
 
 	it("keeps a message whose text contains shell operators byte for byte", () => {

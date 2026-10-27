@@ -136,16 +136,61 @@ describe("tool_call patches commits", () => {
 		assert.equal(await pi.call(command, { toolName: "read" }), command);
 	});
 
-	it("never touches a command that already has a Co-authored-by trailer", async () => {
+	it("leaves a commit that already names Pi", async () => {
 		for (const command of [
 			`git commit -m "x" --trailer "${TRAILER}"`,
-			'git commit -m "x" --trailer "Co-authored-by: AI"',
-			'git commit -m "fix\\n\\nCO-AUTHORED-BY: someone"',
-			'git commit -m "fix\\n\\nCo-Authored-By: someone <noreply@test.com>"',
+			`git commit -m "x" --trailer "${FALLBACK_TRAILER}"`,
+			// Named by a different model — an amend from another session, or a
+			// previous version of this extension. Still attributed; still not ours
+			// to add a second copy to.
+			'git commit --amend --no-edit --trailer "Co-authored-by: AI (Pi/GPT-9) <noreply@pi.dev>"',
+			// Already in the message it is carrying, as a line.
+			`git commit -m "subject\n\n${TRAILER}"`,
+			`cat > m.txt <<'MSGEOF'\nsubject\n\n${TRAILER}\nMSGEOF\ngit commit -F m.txt`,
 		]) {
 			const pi = makePi();
-			assert.equal(await pi.call(command), command);
+			assert.equal(await pi.call(command), command, command);
+			assert.deepEqual(pi.notes, []);
+			assert.deepEqual(pi.execs, [], "and it does not go near git for a commit it did not touch");
 		}
+	});
+
+	it("adds its trailer beside a lookalike's or a human's, rather than obeying it", async () => {
+		// Every one of these used to be left alone, which is the bug: `/co-authored-by:/i`
+		// read any mention of the words as "already attributed". A lookalike names
+		// neither a person nor a model, so it is not attribution, and a human
+		// trailer is somebody else's true contribution beside ours.
+		for (const command of [
+			'git commit -m "x" --trailer "Co-authored-by: AI"',
+			'git commit -m "x" --trailer "Co-authored-by: Human <h@example.com>"',
+			'git commit -m "fix\\n\\nCO-AUTHORED-BY: someone"',
+			'git commit -m "fix\\n\\nCo-Authored-By: someone <noreply@test.com>"',
+			'git commit -m "Adds the extension: it writes Co-authored-by: AI (Pi/m) <noreply@pi.dev> for you"',
+		]) {
+			const pi = makePi();
+			const patched = await pi.call(command);
+			assert.ok(patched?.endsWith(`--trailer "${TRAILER}"`), `${command}\n  became: ${patched}`);
+		}
+	});
+
+	it("patches the command that really lost the trailer, verbatim shape", async () => {
+		// Twelve commits of a real session, typed this way: the message assembled
+		// into a file by a here-document, then committed with the agent's own
+		// `--trailer "Co-authored-by: AI"` already on it. The old guard saw those
+		// words and stood down; every one of those commits named no model.
+		const recorded =
+			"cd /repo && cat > /tmp/m.txt <<'MSGEOF'\nFix rollover: carried items died after one day\n\n" +
+			"The rollover wrote unfinished work into a section.\nMSGEOF\n" +
+			'git add -A && git commit -F /tmp/m.txt --trailer "Co-authored-by: AI" --quiet; rm -f /tmp/m.txt';
+		const pi = makePi();
+		assert.equal(
+			await pi.call(recorded),
+			recorded.replace(
+				'"Co-authored-by: AI" --quiet',
+				`"Co-authored-by: AI" --quiet --trailer "${TRAILER}"`,
+			),
+			"the trailer joins the commit segment, after the flags, and nothing else moves",
+		);
 	});
 
 	it("names the model that made the commit, or just Pi", async () => {
@@ -268,6 +313,22 @@ describe("tool_result checks the commit it caused", () => {
 		assert.equal(pi.notes.length, 1);
 		assert.equal(pi.notes[0]!.type, "error");
 		assert.match(pi.notes[0]!.message, /empty message/);
+	});
+
+	it("warns when the message is only attribution, whoever's lines they are", async () => {
+		// A lookalike trailer no longer stops the patching, so a commit whose whole
+		// message is `Co-authored-by:` lines is now a commit this hook caused — and
+		// `--trailer` is what let git accept it. Naming someone else's tool is no
+		// reason to leave an empty message unremarked.
+		const pi = makePi({
+			headBefore: "aaaaaaaa",
+			headAfter: "bbbbbbbb",
+			message: `Co-authored-by: AI\n${TRAILER}\n`,
+		});
+		await pi.call('git commit -F /tmp/m.txt --trailer "Co-authored-by: AI"');
+		const result = await pi.finish();
+		assert.match((result?.content ?? []).map((part) => part.text).join(""), /nothing but the Co-authored-by trailer/);
+		assert.equal(pi.notes[0]!.type, "error");
 	});
 
 	it("says nothing when the commit has a message", async () => {

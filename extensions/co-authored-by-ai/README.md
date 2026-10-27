@@ -16,11 +16,12 @@ Author: Rodrigo Lazoti <…>
 ## What it does
 
 Hooks `tool_call`, looks at `bash` commands before they run, and appends
-`--trailer "…"` to the ones that are `git commit`. It patches the command the
-agent is about to run — it never runs anything itself, and it cannot see a
-commit you make in another terminal, so human commits stay unattributed by
-construction. A second hook, `tool_result`, exists only to undo the damage the
-flag does to empty messages ([see below](#the-empty-message-hazard-why-there-are-two-hooks)).
+`--trailer "…"` to the ones that are `git commit` — unless that exact trailer is
+already there. It patches the command the agent is about to run — it never runs
+anything itself, and it cannot see a commit you make in another terminal, so
+human commits stay unattributed by construction. A second hook, `tool_result`,
+exists only to undo the damage the flag does to empty messages
+([see below](#the-empty-message-hazard-why-there-are-two-hooks)).
 
 | Command | Becomes |
 |---|---|
@@ -28,14 +29,19 @@ flag does to empty messages ([see below](#the-empty-message-hazard-why-there-are
 | `git add -A && git commit -m "x"` | `git add -A && git commit -m "x" --trailer "…"` (only the commit segment) |
 | `git commit -F /tmp/m` `⏎` `rm /tmp/m` | trailer on the commit line only — the `rm` stays a `rm` |
 | `git commit -m "a; b && c \|\| d \| e"` | trailer appended; the message keeps every one of those characters |
-| `git commit -m "x" --trailer "Co-authored-by: Human"` | untouched |
+| `git commit -m "x" --trailer "Co-authored-by: Human <h@x>"` | `… --trailer "Co-authored-by: Human <h@x>" --trailer "…"` — theirs **and** ours, both true |
+| `git commit -F m.txt --trailer "Co-authored-by: AI"` | `… --trailer "Co-authored-by: AI" --trailer "…"` — a lookalike is not attribution |
+| `git commit -m "x" --trailer "Co-authored-by: AI (Pi/<model>) <noreply@pi.dev>"` | untouched — that *is* the trailer, whatever model it names |
 | `echo "git commit -m x"`, `node -e '…git commit…'` | untouched — the match has to be outside the quotes |
 | `git commit -m ""` | **untouched on purpose** — see [the empty-message hazard](#the-empty-message-hazard-why-there-are-two-hooks) |
 
 The trailer is **git's own `--trailer` flag**, so git parses it, git places it,
 and git deduplicates it: amending the same commit three times leaves exactly one
-trailer line (measured on git 2.56.0 and pinned by a test that runs real git).
-Existing trailers in the message are appended to, never replaced.
+trailer line, and a trailer whose value is already in the message is not added
+twice (measured on git 2.56.0 and pinned by tests that run real git). Two
+different values both land, which is why a human `Co-authored-by:` no longer
+makes the extension stand down — see
+[why only its own trailer stops it](#why-only-its-own-trailer-stops-it).
 
 `--trailer` needs git ≥ 2.32 (May 2021). On older git the commit still happens
 and git reports the unknown option — the extension does not detect the version.
@@ -70,6 +76,11 @@ trailer, body = nothing), after a mistyped here-document. So:
    appended to the tool result, so the agent reads it in the result it is about
    to act on and can `git commit --amend`, and `notify(…, "error")` for the
    human.
+
+   "Nothing but the trailer" is read as *nothing but `Co-authored-by:` lines*,
+   ours or anybody's: since a lookalike no longer stops the patching, a message
+   whose every line is attribution is a commit this hook just helped make, and
+   it needs the same warning whoever's name is on it.
 
 Only commits **this hook patched** are ever inspected, by tool call id; git is
 never run for anyone else's call, and if `git log` fails or exec throws, the
@@ -122,6 +133,14 @@ whatever model they actually used.
 - **A commit whose message already names a human is still attributed to the AI
   as well.** That is the intent — both contributed — but it does mean the
   trailer is not a claim about who typed the message.
+- **A sentence that quotes the trailer counts as carrying it.** `hasOurTrailer`
+  looks at the value of a `--trailer` argument and at *whole lines* of message
+  text inside the command, so prose that mentions the trailer mid-sentence does
+  not stop the injection, while a message that really ends with it does. A
+  here-document that quotes the trailer on a line of its own is indistinguishable
+  from one that uses it, and errs toward leaving one trailer instead of adding a
+  second. A `\n` typed as two characters (`-m "subject\n\n…"`) is not a line
+  break — for this check or for git — so it is not read as a trailer either.
 - **No `--no-verify` bypass and no per-project opt-out.** Toggling the extension
   off is the opt-out.
 
@@ -137,6 +156,23 @@ message in half; and it matches the `git commit` inside
 does) and unterminated quotes, and `containsUnquoted` refuses any match that
 overlaps a quoted region.
 
+### Why only its own trailer stops it
+
+The guard used to be `co-authored-by:` anywhere in the command, case-insensitive,
+and that is how the extension missed twelve commits in a row without a word. The
+agent was typing its own `--trailer "Co-authored-by: AI"` — which names no
+address, so it is not a trailer a host renders as co-authorship, and no model,
+which is the one thing this extension exists to record — and the guard read the
+lookalike as the real thing and stood down. Nothing was logged, because from the
+extension's side nothing had happened. It surfaced only because someone read
+`git log` expecting the model name and found `AI`.
+
+So the rule is now exactly one line: **only a trailer this extension could have
+written counts as its own.** Any other `Co-authored-by:` is somebody else's true
+statement and gets ours added beside it. A guard that stands down on a
+*lookalike* is a guard an agent can switch off by accident, in a session that
+will never see the difference.
+
 **Amending is attributed.** An earlier version skipped `git commit --amend
 --no-edit` as having "no message to attach to". There is a message — the reused
 one — and `--trailer` is idempotent against it, so skipping only dropped
@@ -146,28 +182,37 @@ AI trailer, and re-running the injection never stacks a second copy.
 
 ## Testing
 
-Two colocated files, 69 tests.
+Two colocated files, 76 tests.
 
-`implementation.test.ts` (51) is the machinery: the trailer contract, the
+`implementation.test.ts` (55) is the machinery: the trailer contract, the
 quote-aware splitter and matcher (including the four append-to-the-wrong-place
-regressions), `hasOnlyEmptyMessageLiteral`, `messageIsOnlyTrailer`, and **seven
-tests that run real git** in a temp repo — the patched command string is handed
-to `bash`, then the recorded commit message is read back with
-`git log --format=%B`. The extension produces a command, so that is what gets
-tested, not the string it built. Those seven verify the trailer appears exactly
-once, that a message full of `; && || |` survives intact, that three amends still
-leave one trailer, that a newline-separated cleanup after the commit still runs,
-that a human trailer is appended to, and that the four empty-message shapes in
-the table above really do commit once `--trailer` is present — the hazard is
-pinned against git itself, not against this file's opinion of it.
+regressions), `hasOurTrailer` — including the lookalike that started the
+incident, a human trailer, and a sentence that merely quotes the trailer —
+`hasOnlyEmptyMessageLiteral`, `messageIsOnlyTrailer`, and **nine tests that run
+real git** in a temp repo — the patched command string is handed to `bash`, then
+the recorded commit message is read back with `git log --format=%B`. The
+extension produces a command, so that is what gets tested, not the string it
+built. Those nine verify the trailer appears exactly once, that a message full of
+`; && || |` survives intact, that three amends still leave one trailer, that a
+newline-separated cleanup after the commit still runs, that a human trailer is
+appended to, that the recorded real-world command — here-document message file,
+`git commit -F`, the agent's own `--trailer "Co-authored-by: AI"` already on it
+— now comes out with both attributions and its subject intact, that a message
+carrying this extension's own trailer is not given a second copy, and that the
+four empty-message shapes in the table above really do commit once `--trailer`
+is present — the hazard is pinned against git itself, not against this file's
+opinion of it.
 
-`hooks.test.ts` (18) drives the extension through its own registration surface
+`hooks.test.ts` (21) drives the extension through its own registration surface
 with a fake Pi, because the interesting behaviour is a sequence: patch or refuse
 at `tool_call`, report or stay silent at `tool_result`. It pins the refusal list,
-the flags that mean "unknown, do not refuse", the warning reaching both the
-tool result and the notification, silence when the message is fine, when nothing
-was committed, when the call was not ours, and when git cannot answer, and that
-the bookkeeping stays bounded when tool calls are abandoned.
+the flags that mean "unknown, do not refuse", the exact patched form of the
+command that started the incident, that only this extension's own trailer makes
+it stand down (and that standing down means never touching git at all), the
+warning reaching both the tool result and the notification, silence when the
+message is fine, when nothing was committed, when the call was not ours, and when
+git cannot answer, and that the bookkeeping stays bounded when tool calls are
+abandoned.
 
 ## License
 

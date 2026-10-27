@@ -5,10 +5,12 @@
  * `--trailer "Co-authored-by: AI (Pi/<model>) <noreply@pi.dev>"`. Nothing else
  * is touched: the hook only ever sees tool calls the agent issues, so a human
  * commit made in another terminal can never be reached from here, and a
- * command that already carries a `Co-authored-by:` trailer is left alone.
+ * command that already carries *this extension's own* trailer is left alone —
+ * its own, not merely something shaped like one (see `hasOurTrailer`).
  *
  * Ported from a standalone extension (~/.pi/agent/_extensions/co-authored-by-ai)
- * with two changes, both decided when it landed here:
+ * with three changes: two decided when it landed here, one after it failed
+ * silently in use:
  *
  *  - **Graphite (`gt`) support is dropped.** `gt` is not installed on this
  *    machine, and it was the only path that rewrote a commit *message* —
@@ -23,6 +25,16 @@
  *    trailer (interpret-trailer's default is `addIfDifferent`). Skipping it
  *    instead dropped attribution from the common commit-then-amend flow.
  *    Pinned by the real-git tests at the bottom of `implementation.test.ts`.
+ *  - **The "already has a trailer" guard matches only this extension's own
+ *    trailer.** It used to be `/co-authored-by:/i` over the whole command
+ *    string, and that is how the extension skipped twelve commits in a row
+ *    without a word: the agent passed its own `--trailer "Co-authored-by: AI"`
+ *    — no address, so not a trailer a host renders as co-authorship, and no
+ *    model, the one thing this extension exists to record — and the guard read
+ *    the lookalike as the real thing and stood down. A foreign
+ *    `Co-authored-by:` is now added to rather than obeyed (git keeps both
+ *    lines; measured on git 2.56.0), and only a line shaped exactly like what
+ *    this file writes stops the injection.
  *
  * The flag also weakens a check git offers for free, which the two hooks here
  * exist to put back. `--trailer` *is* message content, so an empty message no
@@ -36,7 +48,11 @@
  *  - For the emptiness no tool call can see (`-m "$VAR"`, stdin), a
  *    `tool_result` hook reads HEAD back for the commits *this* hook patched and,
  *    when the message is nothing but our trailer, tells the agent in the result
- *    it is about to read and the human by notification.
+ *    it is about to read and the human by notification. Since a lookalike no
+ *    longer stops the patching, "nothing but our trailer" is read as "nothing
+ *    but `Co-authored-by:` lines", ours or not: a commit whose message came in
+ *    carrying a lookalike is now a commit this hook patched, and its message
+ *    can be empty in exactly the way this check exists to catch.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -56,8 +72,35 @@ const MESSAGE_LITERAL_RE = /(?:^|\s)(?:-m|--message)\s*("(?:[^"\\]|\\.)*"|'[^']*
 /** Flags that supply a message beside `-m`, so an empty `-m` is not the whole story. */
 const OTHER_MESSAGE_SOURCE_RE = /(?:^|\s)(?:-F|--file|-C|-c|--reuse-message|--reedit-message|--fixup|--squash|--template)(?:\s|=|$)/;
 
-/** Matches any trailer this extension could have written, whatever model it named. */
-const OUR_TRAILER_RE = /^\s*co-authored-by:\s*ai\s*\(pi(?:\/[^)]*)?\)\s*<noreply@pi\.dev>\s*$/i;
+/** The shape of a trailer this extension writes, whatever model it named. */
+const OUR_TRAILER_SOURCE = String.raw`\s*co-authored-by:\s*ai\s*\(pi(?:\/[^)]*)?\)\s*<noreply@pi\.dev>\s*`;
+
+/** Our trailer, the whole value of it and nothing else. */
+const OUR_TRAILER_RE = new RegExp(`^${OUR_TRAILER_SOURCE}$`, "i");
+
+/**
+ * Our trailer as a whole line of a message the command carries with it: a
+ * here-document body, or a `-m` whose newlines are real.
+ *
+ * Anchored to the line on purpose. A sentence that merely quotes the trailer
+ * — "it writes Co-authored-by: AI (Pi/model) <noreply@pi.dev> for you" — is
+ * what a commit *about this extension* says, and a sentence is not a trailer.
+ * The optional quote marks are the closing `"` or `'` of the argument the line
+ * sits inside; `git commit -m "subject\n\n…"` with a literal backslash-n is
+ * one line and does not match, which is right — git would not read a trailer
+ * out of it either, so there is nothing there to avoid duplicating. The
+ * trailing whitespace class is written escaped: a template literal turns an
+ * unescaped backslash-s into the letter s, which silently stops matching a
+ * space after the closing quote — the test for that case is the only thing that
+ * notices.
+ */
+const OUR_TRAILER_LINE_RE = new RegExp(`^["']?${OUR_TRAILER_SOURCE}["']?\\s*$`, "im");
+
+/** A `--trailer` argument and its value, quoted either way or left bare. */
+const TRAILER_FLAG_RE = /--trailer\s*=?\s*(?:"([^"]*)"|'([^']*)'|(\S+))/g;
+
+/** Any `Co-authored-by:` line, ours or somebody else's — see `messageIsOnlyTrailer`. */
+const ANY_CO_AUTHOR_RE = /^\s*co-authored-by:.*$/i;
 
 /**
  * Build a Co-authored-by trailer.
@@ -87,7 +130,7 @@ export default function (pi: ExtensionAPI) {
 
 		const cmd = event.input.command;
 		if (!cmd) return;
-		if (hasCoAuthoredBy(cmd)) return;
+		if (hasOurTrailer(cmd)) return;
 		if (!containsUnquoted(cmd, GIT_COMMIT_RE)) return;
 
 		// Refusing here is the cheap half of the fix. `--trailer` makes an empty
@@ -200,20 +243,49 @@ function segmentList(cmd: string): string[] {
 }
 
 /**
- * True when a commit message carries no content beyond this extension's own
- * trailer — the shape that means the author's message was empty.
+ * True when a commit message carries no content beyond `Co-authored-by:`
+ * lines — the shape that means the author's message was empty.
+ *
+ * Any co-author line counts, not just this extension's own: a command that
+ * arrived already carrying a lookalike trailer is patched now, so a message
+ * whose every line is attribution is a hazard this hook helped create and
+ * owes a warning for. `"Co-authored-by: AI"` as a whole message is the
+ * accident; `"Co-authored-by: AI (GPT) <h@example.com>"` alone is the same
+ * accident with somebody else's tool in it.
  */
 export function messageIsOnlyTrailer(message: string): boolean {
 	return message
 		.split(/\n/)
-		.every((line) => line.trim() === "" || OUR_TRAILER_RE.test(line));
+		.every((line) => line.trim() === "" || ANY_CO_AUTHOR_RE.test(line));
 }
 
 /**
- * Check if the command already contains a Co-authored-by trailer (case-insensitive).
+ * True when the command already carries *this extension's* trailer — the only
+ * thing that makes the hook stand down.
+ *
+ * The guard used to be `/co-authored-by:/i`, any casing, anywhere in the
+ * string, and that is what made it miss twelve commits in a row in silence:
+ * the agent wrote its own `--trailer "Co-authored-by: AI"`, the guard saw the
+ * words, and the commit that named neither a person nor a model went out
+ * looking attributed. A lookalike is not the thing. So a foreign trailer —
+ * `Co-authored-by: Human <h@example.com>`, `Co-authored-by: AI`, whatever — is
+ * left in place and ours is added beside it, which is what git's own trailer
+ * handling does with two different values: both lines survive, and both
+ * contributions are true. Only a line matching what `buildTrailer` produces,
+ * any model named in the parenthetical, says "already done, nothing to add".
+ *
+ * Two places count as carrying it: the value of a `--trailer` argument (what a
+ * previous session would write after reading this extension's README), and a
+ * line of the message text sitting in the command (what it writes after
+ * reading the trailer format).
  */
-export function hasCoAuthoredBy(cmd: string): boolean {
-	return /co-authored-by:/i.test(cmd);
+export function hasOurTrailer(cmd: string): boolean {
+	if (OUR_TRAILER_LINE_RE.test(cmd)) return true;
+	for (const flag of cmd.matchAll(TRAILER_FLAG_RE)) {
+		const value = (flag[1] ?? flag[2] ?? flag[3] ?? "").trim();
+		if (OUR_TRAILER_RE.test(value)) return true;
+	}
+	return false;
 }
 
 /**
