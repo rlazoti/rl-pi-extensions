@@ -13,6 +13,7 @@ Personal Pi coding agent extensions, managed as a single package with a TUI for 
 | **emacs-feedback** | Source-region and Magit diff-line feedback from Emacs |
 | **memory** | Entry-keyed knowledge store: one authority per claim per context, rival claims refused until you decide. Also injects the day's open work, and `memory_read` / `memory_list` reach every file in the bank. Spec in `extensions/memory/README.md` |
 | **co-authored-by-ai** | Adds a `Co-authored-by: AI (Pi/<model>)` trailer to the commits Pi creates, by patching `git commit` before it runs |
+| **scan-guard** | Refuses a `bash` command that walks `/` or all of `$HOME` with no depth bound — 29 of 13,084 recorded calls, 9.4% of all bash wall time — and answers with the scoped search. Notify-only by default; `PI_SCAN_GUARD=block` to refuse. `bash -c "find /"` and friends are documented escapes, not bugs |
 
 ## Usage
 

@@ -140,6 +140,14 @@ export function getAvailableExtensions(monorepoRoot: string): ExtensionDescripto
 			description: "Add a Co-authored-by: AI (Pi/<model>) trailer to commits Pi creates",
 			path: join(monorepoRoot, "extensions", "co-authored-by-ai"),
 		},
+		{
+			name: "scan-guard",
+			label: "scan-guard",
+			// Says what it stops and what it gives back, because "guard" alone sounds
+			// like the kind of thing that blocks a command for no reason.
+			description: "Refuse `find`/`fd` walks of / or all of $HOME, and answer with the scoped search instead",
+			path: join(monorepoRoot, "extensions", "scan-guard"),
+		},
 	];
 }
 
