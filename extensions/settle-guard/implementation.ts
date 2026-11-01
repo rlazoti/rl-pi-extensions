@@ -48,9 +48,18 @@ import { appendFileSync, mkdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { decide, type GuardCode, type GuardConfig, type TurnSnapshot, type Verdict } from "./rule.js";
+import {
+	decide,
+	type GuardCode,
+	type GuardConfig,
+	type RetryTier,
+	type Streak,
+	type TurnSnapshot,
+	type Verdict,
+} from "./rule.js";
 
 const DEFAULT_MAX_RETRIES = 2;
+const DEFAULT_TRUNC_RETRIES = 1;
 const MAX_LOG_BYTES = 262144;
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -86,6 +95,20 @@ export function parseRetries(value: string | undefined): number {
 	return Math.min(n, 5);
 }
 
+/**
+ * `PI_SETTLE_GUARD_TRUNC`. Default 1: a turn cut off mid-markup is retried once
+ * per streak, because the second one usually gets cut in the same place, and the
+ * signature (an answer ending inside an unclosed span) is 8 turns out of 670.
+ */
+export function parseTruncation(value: string | undefined): number {
+	const v = (value ?? "").trim().toLowerCase();
+	if (v === "off" || v === "none") return 0;
+	if (v === "") return DEFAULT_TRUNC_RETRIES;
+	const n = Number.parseInt(v, 10);
+	if (!Number.isFinite(n) || n < 0) return DEFAULT_TRUNC_RETRIES;
+	return Math.min(n, 3);
+}
+
 export function parseThinking(value: string | undefined): "off" | "keep" {
 	return (value ?? "").trim().toLowerCase() === "keep" ? "keep" : "off";
 }
@@ -95,6 +118,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): GuardMode {
 		enabled: parseEnabled(env.PI_SETTLE_GUARD),
 		config: {
 			maxRetries: parseRetries(env.PI_SETTLE_GUARD_RETRIES),
+			maxTruncationRetries: parseTruncation(env.PI_SETTLE_GUARD_TRUNC),
 			thinkingOnRetry: parseThinking(env.PI_SETTLE_GUARD_THINKING),
 		},
 		logDir: resolveLogDir(env.PI_SETTLE_GUARD_DIR),
@@ -105,9 +129,24 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): GuardMode {
 
 let logDir: string | undefined;
 let logIsCapped = false;
+let logSeamActive = false;
 
-function resetLogCapForTests(): void {
+/**
+ * Point the log somewhere else, for tests. The seam exists because a previous
+ * version resolved the directory at import time, and the test suite wrote 1,267
+ * records and 262 KB into the real `~/.pi/settle-guard/log.jsonl` — which then hit
+ * its own cap, so the one real retry this extension caught that day was never
+ * recorded. A test that forgets the environment now cannot reach your log at all.
+ */
+export function setLogDirForTesting(dir: string | null): void {
+	logSeamActive = dir !== null;
+	logDir = dir ?? undefined;
 	logIsCapped = false;
+}
+
+/** Where the log is going right now, for the test that asserts the seam holds. */
+export function logDirInUse(): string | undefined {
+	return logDir;
 }
 
 /** One line per action. Never the prompt, never the model's text. */
@@ -145,10 +184,12 @@ export function appendLog(event: LogEvent): void {
 // --- state -------------------------------------------------------------------
 
 interface GuardState {
-	/** Consecutive empty turns in this streak. */
-	attempts: number;
+	/** Turns of each shape since the streak last broke — the two budgets. */
+	streak: Streak;
 	/** Total empty turns seen since the session started. */
 	empties: number;
+	/** Total turns that looked cut off, since the session started. */
+	cutOff: number;
 	/** Total retries asked since the session started. */
 	retries: number;
 	/** Level to put back after a retry, or null when none is outstanding. */
@@ -161,12 +202,20 @@ interface GuardState {
 	 * stub that always answers empty, every one logged as attempt 1.
 	 */
 	awaitingRetry: boolean;
-	/** One give-up notice per streak, so a stuck model is not nagged about. */
-	gaveUp: boolean;
+	/** One give-up notice per streak per tier, so a stuck model is not nagged. */
+	gaveUp: { empty: boolean; truncation: boolean };
 }
 
 export function newState(): GuardState {
-	return { attempts: 0, empties: 0, retries: 0, saved: null, gaveUp: false, awaitingRetry: false };
+	return {
+		streak: { empties: 0, truncations: 0 },
+		empties: 0,
+		cutOff: 0,
+		retries: 0,
+		saved: null,
+		gaveUp: { empty: false, truncation: false },
+		awaitingRetry: false,
+	};
 }
 
 /**
@@ -202,12 +251,28 @@ export function lastTurnSnapshot(event: Record<string, unknown>): TurnSnapshot {
 export const RETRY_NUDGE =
 	"Your previous turn produced no answer and no tool call. Continue now: either answer, or call a tool.";
 
+/**
+ * The other nudge, for a turn that answered and was cut. The second sentence is
+ * the reason this tier exists: the turns being retried were killed by the model
+ * writing the reasoning delimiter tag inside a code span, and asking again
+ * without saying so tends to produce the same tag in the same place.
+ */
+export const CUTOFF_NUDGE =
+	"Your previous answer was cut off mid-sentence. Continue from exactly where it stopped. "
+	+ "Never write the reasoning delimiter tags literally, including inside code spans or file paths: "
+	+ "name them in words instead.";
+
+/** The nudge for a verdict's tier. */
+export function nudgeFor(tier: RetryTier): string {
+	return tier === "truncation" ? CUTOFF_NUDGE : RETRY_NUDGE;
+}
+
 export function statusLines(state: GuardMode, guard: GuardState): string[] {
 	return [
 		`settle-guard — ${state.enabled ? "on" : "off"} (set PI_SETTLE_GUARD=off to disable)`,
-		`  retries per streak: ${state.config.maxRetries}, retry thinking: ${state.config.thinkingOnRetry}`,
-		`  this session: ${guard.empties} empty turn(s), ${guard.retries} retried`,
-		`  streak: ${guard.attempts} empty turn(s) in a row${guard.gaveUp ? " (gave up, waiting for you)" : ""}`,
+		`  per streak: ${state.config.maxRetries} empty, ${state.config.maxTruncationRetries} cut-off, retry thinking: ${state.config.thinkingOnRetry}`,
+		`  this session: ${guard.empties} empty, ${guard.cutOff} cut off, ${guard.retries} retried`,
+		`  streak: ${guard.streak.empties} empty, ${guard.streak.truncations} cut off${guard.gaveUp.empty || guard.gaveUp.truncation ? " (gave up, waiting for you)" : ""}`,
 		`  log: ${logDir ?? "nowhere — set PI_SETTLE_GUARD_DIR"}${logDir ? "/log.jsonl" : ""}${logIsCapped ? " (capped; delete it to resume logging)" : ""}`,
 	];
 }
@@ -218,8 +283,10 @@ export default function settleGuard(pi: ExtensionAPI): void {
 	const mode = readConfig();
 	// Resolved at load, not at module init: the environment is set before Pi loads
 	// an extension, and a test's directory certainly is not set before import.
-	logDir = mode.logDir;
-	resetLogCapForTests();
+	if (!logSeamActive) {
+		logDir = mode.logDir;
+		logIsCapped = false;
+	}
 	const guard = newState();
 
 	const restoreThinking = () => {
@@ -235,11 +302,12 @@ export default function settleGuard(pi: ExtensionAPI): void {
 	};
 
 	pi.on("session_start", () => {
-		guard.attempts = 0;
+		guard.streak = { empties: 0, truncations: 0 };
 		guard.empties = 0;
+		guard.cutOff = 0;
 		guard.retries = 0;
 		guard.saved = null;
-		guard.gaveUp = false;
+		guard.gaveUp = { empty: false, truncation: false };
 	});
 
 	// A new run is normally a new question, and the old streak is not its
@@ -250,8 +318,8 @@ export default function settleGuard(pi: ExtensionAPI): void {
 			guard.awaitingRetry = false;
 			return;
 		}
-		guard.attempts = 0;
-		guard.gaveUp = false;
+		guard.streak = { empties: 0, truncations: 0 };
+		guard.gaveUp = { empty: false, truncation: false };
 	});
 
 	// A prompt from the human is a new question even when it arrives between our
@@ -290,34 +358,39 @@ export default function settleGuard(pi: ExtensionAPI): void {
 			if (!mode.enabled) return undefined;
 
 			const turn = lastTurnSnapshot(event);
-			const verdict: Verdict = decide(turn, guard.attempts, mode.config);
+			const verdict: Verdict = decide(turn, guard.streak, mode.config);
 			if (verdict.progress) {
-				guard.attempts = 0;
-				guard.gaveUp = false;
+				guard.streak = { empties: 0, truncations: 0 };
+				guard.gaveUp = { empty: false, truncation: false };
 				return undefined;
 			}
 			if (verdict.action === "none") return undefined;
 
 			const model = ctx.model as { name?: string; provider?: string } | undefined;
 			const who = [model?.provider, model?.name].filter(Boolean).join("/") || "the model";
+			const tier = verdict.tier === "truncation" ? "truncation" : "empty";
+			const cutOff = tier === "truncation";
+			const countKey: keyof Streak = cutOff ? "truncations" : "empties";
+			const limit = cutOff ? mode.config.maxTruncationRetries : mode.config.maxRetries;
 
 			if (verdict.action === "give-up") {
-				if (guard.gaveUp) return undefined;
-				guard.gaveUp = true;
-				guard.empties += 1;
+				if (guard.gaveUp[tier]) return undefined;
+				guard.gaveUp[tier] = true;
 				appendLog({
 					ts: new Date().toISOString(),
 					action: "gave-up",
 					code: verdict.code,
 					reason: verdict.reason,
-					attempts: guard.attempts,
+					attempts: verdict.attempts,
 					thinking: currentLevel(pi),
 					model: model?.name,
 					provider: model?.provider,
 				});
 				try {
 					ctx.ui.notify(
-						`settle-guard: ${who} ended ${guard.attempts + 1} turns in a row without an answer. Stopped retrying — press continue, or lower the thinking level.`,
+						cutOff
+							? `settle-guard: ${who} was cut off mid-answer again. Stopped retrying — press continue, and it will keep happening until reasoning is off.`
+							: `settle-guard: ${who} ended ${verdict.attempts + 1} turns in a row without an answer. Stopped retrying — press continue, or lower the thinking level.`,
 						"warning",
 					);
 				} catch {
@@ -326,11 +399,12 @@ export default function settleGuard(pi: ExtensionAPI): void {
 				return undefined;
 			}
 
-			guard.attempts += 1;
-			guard.empties += 1;
+			guard.streak[countKey] += 1;
+			if (cutOff) guard.cutOff += 1;
+			else guard.empties += 1;
 			guard.retries += 1;
-			// Logged before the change: the level worth correlating with an empty
-			// turn is the one that turn ran with, not the retry's.
+			// Logged before the change: the level worth correlating with a dead turn
+			// is the one that turn ran with, not the retry's.
 			const levelBefore = currentLevel(pi);
 			if (mode.config.thinkingOnRetry === "off") {
 				try {
@@ -348,14 +422,14 @@ export default function settleGuard(pi: ExtensionAPI): void {
 				action: "retry",
 				code: verdict.code,
 				reason: verdict.reason,
-				attempts: guard.attempts,
+				attempts: guard.streak[countKey],
 				thinking: levelBefore,
 				model: model?.name,
 				provider: model?.provider,
 			});
 			try {
 				ctx.ui.notify(
-					`settle-guard: ${who} gave an empty turn (${verdict.reason}), retrying (${guard.attempts}/${mode.config.maxRetries}).`,
+					`settle-guard: ${who} ${cutOff ? "was cut off mid-answer" : "gave an empty turn"} (${verdict.reason}), retrying (${guard.streak[countKey]}/${limit}).`,
 					"info",
 				);
 			} catch {
@@ -367,8 +441,8 @@ export default function settleGuard(pi: ExtensionAPI): void {
 				// ask without one. Hidden, so it does not clutter the transcript.
 				entries: [{
 					type: "custom_message",
-					customType: "settle-guard/retry",
-					content: RETRY_NUDGE,
+					customType: cutOff ? "settle-guard/retry-cutoff" : "settle-guard/retry",
+					content: nudgeFor(verdict.tier),
 					display: false,
 				}],
 				continue: true,

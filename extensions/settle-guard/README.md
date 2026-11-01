@@ -1,14 +1,21 @@
 # settle-guard
 
-Retry a model turn that ended with **no answer and no tool call**.
+Retry a model turn that ended without finishing.
 
-A reasoning model can finish its thinking block and emit end-of-turn before
-writing anything. The provider reports reasoning plus `finish_reason: stop` with
-no content, Pi records a thinking-only assistant message, the agent loop has
-nothing left to execute, and the session stops and waits for a keystroke. That
-is what this catches: the settle boundary sees an empty turn, asks Pi for one
-more model request, and asks for it with reasoning off, because that is what the
-measurement says works.
+Two shapes, from the same checkpoint. A reasoning model can finish its thinking
+block and emit end-of-turn before writing anything: the provider reports
+reasoning plus `finish_reason: stop` with no content, Pi records a thinking-only
+assistant message, the loop has nothing to execute, and the session waits for a
+keystroke. Or it can start answering and stop with an open quote in its mouth —
+the same model, the same session, the other half of the incidents.
+
+| tier | what the turn looks like | retried | nudge |
+|---|---|---|---|
+| empty | reasoning, `stop`, no text, no tool call | 2 per streak | "answer or call a tool" |
+| cut off | text, `stop`, no tool call, ending inside unclosed markup | 1 per streak | "continue from where it stopped, and never write the delimiter tags literally" |
+
+Both ask through the settle boundary, both ask with reasoning off by default,
+and both leave your thinking level back where you had it.
 
 ## Enable
 
@@ -19,6 +26,7 @@ measurement says works.
 | `PI_SETTLE_GUARD` | on | `off` (or `0`, `false`) makes the extension inert. Not in the transcript: the model is not the one who decides whether the guard runs. |
 | `PI_SETTLE_GUARD_RETRIES` | `2` | Empty turns retried per streak, clamped to 0-5. `0` disables retrying without uninstalling. |
 | `PI_SETTLE_GUARD_THINKING` | `off` | `off` asks the retry with reasoning disabled; `keep` retries at your level. |
+| `PI_SETTLE_GUARD_TRUNC` | `1` | Retries per streak for a turn that looks cut off. `0` or `off` leaves truncations to the human. |
 | `PI_SETTLE_GUARD_DIR` | `~/.pi/settle-guard` | Log location. `off` or `none` switches logging off; a relative path is refused rather than guessed, since it would mean a different log per directory. Logging stops at 256 KB and `/settle-guard` says so. |
 
 `/settle-guard` prints mode, streak, what it caught this session, and the log path.
@@ -40,6 +48,22 @@ of thinking, successes 1,380 to 1,963), and the delimiter tags people blame are
 not it either: in 12 probes they were delivered intact inside `content` and never
 stopped generation. Retrying without reasoning is the default because it is the
 one variable that changed the outcome.
+
+## Why the cut-off tier is allowed to guess
+
+Retrying "text and no tool call" on shape alone would retry every final answer in
+your session — 670 turns across this machine's logs end that way, and 662 of them
+are a model finishing its sentence. So the tier waits for a shape a finished
+answer does not produce: the text ends with an unclosed code-span opener (space
+then backtick), an unclosed span, or an unclosed fence. 8 of 670 matched, all 8
+in the last 24 hours on the affected model, and two of them are turns the human
+answered with "you stopped again". The model was writing the reasoning delimiter
+tag inside a code span, and the server stopped generating at the tag. That is
+also why the nudge tells it not to do that: asking again without saying so puts
+the same tag back in front of the same model.
+
+A `length` stop is never retried here either. That is a spent budget, and
+doubling a long generation is not recovery.
 
 ## What it treats as empty
 
@@ -97,11 +121,15 @@ TUI for those seconds; if that is too noisy, set `keep`.
 
 ## Files
 
-- `rule.ts` — the pure decision (`decide`). No Pi, no fs, no clock.
+- `rule.ts` — the pure decision (`decide`), including `looksCutOff`. No Pi, no fs,
+  no clock.
 - `implementation.ts` — the settle-boundary hook, the thinking-level bookkeeping,
   the capped log, `/settle-guard`. Each record carries a stable `code`
-  (`reasoned-empty`, `empty-content`, `refusal`, `budget`, …) next to the prose,
+  (`reasoned-empty`, `refusal`, `truncated-text`, `budget`, …) next to the prose,
   for the day a parser wants to count what this actually catches.
+- The log directory has a test seam (`setLogDirForTesting`) because the first
+  version resolved it at import time and the test suite wrote 1,267 records into
+  the real log, hit the cap, and silenced the one real catch that day.
 - Every path is wrapped in `try`/`catch`: a handler that throws at a boundary
   spoils the boundary, so the worst this file can do is stay quiet.
 

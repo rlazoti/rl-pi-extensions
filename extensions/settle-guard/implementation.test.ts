@@ -14,7 +14,17 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 
-import settleGuard, { lastTurnSnapshot, newState, readConfig, RETRY_NUDGE, statusLines } from "./implementation.ts";
+import settleGuard, {
+	CUTOFF_NUDGE,
+	lastTurnSnapshot,
+	logDirInUse,
+	nudgeFor,
+	newState,
+	readConfig,
+	RETRY_NUDGE,
+	setLogDirForTesting,
+	statusLines,
+} from "./implementation.ts";
 
 /** The shape the real failure has: reasoning, a clean stop, no answer, no tool call. */
 const EMPTY = {
@@ -100,7 +110,7 @@ function harness(options: { level?: string; enabled?: boolean } = {}) {
 		notifies,
 		commands,
 		logDir() {
-			return logDir ?? process.env.PI_SETTLE_GUARD_DIR;
+			return logDirInUse();
 		},
 		/** Deliver one event exactly as Pi would, and return what the handler said. */
 		async emit(event: Record<string, unknown>): Promise<any> {
@@ -204,12 +214,21 @@ describe("settle-guard: lastTurnSnapshot reads the boundary it is given", () => 
 
 describe("settle-guard: status lines", () => {
 	it("report mode, budget, and streak", () => {
-		const lines = statusLines({ enabled: true, config: { maxRetries: 2, thinkingOnRetry: "off" } }, {
-			attempts: 1, retries: 1, empties: 1, gaveUp: false, saved: "low", awaitingRetry: false,
+		const lines = statusLines({ enabled: true, config: { maxRetries: 2, maxTruncationRetries: 1, thinkingOnRetry: "off" } }, {
+			streak: { empties: 1, truncations: 2 },
+			empties: 1,
+			cutOff: 2,
+			retries: 3,
+			saved: "low",
+			gaveUp: { empty: false, truncation: true },
+			awaitingRetry: false,
 		});
 		assert.equal(lines.length, 5);
-		assert.match(lines.join("\n"), /\bon\b/);
-		assert.match(lines.join("\n"), /streak: 1/);
+		const text = lines.join("\n");
+		assert.match(text, /\bon\b/);
+		assert.match(text, /1 empty, 2 cut off/);
+		assert.match(text, /gave up/);
+		assert.match(text, /nowhere|\.jsonl/, "the status always says where the log is");
 	});
 });
 
@@ -218,13 +237,27 @@ describe("settle-guard: the hook", () => {
 
 	beforeEach(() => {
 		logDir = mkdtempSync(join(tmpdir(), "settle-guard-test-"));
-		process.env.PI_SETTLE_GUARD_DIR = logDir;
+		// The seam, not the environment: a test that reaches for the environment
+		// and then forgets it writes 1,267 records into the real log, which is what
+		// happened once. See setLogDirForTesting.
+		setLogDirForTesting(logDir);
 		delete process.env.PI_SETTLE_GUARD;
 		delete process.env.PI_SETTLE_GUARD_RETRIES;
+		delete process.env.PI_SETTLE_GUARD_TRUNC;
 	});
 	afterEach(() => {
-		delete process.env.PI_SETTLE_GUARD_DIR;
+		setLogDirForTesting(null);
 		rm(logDir, { recursive: true, force: true }, () => undefined);
+	});
+
+	it("never writes the real default log while the seam is installed", () => {
+		// The whole point of the seam: no environment variable has to be remembered.
+		delete process.env.PI_SETTLE_GUARD_DIR;
+		setLogDirForTesting(logDir);
+		assert.equal(logDirInUse(), logDir);
+		settleGuard({ on() {}, registerCommand() {}, getThinkingLevel: () => "off", setThinkingLevel() {}, getModel: () => undefined } as never);
+		assert.notEqual(logDirInUse(), join(homedir(), ".pi", "settle-guard"));
+		assert.equal(logDirInUse(), logDir);
 	});
 
 	it("runs on load", async () => {
@@ -274,6 +307,44 @@ describe("settle-guard: the hook", () => {
 		await h.emit(settle({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "[refusal]" }] }));
 		assert.deepEqual(h.setLevels, ["off"]);
 		assert.equal(h.logRecords()[0].code, "refusal");
+	});
+
+	it("retries a cut-off answer with its own nudge", async () => {
+		const cut = {
+			role: "assistant",
+			stopReason: "stop",
+			content: [{ type: "thinking", thinking: "x" }, { type: "text", text: "let me check the tokens for the tag and `" }],
+		};
+		const h = harness();
+		const result = await h.emit(settle(cut));
+		assert.equal(result.continue, true);
+		assert.equal(result.entries[0].customType, "settle-guard/retry-cutoff");
+		assert.equal(result.entries[0].content, CUTOFF_NUDGE);
+		assert.equal(h.logRecords()[0].code, "truncated-text");
+		assert.match(h.notifies[0], /cut off mid-answer/);
+	});
+
+	it("tells the model not to write the delimiter tags, because that is what killed the turn", () => {
+		// The nudge is the only place this instruction can go: the turn that died
+		// died by emitting those bytes, and asking again without saying so puts the
+		// same text back in front of the same model.
+		assert.match(CUTOFF_NUDGE, /never write .*delimiter tags .*literally/i);
+		assert.match(CUTOFF_NUDGE, /code spans/i);
+		assert.doesNotMatch(CUTOFF_NUDGE, /</, "the nudge must not itself contain a tag");
+		assert.equal(nudgeFor("empty"), RETRY_NUDGE);
+		assert.equal(nudgeFor("truncation"), CUTOFF_NUDGE);
+	});
+
+	it("spends the two budgets separately", async () => {
+		const cut = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "still going and `" }] };
+		const h = harness();
+		// empty, empty, then cut off: the empty budget is spent, the cut-off is not
+		await h.emit(settle());
+		await h.emit(settle());
+		const third = await h.emit(settle());
+		assert.equal(third, undefined, "the empty budget gave up");
+		const cutOver = await h.emit(settle(cut));
+		assert.equal(cutOver.continue, true, "and a cut-off turn still gets its one retry");
 	});
 
 	it("leaves a turn that did something alone, and treats it as progress", async () => {
@@ -424,6 +495,14 @@ describe("settle-guard: state", () => {
 	it("starts clean", () => {
 		// No "have I nagged yet" field on purpose: that flag gets reset in one
 		// place and forgotten in another, which is how a guard starts nagging.
-		assert.deepEqual(newState(), { attempts: 0, empties: 0, retries: 0, gaveUp: false, saved: null, awaitingRetry: false });
+		assert.deepEqual(newState(), {
+			streak: { empties: 0, truncations: 0 },
+			empties: 0,
+			cutOff: 0,
+			retries: 0,
+			gaveUp: { empty: false, truncation: false },
+			saved: null,
+			awaitingRetry: false,
+		});
 	});
 });

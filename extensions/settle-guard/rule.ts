@@ -13,12 +13,24 @@
  * conversation: 8 of 9 replays with reasoning requested ended that way, 0 of 3
  * without it.
  *
+ * ## The second failure, and why there are two tiers
+ *
+ * The other way the same session dies is a turn that *does* answer and is cut
+ * mid-sentence: the model opens a code span, writes the reasoning delimiter tag
+ * inside it, and the server stops generating at the tag. That leaves a turn with
+ * text, no tool call and `stopReason: "stop"` — which is exactly how a normal
+ * final answer ends, so it cannot be retried on shape alone. Across every session
+ * on the affected machine, 670 turns look like that; 8 end inside an unclosed
+ * markup construct, all 8 in the last 24 hours on the affected model, and two of
+ * them are turns the human answered with "you stopped again". So tier two retries
+ * only the unclosed-markup shape, once per streak, and never on `length`.
+ *
  * ## What counts as empty
  *
- * No non-whitespace text block and no tool call in the assistant message. That
- * is the whole predicate. It is model-agnostic on purpose: an agent that
- * answers with nothing and does nothing is stuck whatever produced it, and a
- * model that never does it will never trigger this.
+ * No non-whitespace text block and no tool call in the assistant message, or a
+ * marker where the answer should be. That predicate is model-agnostic on purpose:
+ * an agent that answers with nothing and does nothing is stuck whatever produced
+ * it, and a model that never does it will never trigger this.
  *
  * ## What is deliberately not here
  *
@@ -46,6 +58,7 @@ export type GuardCode =
 	| "reasoned-empty"
 	| "empty-content"
 	| "refusal"
+	| "truncated-text"
 	| "progress"
 	| "stop-reason"
 	| "aborted"
@@ -60,6 +73,12 @@ export interface BlockLike {
 	thinking?: string;
 }
 
+/** Which of the two failures a retry is for. They have separate budgets. */
+export type RetryTier = "none" | "empty" | "truncation";
+
+/** Why a turn looks cut off, when it does. */
+export type CutOffSignal = "span-opener" | "unclosed-span" | "open-fence";
+
 /** The part of a Pi assistant message this rule reads. */
 export interface TurnSnapshot {
 	role?: string;
@@ -68,18 +87,28 @@ export interface TurnSnapshot {
 	outcome?: GuardOutcome;
 }
 
+/** How many turns of each kind have been seen since the streak last broke. */
+export interface Streak {
+	empties: number;
+	truncations: number;
+}
+
 export interface GuardConfig {
 	/** Automatic retries allowed per streak of empty turns. */
 	maxRetries: number;
+	/** Retries allowed per streak for a turn that looks cut off mid-answer. */
+	maxTruncationRetries: number;
 	/** Ask the retry with reasoning switched off, or with the user's level. */
 	thinkingOnRetry: "off" | "keep";
 }
 
 export interface Verdict {
 	action: GuardAction;
+	/** Which failure this verdict is about, and therefore which budget it spends. */
+	tier: RetryTier;
 	/** True when this turn made progress, which resets the retry streak. */
 	progress: boolean;
-	/** How many empty turns came before this one. */
+	/** How many turns of this tier were already retried in this streak. */
 	attempts: number;
 	/** Human-readable why, for the log line and the status command. */
 	reason: string;
@@ -134,57 +163,114 @@ export function isRefusalMarker(content: BlockLike[] | undefined): boolean {
 
 const REFUSAL_MARKER = /^[\[(]\s*(refusals?|content[ -]?filter(?:ed)?|filtered|redacted|content[ -]?policy|blocked|safety[ -]?stop)\s*[\])]([.\s]*)$/i;
 
+/** Every text block joined, in order, untrimmed at the ends we can measure. */
+export function joinedText(content: BlockLike[] | undefined): string {
+	if (!Array.isArray(content)) return "";
+	return content
+		.filter((block) => block && block.type === "text" && typeof block.text === "string")
+		.map((block) => (block as { text: string }).text)
+		.join("");
+}
+
+/**
+ * Does this answer stop in the middle of its own markup?
+ *
+ * Three shapes, all of them things a finished answer does not do: it ends with a
+ * code-span opener (space then backtick, the measured signature — the tag that
+ * killed the turn was inside the span it never closed); it ends with an odd
+ * number of backticks, so a span is still open; or a fenced block is still open.
+ * Deliberately not "does not end with a full stop", which would retry most of the
+ * answers in a normal session.
+ */
+export function looksCutOff(text: string): CutOffSignal | null {
+	const body = text.replace(/\s+$/, "");
+	if (!body) return null;
+	const fences = body.split("\n").filter((line) => /^\s*```/.test(line)).length;
+	if (fences % 2 === 1) return "open-fence";
+	if (/[\s([]`$/.test(body.slice(-2))) return "span-opener";
+	const ticks = body.split("`").length - 1;
+	if (ticks > 0 && ticks % 2 === 1) return "unclosed-span";
+	return null;
+}
+
+const CUT_OFF_WHY: Record<CutOffSignal, string> = {
+	"span-opener": "ended with an unclosed code span, mid-sentence",
+	"unclosed-span": "ended inside an unclosed code span",
+	"open-fence": "ended inside an unclosed code fence",
+};
+
 /**
  * Decide what to do about one finished model turn.
  *
  * @param turn what the model just produced
  * @param attempts consecutive empty turns already seen in this streak
  */
-export function decide(turn: TurnSnapshot, attempts: number, config: GuardConfig): Verdict {
-	const empty = attempts < config.maxRetries;
+export function decide(turn: TurnSnapshot, streak: Streak, config: GuardConfig): Verdict {
 	const none = (progress: boolean, reason: string, code: GuardCode = "none"): Verdict =>
-		({ action: "none", progress, attempts, reason, code });
+		({ action: "none", tier: "none", progress, attempts: 0, reason, code });
 
-	if (config.maxRetries <= 0) return none(false, "retries are set to 0", "disabled");
+	if (config.maxRetries <= 0 && config.maxTruncationRetries <= 0) {
+		return none(false, "retries are set to 0", "disabled");
+	}
 	if (turn.role !== "assistant") return none(false, `last message is a ${turn.role ?? "unknown"} message`, "not-assistant");
 	if (turn.outcome === "aborted") return none(false, "the run was aborted, which is the human's decision", "aborted");
 	if (turn.outcome === "error") return none(false, "the run ended in error, which Pi reports on its own", "error");
 
-	const text = visibleTextLength(turn.content);
 	const tools = hasToolCall(turn.content);
-	if (tools) {
-		return none(true, "the turn produced a tool call", "progress");
-	}
+	if (tools) return none(true, "the turn produced a tool call", "progress");
 
-	// A whole turn that is only the engine's own marker is the same non-answer,
-	// and asking again is what recovers from it.
-	if (text > 0 && !isRefusalMarker(turn.content)) {
+	const text = visibleTextLength(turn.content);
+	const refused = isRefusalMarker(turn.content);
+	const cutOff = text > 0 && !refused ? looksCutOff(joinedText(turn.content)) : null;
+	if (text > 0 && !refused && !cutOff) {
 		return none(true, `the turn produced ${text} characters of answer`, "progress");
 	}
 
 	if (turn.stopReason !== "stop") {
 		return none(false, `stop reason is ${turn.stopReason ?? "missing"}, not a silent stop`, "stop-reason");
 	}
+
+	// From here the turn is one of the two shapes, and only the tier differs.
 	const thought = thinkingLength(turn.content);
-	const code: GuardCode = isRefusalMarker(turn.content)
+	const tier: RetryTier = refused ? "empty" : text === 0 ? "empty" : "truncation";
+	const used = tier === "truncation" ? streak.truncations : streak.empties;
+	const limit = tier === "truncation" ? config.maxTruncationRetries : config.maxRetries;
+	// A tier switched off on its own says nothing at all: "give up" is a message
+	// about a budget you never set, and the human would read it as a malfunction.
+	if (limit <= 0) {
+		return {
+			action: "none",
+			tier: "none",
+			progress: false,
+			attempts: 0,
+			reason: cutOff ? "cut-off retries are switched off" : "empty-turn retries are switched off",
+			code: "disabled",
+		};
+	}
+	const code: GuardCode = refused
 		? "refusal"
-		: thought > 0 ? "reasoned-empty" : "empty-content";
-	const shape = isRefusalMarker(turn.content)
+		: text === 0 ? (thought > 0 ? "reasoned-empty" : "empty-content") : "truncated-text";
+	const shape = refused
 		? "answered only a refusal or filter marker"
-		: thought > 0 ? `reasoned for ${thought} characters and answered nothing` : "produced no text and no tool call";
-	if (!empty) {
+		: text === 0
+			? thought > 0 ? `reasoned for ${thought} characters and answered nothing` : "produced no text and no tool call"
+			: `answered ${text} characters and ${CUT_OFF_WHY[cutOff as CutOffSignal]}`;
+
+	if (used >= limit) {
 		return {
 			action: "give-up",
+			tier,
 			progress: false,
-			attempts,
-			reason: `${shape}, ${attempts} retries already used`,
+			attempts: used,
+			reason: `${shape}, ${used} ${tier === "truncation" ? "cut-off retries" : "retries"} already used`,
 			code: "budget",
 		};
 	}
 	return {
 		action: "retry",
+		tier,
 		progress: false,
-		attempts,
+		attempts: used,
 		reason: `${shape}; asking again${config.thinkingOnRetry === "off" ? " without reasoning" : ""}`,
 		code,
 	};
