@@ -14,6 +14,7 @@ Personal Pi coding agent extensions, managed as a single package with a TUI for 
 | **memory** | Entry-keyed knowledge store: one authority per claim per context, rival claims refused until you decide. Also injects the day's open work, and `memory_read` / `memory_list` reach every file in the bank. Spec in `extensions/memory/README.md` |
 | **co-authored-by-ai** | Adds a `Co-authored-by: AI (Pi/<model>)` trailer to the commits Pi creates, by patching `git commit` before it runs |
 | **scan-guard** | Refuses a `bash` command that walks `/` or all of `$HOME` with no depth bound — 29 of 13,084 recorded calls, 9.4% of all bash wall time — and answers with the scoped search. Notify-only by default; `PI_SCAN_GUARD=block` to refuse. `bash -c "find /"` and friends are documented escapes, not bugs |
+| **settle-guard** | Asks again when a model turn ends with reasoning and no answer, which is what makes a session stop mid-run and wait for a keystroke. The retry goes out with reasoning off — 8 of 9 replays with it, 0 of 3 without. Two per streak, then it stops and says so |
 
 ## Usage
 

@@ -148,6 +148,14 @@ export function getAvailableExtensions(monorepoRoot: string): ExtensionDescripto
 			description: "Refuse `find`/`fd` walks of / or all of $HOME, and answer with the scoped search instead",
 			path: join(monorepoRoot, "extensions", "scan-guard"),
 		},
+		{
+			name: "settle-guard",
+			label: "settle-guard",
+			// Names the symptom the human sees, because "guard" would not explain why
+			// the session started moving again on its own.
+			description: "Retry a model turn that ended with no answer and no tool call (common with local reasoning models)",
+			path: join(monorepoRoot, "extensions", "settle-guard"),
+		},
 	];
 }
 

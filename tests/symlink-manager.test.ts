@@ -115,12 +115,12 @@ function makeExt(srcDir: string, name: string): string {
 
 // --- Registry & path derivation ---
 
-test("getAvailableExtensions returns the 8 managed extensions under the given root", () => {
+test("getAvailableExtensions returns the 9 managed extensions under the given root", () => {
 	const exts = getAvailableExtensions("/fake/path");
-	assert.equal(exts.length, 8);
+	assert.equal(exts.length, 9);
 	assert.deepEqual(
 		exts.map((e) => e.name),
-		["tmux-feedback", "session-banner", "session-attention", "snippets", "emacs-feedback", "memory", "co-authored-by-ai", "scan-guard"],
+		["tmux-feedback", "session-banner", "session-attention", "snippets", "emacs-feedback", "memory", "co-authored-by-ai", "scan-guard", "settle-guard"],
 	);
 	assert.equal(exts[0].description, "Inline feedback for tmux scrollback selection");
 	assert.equal(exts[1].description, "Colored banner + auto-naming for Pi sessions");
@@ -137,6 +137,9 @@ test("getAvailableExtensions returns the 8 managed extensions under the given ro
 	// line only promises refusal reads like a thing that will get in the way.
 	assert.match(exts[7].description, /Refuse/);
 	assert.match(exts[7].description, /scoped/);
+	// Names the symptom, not the mechanism: someone deciding whether to enable this
+	// is looking at a session that stopped, not at a reasoning parser.
+	assert.match(exts[8].description, /no answer and no tool call/);
 	for (const ext of exts) {
 		assert.equal(resolve(ext.path), resolve("/fake/path", "extensions", ext.name));
 	}
