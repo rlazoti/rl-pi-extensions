@@ -156,6 +156,14 @@ export function getAvailableExtensions(monorepoRoot: string): ExtensionDescripto
 			description: "Retry a model turn that ended with no answer and no tool call (common with local reasoning models)",
 			path: join(monorepoRoot, "extensions", "settle-guard"),
 		},
+		{
+			name: "context-viewer",
+			label: "context-viewer",
+			// Says what you can see in it, because "/context" alone does not say
+			// whether this is the status bar again or the thing behind it.
+			description: "Browse the context window: token cost per category, the system prompt, tool schemas, every message",
+			path: join(monorepoRoot, "extensions", "context-viewer"),
+		},
 	];
 }
 

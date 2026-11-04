@@ -115,12 +115,12 @@ function makeExt(srcDir: string, name: string): string {
 
 // --- Registry & path derivation ---
 
-test("getAvailableExtensions returns the 9 managed extensions under the given root", () => {
+test("getAvailableExtensions returns the 10 managed extensions under the given root", () => {
 	const exts = getAvailableExtensions("/fake/path");
-	assert.equal(exts.length, 9);
+	assert.equal(exts.length, 10);
 	assert.deepEqual(
 		exts.map((e) => e.name),
-		["tmux-feedback", "session-banner", "session-attention", "snippets", "emacs-feedback", "memory", "co-authored-by-ai", "scan-guard", "settle-guard"],
+		["tmux-feedback", "session-banner", "session-attention", "snippets", "emacs-feedback", "memory", "co-authored-by-ai", "scan-guard", "settle-guard", "context-viewer"],
 	);
 	assert.equal(exts[0].description, "Inline feedback for tmux scrollback selection");
 	assert.equal(exts[1].description, "Colored banner + auto-naming for Pi sessions");
@@ -143,6 +143,9 @@ test("getAvailableExtensions returns the 9 managed extensions under the given ro
 	for (const ext of exts) {
 		assert.equal(resolve(ext.path), resolve("/fake/path", "extensions", ext.name));
 	}
+	// Names what the panel is made of, so it is obvious this is not the status bar
+	// again: the categories are the promise.
+	assert.match(exts[9].description, /token cost per category/);
 });
 
 test("getMonorepoRoot resolves to the directory containing extensions/symlink-manager.ts", () => {
