@@ -1,0 +1,23 @@
+{
+	// Type-check gate only. Pi loads extensions through jiti, which strips types
+	// without checking them, and vitest runs the same erasure, so neither command
+	// alone ever sees a type error — that is what `npm run typecheck` is for.
+	"compilerOptions": {
+		"target": "es2023",
+		"lib": ["es2023"],
+		"module": "nodenext",
+		"moduleResolution": "nodenext",
+		"types": ["node"],
+		"strict": true,
+		// Splitting index.ts into modules made every leftover import and local a
+		// permanent fossil; these make the next extraction self-cleaning.
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
+		"noEmit": true,
+		// Sources import siblings with the jiti-style ".js" specifier, which
+		// TypeScript resolves back to the ".ts" file.
+		"allowImportingTsExtensions": true,
+		"skipLibCheck": true
+	},
+	"include": ["*.ts", "scripts/*.test.ts"]
+}

@@ -16,5 +16,6 @@
 		"allowImportingTsExtensions": true,
 		"skipLibCheck": true
 	},
-	"include": ["extensions/**/*.ts", "tests/**/*.ts"]
+	"include": ["extensions/**/*.ts", "tests/**/*.ts"],
+	"exclude": ["extensions/memory"]
 }

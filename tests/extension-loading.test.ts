@@ -57,7 +57,7 @@ test("extensions: all sources import from @earendil-works scope, not @mariozechn
 	// @earendil-works so a future Pi that drops the alias fails loudly here.
 	const scan = (dir: string): void => {
 		for (const entry of readdirSync(dir)) {
-			if (entry.startsWith(".")) continue;
+			if (entry.startsWith(".") || entry === "node_modules") continue;
 			const full = join(dir, entry);
 			const stat = statSync(full);
 			if (stat.isDirectory()) {

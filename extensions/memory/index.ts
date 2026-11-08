@@ -1,3 +1,2 @@
-import factory from "./implementation.js";
-
-export default factory;
+export { default } from "./implementation.js";
+export * from "./implementation.js";

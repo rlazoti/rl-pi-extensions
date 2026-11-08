@@ -1,0 +1,131 @@
+{
+  "schemaVersion": 1,
+  "provenance": {
+    "author": "Assistant, 2026-11-08; synthetic scope collision snapshots",
+    "reviewedBy": null,
+    "status": "provisional; not owner-reviewed ground truth"
+  },
+  "files": {
+    "knowledge/flat.md": "# Nebula deployment procedure (nebula, deployment, procedure)\n\nAll Nebula deployments check health after release.\n",
+    "knowledge/shared/operations.md": "# Nebula operations common (nebula, operations, common)\n\nAll operators verify the active account before making changes.\n",
+    "knowledge/alpha/procedure.md": "# Nebula Alpha deployment procedure (nebula, alpha, deployment, procedure)\n\nAlpha deploys to the development cluster first.\n",
+    "knowledge/beta/procedure.md": "# Nebula Beta deployment procedure (nebula, beta, deployment, procedure)\n\nBeta deploys only after the approval gate.\n"
+  },
+  "cases": [
+    {
+      "id": "alpha-eligible",
+      "prompt": "Nebula deployment procedure",
+      "must": [
+        "knowledge/alpha/procedure.md",
+        "knowledge/flat.md"
+      ],
+      "relevant": [
+        "knowledge/alpha/procedure.md",
+        "knowledge/flat.md",
+        "knowledge/shared/operations.md"
+      ],
+      "config": {
+        "scope": {
+          "mode": "explicit",
+          "name": "alpha"
+        }
+      }
+    },
+    {
+      "id": "beta-eligible",
+      "prompt": "Nebula deployment procedure",
+      "must": [
+        "knowledge/beta/procedure.md",
+        "knowledge/flat.md"
+      ],
+      "relevant": [
+        "knowledge/beta/procedure.md",
+        "knowledge/flat.md",
+        "knowledge/shared/operations.md"
+      ],
+      "config": {
+        "scope": {
+          "mode": "explicit",
+          "name": "beta"
+        }
+      }
+    },
+    {
+      "id": "shared-in-alpha",
+      "prompt": "Nebula operations common",
+      "must": [
+        "knowledge/shared/operations.md"
+      ],
+      "relevant": [
+        "knowledge/shared/operations.md",
+        "knowledge/alpha/procedure.md",
+        "knowledge/flat.md"
+      ],
+      "config": {
+        "scope": {
+          "mode": "explicit",
+          "name": "alpha"
+        }
+      }
+    },
+    {
+      "id": "shared-in-beta",
+      "prompt": "Nebula operations common",
+      "must": [
+        "knowledge/shared/operations.md"
+      ],
+      "relevant": [
+        "knowledge/shared/operations.md",
+        "knowledge/beta/procedure.md",
+        "knowledge/flat.md"
+      ],
+      "config": {
+        "scope": {
+          "mode": "explicit",
+          "name": "beta"
+        }
+      }
+    },
+    {
+      "id": "unresolved-explicit",
+      "prompt": "Nebula operations common procedure",
+      "must": [
+        "knowledge/shared/operations.md"
+      ],
+      "config": {
+        "scope": {
+          "mode": "explicit",
+          "name": ""
+        }
+      },
+      "relevant": [
+        "knowledge/shared/operations.md",
+        "knowledge/flat.md"
+      ]
+    },
+    {
+      "id": "off-backcompat",
+      "prompt": "Beta",
+      "must": [
+        "knowledge/beta/procedure.md"
+      ],
+      "config": {
+        "scope": {
+          "mode": "off"
+        }
+      }
+    },
+    {
+      "id": "no-cross-project-injection",
+      "prompt": "Beta",
+      "must": [],
+      "none": true,
+      "config": {
+        "scope": {
+          "mode": "explicit",
+          "name": "alpha"
+        }
+      }
+    }
+  ]
+}

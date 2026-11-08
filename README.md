@@ -11,7 +11,7 @@ Personal Pi coding agent extensions, managed as a single package with a TUI for 
 | **session-attention** | Desktop notifications when Pi needs your attention |
 | **snippets** | Insert predefined text snippets into the prompt |
 | **emacs-feedback** | Source-region and Magit diff-line feedback from Emacs |
-| **memory** | Entry-keyed knowledge store: one authority per claim per context, rival claims refused until you decide. Also injects the day's open work, and `memory_read` / `memory_list` reach every file in the bank. Spec in `extensions/memory/README.md` |
+| **memory** | Persistent Markdown memory bank, searchable knowledge and history, selective context injection, managed-write safety and optional recovery snapshots. See `extensions/memory/README.md`. |
 | **co-authored-by-ai** | Adds a `Co-authored-by: AI (Pi/<model>)` trailer to the commits Pi creates, by patching `git commit` before it runs |
 | **scan-guard** | Refuses a `bash` command that walks `/` or all of `$HOME` with no depth bound — 29 of 13,084 recorded calls, 9.4% of all bash wall time — and answers with the scoped search. Notify-only by default; `PI_SCAN_GUARD=block` to refuse. `bash -c "find /"` and friends are documented escapes, not bugs |
 | **settle-guard** | Asks again when a model turn ends with reasoning and no answer, which is what makes a session stop mid-run and wait for a keystroke. The retry goes out with reasoning off — 8 of 9 replays with it, 0 of 3 without. Two per streak, then it stops and says so |
@@ -58,9 +58,10 @@ rm ~/.pi/agent/extensions/tmux-feedback
 ## Development
 
 ```bash
-npm install        # dev dependency only (typescript); Pi itself is not installed
-npm test           # every *.test.ts / *.test.mjs under tests/ and extensions/
-npm run typecheck  # tsc --noEmit over extensions/ and tests/ (strict)
+npm install        # also installs memory's locked dependencies in extensions/memory
+npm test           # Node extension suite, then memory's isolated Vitest suite
+npm run typecheck  # both TypeScript projects
+npm run verify:memory  # memory typecheck, tests, real-Pi smoke and race probes
 ```
 
 Pi loads extensions with jiti, which strips types without checking them, so a
@@ -106,7 +107,7 @@ rl-pi-extensions/
 │   │       └── pi-feedback-test.el # Emacs ERT tests
 │   ├── memory/
 │   │   ├── index.ts                # Extension entry point
-│   │   └── ...                     # schema/resolver/gate/inject/rollover (see its README)
+│   │   └── ...                     # Markdown bank, search, injection, safety and recovery
 │   ├── co-authored-by-ai/
 │   │   ├── index.ts                # Extension entry point
 │   │   └── implementation.ts       # tool_call hook + the shell-aware patching

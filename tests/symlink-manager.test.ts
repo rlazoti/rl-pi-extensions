@@ -129,7 +129,7 @@ test("getAvailableExtensions returns the 10 managed extensions under the given r
 	assert.equal(exts[4].description, "Source-region and Magit diff-line feedback from Emacs");
 	// The description is what the picker shows before someone enables a live
 	// component: it says what the thing does, not where its migration is up to.
-	assert.match(exts[5].description, /one authority per claim/);
+	assert.match(exts[5].description, /Markdown memory bank/);
 	// Says what the patch does to the command, because that is the part a reader
 	// has to trust before enabling something that rewrites their git invocations.
 	assert.match(exts[6].description, /Co-authored-by: AI/);

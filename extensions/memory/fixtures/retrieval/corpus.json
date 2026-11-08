@@ -1,0 +1,268 @@
+{
+  "schemaVersion": 1,
+  "provenance": {
+    "author": "Assistant, 2026-11-08; representative task paraphrases and deliberately synthetic records",
+    "reviewedBy": null,
+    "status": "provisional; not owner-reviewed or historical ground truth"
+  },
+  "files": {
+    "core/activeProjects.md": "# Active Projects\n\n- Atlas — React application; Boreal — Python API; pi-memory3 — persistent memory extension.\n",
+    "knowledge/memory-injection.md": "# pi-memory3 injection limits (pi-memory3, withholding, truncation, injection, prompt budget)\n\nThree knowledge/history files may enter a prompt. Core context is direct. Oversized records are named instead of sent when more than half would be hidden. Read a withheld record before editing it.\n",
+    "knowledge/memory-concurrency.md": "# pi-memory3 concurrent bank writes (concurrent, stale-base, serialization, fingerprint, append)\n\nCooperating memory tools serialize updates and appends. Compare content fingerprints, not modification dates. A stale replacement must reread the current record.\n",
+    "knowledge/atlas-forms.md": "# Atlas React forms (react, forms, double-submit, debounce, onClick)\n\nDisable the Save button during an outstanding request. Controlled input owns the displayed value. A second submit must not create a second payment.\n",
+    "knowledge/atlas-style.md": "# Atlas Tailwind styling (tailwind, spacing, modal, dark-mode)\n\nUse spacing scale values. Put dark mode classes on the application root. Modal colors inherit the active theme.\n",
+    "knowledge/boreal-postgres.md": "# Boreal Postgres migrations (postgres, migrations, concurrent-index, downtime)\n\nAdd nullable columns first. Build indexes concurrently. Avoid ACCESS EXCLUSIVE locks on hot tables. Configure lock timeout.\n",
+    "knowledge/boreal-python.md": "# Boreal Python profiling (python, profiling, comprehension, performance)\n\nProfile the loop before rewriting it. Calling expensive functions inside a comprehension is still expensive. Benchmark with realistic rows.\n",
+    "knowledge/lumo-build.md": "# LUMO macOS build (lumo, macos, cmake, wxwidgets)\n\nUse the pinned wxWidgets toolchain and build LUMO with CMake. Match the architecture of dependent libraries.\n",
+    "knowledge/lumo-import.md": "# LUMO Pineledger import (lumo, pineledger, importer, reconciliation)\n\nDry-run first. Apply to a backup copy, verify balances and rerun for idempotency. Never write a database while the GUI holds it open.\n",
+    "knowledge/harbor-stack.md": "# Harbor estimator prototype (harbor, estimator, prototype, svelte)\n\nThe prototype uses Svelte and TypeScript. Product and UX specifications remain authoritative, not the prototype's accidental behavior.\n",
+    "knowledge/background-blue.md": "# Atlas background policy (background, color, atlas, blue, palette, theme)\n\n2026-11-01 decision: the Atlas application background is blue. This is an older decision, retained here as an evaluation rival.\n",
+    "knowledge/background-green.md": "# Atlas background amendment (background, color, green)\n\n2026-11-02 decision supersedes blue: the Atlas background is green. Prefer this newer decision when records disagree.\n",
+    "history/daily/2026-11/2026-11-01-dailyContext.md": "## 2026-11-01\n\n### Completed\n- Moved the shared bank and configured PI_MEMORY_DIR.\n\n### Key Decisions\n- Use the new memory root for later sessions.\n",
+    "knowledge/oversized.md": "# Axolotl archive (axolotl, census)\n\n- Axolotl census observation 0: recorded population in the northern pond.\n- Axolotl census observation 1: recorded population in the northern pond.\n- Axolotl census observation 2: recorded population in the northern pond.\n- Axolotl census observation 3: recorded population in the northern pond.\n- Axolotl census observation 4: recorded population in the northern pond.\n- Axolotl census observation 5: recorded population in the northern pond.\n- Axolotl census observation 6: recorded population in the northern pond.\n- Axolotl census observation 7: recorded population in the northern pond.\n- Axolotl census observation 8: recorded population in the northern pond.\n- Axolotl census observation 9: recorded population in the northern pond.\n- Axolotl census observation 10: recorded population in the northern pond.\n- Axolotl census observation 11: recorded population in the northern pond.\n- Axolotl census observation 12: recorded population in the northern pond.\n- Axolotl census observation 13: recorded population in the northern pond.\n- Axolotl census observation 14: recorded population in the northern pond.\n- Axolotl census observation 15: recorded population in the northern pond.\n- Axolotl census observation 16: recorded population in the northern pond.\n- Axolotl census observation 17: recorded population in the northern pond.\n- Axolotl census observation 18: recorded population in the northern pond.\n- Axolotl census observation 19: recorded population in the northern pond.\n- Axolotl census observation 20: recorded population in the northern pond.\n- Axolotl census observation 21: recorded population in the northern pond.\n- Axolotl census observation 22: recorded population in the northern pond.\n- Axolotl census observation 23: recorded population in the northern pond.\n- Axolotl census observation 24: recorded population in the northern pond.\n- Axolotl census observation 25: recorded population in the northern pond.\n- Axolotl census observation 26: recorded population in the northern pond.\n- Axolotl census observation 27: recorded population in the northern pond.\n- Axolotl census observation 28: recorded population in the northern pond.\n- Axolotl census observation 29: recorded population in the northern pond.\n- Axolotl census observation 30: recorded population in the northern pond.\n- Axolotl census observation 31: recorded population in the northern pond.\n- Axolotl census observation 32: recorded population in the northern pond.\n- Axolotl census observation 33: recorded population in the northern pond.\n- Axolotl census observation 34: recorded population in the northern pond.\n- Axolotl census observation 35: recorded population in the northern pond.\n- Axolotl census observation 36: recorded population in the northern pond.\n- Axolotl census observation 37: recorded population in the northern pond.\n- Axolotl census observation 38: recorded population in the northern pond.\n- Axolotl census observation 39: recorded population in the northern pond.\n- Axolotl census observation 40: recorded population in the northern pond.\n- Axolotl census observation 41: recorded population in the northern pond.\n- Axolotl census observation 42: recorded population in the northern pond.\n- Axolotl census observation 43: recorded population in the northern pond.\n- Axolotl census observation 44: recorded population in the northern pond.\n- Axolotl census observation 45: recorded population in the northern pond.\n- Axolotl census observation 46: recorded population in the northern pond.\n- Axolotl census observation 47: recorded population in the northern pond.\n- Axolotl census observation 48: recorded population in the northern pond.\n- Axolotl census observation 49: recorded population in the northern pond.\n- Axolotl census observation 50: recorded population in the northern pond.\n- Axolotl census observation 51: recorded population in the northern pond.\n- Axolotl census observation 52: recorded population in the northern pond.\n- Axolotl census observation 53: recorded population in the northern pond.\n- Axolotl census observation 54: recorded population in the northern pond.\n- Axolotl census observation 55: recorded population in the northern pond.\n- Axolotl census observation 56: recorded population in the northern pond.\n- Axolotl census observation 57: recorded population in the northern pond.\n- Axolotl census observation 58: recorded population in the northern pond.\n- Axolotl census observation 59: recorded population in the northern pond.\n- Axolotl census observation 60: recorded population in the northern pond.\n- Axolotl census observation 61: recorded population in the northern pond.\n- Axolotl census observation 62: recorded population in the northern pond.\n- Axolotl census observation 63: recorded population in the northern pond.\n- Axolotl census observation 64: recorded population in the northern pond.\n- Axolotl census observation 65: recorded population in the northern pond.\n- Axolotl census observation 66: recorded population in the northern pond.\n- Axolotl census observation 67: recorded population in the northern pond.\n- Axolotl census observation 68: recorded population in the northern pond.\n- Axolotl census observation 69: recorded population in the northern pond.\n- Axolotl census observation 70: recorded population in the northern pond.\n- Axolotl census observation 71: recorded population in the northern pond.\n- Axolotl census observation 72: recorded population in the northern pond.\n- Axolotl census observation 73: recorded population in the northern pond.\n- Axolotl census observation 74: recorded population in the northern pond.\n- Axolotl census observation 75: recorded population in the northern pond.\n- Axolotl census observation 76: recorded population in the northern pond.\n- Axolotl census observation 77: recorded population in the northern pond.\n- Axolotl census observation 78: recorded population in the northern pond.\n- Axolotl census observation 79: recorded population in the northern pond.\n- Axolotl census observation 80: recorded population in the northern pond.\n- Axolotl census observation 81: recorded population in the northern pond.\n- Axolotl census observation 82: recorded population in the northern pond.\n- Axolotl census observation 83: recorded population in the northern pond.\n- Axolotl census observation 84: recorded population in the northern pond.\n- Axolotl census observation 85: recorded population in the northern pond.\n- Axolotl census observation 86: recorded population in the northern pond.\n- Axolotl census observation 87: recorded population in the northern pond.\n- Axolotl census observation 88: recorded population in the northern pond.\n- Axolotl census observation 89: recorded population in the northern pond.\n- Axolotl census observation 90: recorded population in the northern pond.\n- Axolotl census observation 91: recorded population in the northern pond.\n- Axolotl census observation 92: recorded population in the northern pond.\n- Axolotl census observation 93: recorded population in the northern pond.\n- Axolotl census observation 94: recorded population in the northern pond.\n- Axolotl census observation 95: recorded population in the northern pond.\n- Axolotl census observation 96: recorded population in the northern pond.\n- Axolotl census observation 97: recorded population in the northern pond.\n- Axolotl census observation 98: recorded population in the northern pond.\n- Axolotl census observation 99: recorded population in the northern pond.\n- Axolotl census observation 100: recorded population in the northern pond.\n- Axolotl census observation 101: recorded population in the northern pond.\n- Axolotl census observation 102: recorded population in the northern pond.\n- Axolotl census observation 103: recorded population in the northern pond.\n- Axolotl census observation 104: recorded population in the northern pond.\n- Axolotl census observation 105: recorded population in the northern pond.\n- Axolotl census observation 106: recorded population in the northern pond.\n- Axolotl census observation 107: recorded population in the northern pond.\n- Axolotl census observation 108: recorded population in the northern pond.\n- Axolotl census observation 109: recorded population in the northern pond.\n- Axolotl census observation 110: recorded population in the northern pond.\n- Axolotl census observation 111: recorded population in the northern pond.\n- Axolotl census observation 112: recorded population in the northern pond.\n- Axolotl census observation 113: recorded population in the northern pond.\n- Axolotl census observation 114: recorded population in the northern pond.\n- Axolotl census observation 115: recorded population in the northern pond.\n- Axolotl census observation 116: recorded population in the northern pond.\n- Axolotl census observation 117: recorded population in the northern pond.\n- Axolotl census observation 118: recorded population in the northern pond.\n- Axolotl census observation 119: recorded population in the northern pond.\n- Axolotl census observation 120: recorded population in the northern pond.\n- Axolotl census observation 121: recorded population in the northern pond.\n- Axolotl census observation 122: recorded population in the northern pond.\n- Axolotl census observation 123: recorded population in the northern pond.\n- Axolotl census observation 124: recorded population in the northern pond.\n- Axolotl census observation 125: recorded population in the northern pond.\n- Axolotl census observation 126: recorded population in the northern pond.\n- Axolotl census observation 127: recorded population in the northern pond.\n- Axolotl census observation 128: recorded population in the northern pond.\n- Axolotl census observation 129: recorded population in the northern pond.\n- Axolotl census observation 130: recorded population in the northern pond.\n- Axolotl census observation 131: recorded population in the northern pond.\n- Axolotl census observation 132: recorded population in the northern pond.\n- Axolotl census observation 133: recorded population in the northern pond.\n- Axolotl census observation 134: recorded population in the northern pond.\n- Axolotl census observation 135: recorded population in the northern pond.\n- Axolotl census observation 136: recorded population in the northern pond.\n- Axolotl census observation 137: recorded population in the northern pond.\n- Axolotl census observation 138: recorded population in the northern pond.\n- Axolotl census observation 139: recorded population in the northern pond.\n- Axolotl census observation 140: recorded population in the northern pond.\n- Axolotl census observation 141: recorded population in the northern pond.\n- Axolotl census observation 142: recorded population in the northern pond.\n- Axolotl census observation 143: recorded population in the northern pond.\n- Axolotl census observation 144: recorded population in the northern pond.\n- Axolotl census observation 145: recorded population in the northern pond.\n- Axolotl census observation 146: recorded population in the northern pond.\n- Axolotl census observation 147: recorded population in the northern pond.\n- Axolotl census observation 148: recorded population in the northern pond.\n- Axolotl census observation 149: recorded population in the northern pond.\n- Axolotl census observation 150: recorded population in the northern pond.\n- Axolotl census observation 151: recorded population in the northern pond.\n- Axolotl census observation 152: recorded population in the northern pond.\n- Axolotl census observation 153: recorded population in the northern pond.\n- Axolotl census observation 154: recorded population in the northern pond.\n- Axolotl census observation 155: recorded population in the northern pond.\n- Axolotl census observation 156: recorded population in the northern pond.\n- Axolotl census observation 157: recorded population in the northern pond.\n- Axolotl census observation 158: recorded population in the northern pond.\n- Axolotl census observation 159: recorded population in the northern pond.\n- Axolotl census observation 160: recorded population in the northern pond.\n- Axolotl census observation 161: recorded population in the northern pond.\n- Axolotl census observation 162: recorded population in the northern pond.\n- Axolotl census observation 163: recorded population in the northern pond.\n- Axolotl census observation 164: recorded population in the northern pond.\n- Axolotl census observation 165: recorded population in the northern pond.\n- Axolotl census observation 166: recorded population in the northern pond.\n- Axolotl census observation 167: recorded population in the northern pond.\n- Axolotl census observation 168: recorded population in the northern pond.\n- Axolotl census observation 169: recorded population in the northern pond.\n- Axolotl census observation 170: recorded population in the northern pond.\n- Axolotl census observation 171: recorded population in the northern pond.\n- Axolotl census observation 172: recorded population in the northern pond.\n- Axolotl census observation 173: recorded population in the northern pond.\n- Axolotl census observation 174: recorded population in the northern pond.\n- Axolotl census observation 175: recorded population in the northern pond.\n- Axolotl census observation 176: recorded population in the northern pond.\n- Axolotl census observation 177: recorded population in the northern pond.\n- Axolotl census observation 178: recorded population in the northern pond.\n- Axolotl census observation 179: recorded population in the northern pond.\n- Axolotl census observation 180: recorded population in the northern pond.\n- Axolotl census observation 181: recorded population in the northern pond.\n- Axolotl census observation 182: recorded population in the northern pond.\n- Axolotl census observation 183: recorded population in the northern pond.\n- Axolotl census observation 184: recorded population in the northern pond.\n- Axolotl census observation 185: recorded population in the northern pond.\n- Axolotl census observation 186: recorded population in the northern pond.\n- Axolotl census observation 187: recorded population in the northern pond.\n- Axolotl census observation 188: recorded population in the northern pond.\n- Axolotl census observation 189: recorded population in the northern pond.\n- Axolotl census observation 190: recorded population in the northern pond.\n- Axolotl census observation 191: recorded population in the northern pond.\n- Axolotl census observation 192: recorded population in the northern pond.\n- Axolotl census observation 193: recorded population in the northern pond.\n- Axolotl census observation 194: recorded population in the northern pond.\n- Axolotl census observation 195: recorded population in the northern pond.\n- Axolotl census observation 196: recorded population in the northern pond.\n- Axolotl census observation 197: recorded population in the northern pond.\n- Axolotl census observation 198: recorded population in the northern pond.\n- Axolotl census observation 199: recorded population in the northern pond.\n- Axolotl census observation 200: recorded population in the northern pond.\n- Axolotl census observation 201: recorded population in the northern pond.\n- Axolotl census observation 202: recorded population in the northern pond.\n- Axolotl census observation 203: recorded population in the northern pond.\n- Axolotl census observation 204: recorded population in the northern pond.\n- Axolotl census observation 205: recorded population in the northern pond.\n- Axolotl census observation 206: recorded population in the northern pond.\n- Axolotl census observation 207: recorded population in the northern pond.\n- Axolotl census observation 208: recorded population in the northern pond.\n- Axolotl census observation 209: recorded population in the northern pond.\n- Axolotl census observation 210: recorded population in the northern pond.\n- Axolotl census observation 211: recorded population in the northern pond.\n- Axolotl census observation 212: recorded population in the northern pond.\n- Axolotl census observation 213: recorded population in the northern pond.\n- Axolotl census observation 214: recorded population in the northern pond.\n- Axolotl census observation 215: recorded population in the northern pond.\n- Axolotl census observation 216: recorded population in the northern pond.\n- Axolotl census observation 217: recorded population in the northern pond.\n- Axolotl census observation 218: recorded population in the northern pond.\n- Axolotl census observation 219: recorded population in the northern pond.\n- Axolotl census observation 220: recorded population in the northern pond.\n- Axolotl census observation 221: recorded population in the northern pond.\n- Axolotl census observation 222: recorded population in the northern pond.\n- Axolotl census observation 223: recorded population in the northern pond.\n- Axolotl census observation 224: recorded population in the northern pond.\n- Axolotl census observation 225: recorded population in the northern pond.\n- Axolotl census observation 226: recorded population in the northern pond.\n- Axolotl census observation 227: recorded population in the northern pond.\n- Axolotl census observation 228: recorded population in the northern pond.\n- Axolotl census observation 229: recorded population in the northern pond.\n- Axolotl census observation 230: recorded population in the northern pond.\n- Axolotl census observation 231: recorded population in the northern pond.\n- Axolotl census observation 232: recorded population in the northern pond.\n- Axolotl census observation 233: recorded population in the northern pond.\n- Axolotl census observation 234: recorded population in the northern pond.\n- Axolotl census observation 235: recorded population in the northern pond.\n- Axolotl census observation 236: recorded population in the northern pond.\n- Axolotl census observation 237: recorded population in the northern pond.\n- Axolotl census observation 238: recorded population in the northern pond.\n- Axolotl census observation 239: recorded population in the northern pond.\n- Axolotl census observation 240: recorded population in the northern pond.\n- Axolotl census observation 241: recorded population in the northern pond.\n- Axolotl census observation 242: recorded population in the northern pond.\n- Axolotl census observation 243: recorded population in the northern pond.\n- Axolotl census observation 244: recorded population in the northern pond.\n- Axolotl census observation 245: recorded population in the northern pond.\n- Axolotl census observation 246: recorded population in the northern pond.\n- Axolotl census observation 247: recorded population in the northern pond.\n- Axolotl census observation 248: recorded population in the northern pond.\n- Axolotl census observation 249: recorded population in the northern pond.\n- Axolotl census observation 250: recorded population in the northern pond.\n- Axolotl census observation 251: recorded population in the northern pond.\n- Axolotl census observation 252: recorded population in the northern pond.\n- Axolotl census observation 253: recorded population in the northern pond.\n- Axolotl census observation 254: recorded population in the northern pond.\n- Axolotl census observation 255: recorded population in the northern pond.\n- Axolotl census observation 256: recorded population in the northern pond.\n- Axolotl census observation 257: recorded population in the northern pond.\n- Axolotl census observation 258: recorded population in the northern pond.\n- Axolotl census observation 259: recorded population in the northern pond.\n- Axolotl census observation 260: recorded population in the northern pond.\n- Axolotl census observation 261: recorded population in the northern pond.\n- Axolotl census observation 262: recorded population in the northern pond.\n- Axolotl census observation 263: recorded population in the northern pond.\n- Axolotl census observation 264: recorded population in the northern pond.\n- Axolotl census observation 265: recorded population in the northern pond.\n- Axolotl census observation 266: recorded population in the northern pond.\n- Axolotl census observation 267: recorded population in the northern pond.\n- Axolotl census observation 268: recorded population in the northern pond.\n- Axolotl census observation 269: recorded population in the northern pond.\n- Axolotl census observation 270: recorded population in the northern pond.\n- Axolotl census observation 271: recorded population in the northern pond.\n- Axolotl census observation 272: recorded population in the northern pond.\n- Axolotl census observation 273: recorded population in the northern pond.\n- Axolotl census observation 274: recorded population in the northern pond.\n- Axolotl census observation 275: recorded population in the northern pond.\n- Axolotl census observation 276: recorded population in the northern pond.\n- Axolotl census observation 277: recorded population in the northern pond.\n- Axolotl census observation 278: recorded population in the northern pond.\n- Axolotl census observation 279: recorded population in the northern pond.\n- Axolotl census observation 280: recorded population in the northern pond.\n- Axolotl census observation 281: recorded population in the northern pond.\n- Axolotl census observation 282: recorded population in the northern pond.\n- Axolotl census observation 283: recorded population in the northern pond.\n- Axolotl census observation 284: recorded population in the northern pond.\n- Axolotl census observation 285: recorded population in the northern pond.\n- Axolotl census observation 286: recorded population in the northern pond.\n- Axolotl census observation 287: recorded population in the northern pond.\n- Axolotl census observation 288: recorded population in the northern pond.\n- Axolotl census observation 289: recorded population in the northern pond.\n- Axolotl census observation 290: recorded population in the northern pond.\n- Axolotl census observation 291: recorded population in the northern pond.\n- Axolotl census observation 292: recorded population in the northern pond.\n- Axolotl census observation 293: recorded population in the northern pond.\n- Axolotl census observation 294: recorded population in the northern pond.\n- Axolotl census observation 295: recorded population in the northern pond.\n- Axolotl census observation 296: recorded population in the northern pond.\n- Axolotl census observation 297: recorded population in the northern pond.\n- Axolotl census observation 298: recorded population in the northern pond.\n- Axolotl census observation 299: recorded population in the northern pond.\n- Axolotl census observation 300: recorded population in the northern pond.\n- Axolotl census observation 301: recorded population in the northern pond.\n- Axolotl census observation 302: recorded population in the northern pond.\n- Axolotl census observation 303: recorded population in the northern pond.\n- Axolotl census observation 304: recorded population in the northern pond.\n- Axolotl census observation 305: recorded population in the northern pond.\n- Axolotl census observation 306: recorded population in the northern pond.\n- Axolotl census observation 307: recorded population in the northern pond.\n- Axolotl census observation 308: recorded population in the northern pond.\n- Axolotl census observation 309: recorded population in the northern pond.\n- Axolotl census observation 310: recorded population in the northern pond.\n- Axolotl census observation 311: recorded population in the northern pond.\n- Axolotl census observation 312: recorded population in the northern pond.\n- Axolotl census observation 313: recorded population in the northern pond.\n- Axolotl census observation 314: recorded population in the northern pond.\n- Axolotl census observation 315: recorded population in the northern pond.\n- Axolotl census observation 316: recorded population in the northern pond.\n- Axolotl census observation 317: recorded population in the northern pond.\n- Axolotl census observation 318: recorded population in the northern pond.\n- Axolotl census observation 319: recorded population in the northern pond.\n- Axolotl census observation 320: recorded population in the northern pond.\n- Axolotl census observation 321: recorded population in the northern pond.\n- Axolotl census observation 322: recorded population in the northern pond.\n- Axolotl census observation 323: recorded population in the northern pond.\n- Axolotl census observation 324: recorded population in the northern pond.\n- Axolotl census observation 325: recorded population in the northern pond.\n- Axolotl census observation 326: recorded population in the northern pond.\n- Axolotl census observation 327: recorded population in the northern pond.\n- Axolotl census observation 328: recorded population in the northern pond.\n- Axolotl census observation 329: recorded population in the northern pond.\n- Axolotl census observation 330: recorded population in the northern pond.\n- Axolotl census observation 331: recorded population in the northern pond.\n- Axolotl census observation 332: recorded population in the northern pond.\n- Axolotl census observation 333: recorded population in the northern pond.\n- Axolotl census observation 334: recorded population in the northern pond.\n- Axolotl census observation 335: recorded population in the northern pond.\n- Axolotl census observation 336: recorded population in the northern pond.\n- Axolotl census observation 337: recorded population in the northern pond.\n- Axolotl census observation 338: recorded population in the northern pond.\n- Axolotl census observation 339: recorded population in the northern pond.\n- Axolotl census observation 340: recorded population in the northern pond.\n- Axolotl census observation 341: recorded population in the northern pond.\n- Axolotl census observation 342: recorded population in the northern pond.\n- Axolotl census observation 343: recorded population in the northern pond.\n- Axolotl census observation 344: recorded population in the northern pond.\n- Axolotl census observation 345: recorded population in the northern pond.\n- Axolotl census observation 346: recorded population in the northern pond.\n- Axolotl census observation 347: recorded population in the northern pond.\n- Axolotl census observation 348: recorded population in the northern pond.\n- Axolotl census observation 349: recorded population in the northern pond.\n"
+  },
+  "cases": [
+    {
+      "id": "memory-cap",
+      "prompt": "Why is a pi-memory3 knowledge record withheld from injection?",
+      "must": [
+        "knowledge/memory-injection.md"
+      ]
+    },
+    {
+      "id": "memory-stale",
+      "prompt": "What prevents stale-base replacements in pi-memory3 concurrent writes?",
+      "must": [
+        "knowledge/memory-concurrency.md"
+      ]
+    },
+    {
+      "id": "memory-append",
+      "prompt": "Explain pi-memory3 append serialization and fingerprint checks.",
+      "must": [
+        "knowledge/memory-concurrency.md"
+      ]
+    },
+    {
+      "id": "atlas-submit",
+      "prompt": "My Atlas React form double-submits when I click Save.",
+      "must": [
+        "knowledge/atlas-forms.md"
+      ]
+    },
+    {
+      "id": "atlas-controls",
+      "prompt": "How should controlled input behave in Atlas React forms?",
+      "must": [
+        "knowledge/atlas-forms.md"
+      ]
+    },
+    {
+      "id": "atlas-theme",
+      "prompt": "How do Atlas Tailwind dark-mode classes reach a modal?",
+      "must": [
+        "knowledge/atlas-style.md"
+      ]
+    },
+    {
+      "id": "atlas-spacing",
+      "prompt": "Which spacing values does Atlas Tailwind styling use?",
+      "must": [
+        "knowledge/atlas-style.md"
+      ]
+    },
+    {
+      "id": "postgres-column",
+      "prompt": "Add a nullable column in a Boreal Postgres migration without downtime.",
+      "must": [
+        "knowledge/boreal-postgres.md"
+      ]
+    },
+    {
+      "id": "postgres-index",
+      "prompt": "How should Boreal create a concurrent-index in Postgres?",
+      "must": [
+        "knowledge/boreal-postgres.md"
+      ]
+    },
+    {
+      "id": "python-profile",
+      "prompt": "What should I profile before rewriting a Boreal Python comprehension?",
+      "must": [
+        "knowledge/boreal-python.md"
+      ]
+    },
+    {
+      "id": "python-loop",
+      "prompt": "My Python performance loop is slow in Boreal.",
+      "must": [
+        "knowledge/boreal-python.md"
+      ]
+    },
+    {
+      "id": "lumo-build",
+      "prompt": "How do I build LUMO on macOS using CMake and wxWidgets?",
+      "must": [
+        "knowledge/lumo-build.md"
+      ]
+    },
+    {
+      "id": "lumo-import",
+      "prompt": "How do I safely import Pineledger into LUMO?",
+      "must": [
+        "knowledge/lumo-import.md"
+      ]
+    },
+    {
+      "id": "harbor-stack",
+      "prompt": "What stack does the Harbor estimator prototype use?",
+      "must": [
+        "knowledge/harbor-stack.md"
+      ]
+    },
+    {
+      "id": "history-move",
+      "prompt": "Which day did I move the shared bank and configure PI_MEMORY_DIR?",
+      "must": [
+        "history/daily/2026-11/2026-11-01-dailyContext.md"
+      ]
+    },
+    {
+      "id": "reversal",
+      "prompt": "What color should the Atlas background be?",
+      "must": [
+        "knowledge/background-blue.md",
+        "knowledge/background-green.md"
+      ],
+      "relevant": [
+        "knowledge/background-blue.md",
+        "knowledge/background-green.md",
+        "knowledge/atlas-style.md"
+      ]
+    },
+    {
+      "id": "typo-postgres",
+      "prompt": "Boreal postgress migraitons without downtime",
+      "must": [
+        "knowledge/boreal-postgres.md"
+      ]
+    },
+    {
+      "id": "typo-tailwind",
+      "prompt": "Atlas tailwnd modal spacing",
+      "must": [
+        "knowledge/atlas-style.md"
+      ]
+    },
+    {
+      "id": "prefix-import",
+      "prompt": "LUMO pineledg importer",
+      "must": [
+        "knowledge/lumo-import.md"
+      ]
+    },
+    {
+      "id": "no-arithmetic",
+      "prompt": "What is 2 + 2?",
+      "must": [],
+      "none": true
+    },
+    {
+      "id": "no-weather",
+      "prompt": "Will it rain in Lisbon tomorrow?",
+      "must": [],
+      "none": true
+    },
+    {
+      "id": "no-docker",
+      "prompt": "Why does my Docker image rebuild every layer when I change one file?",
+      "must": [],
+      "none": true
+    },
+    {
+      "id": "no-naming",
+      "prompt": "What should I name this variable holding the user's last login time?",
+      "must": [],
+      "none": true
+    },
+    {
+      "id": "no-keyboard",
+      "prompt": "How do I change the keyboard shortcut for format document?",
+      "must": [],
+      "none": true
+    },
+    {
+      "id": "no-export",
+      "prompt": "What image dimensions should an export use for retina screens?",
+      "must": [],
+      "none": true
+    },
+    {
+      "id": "no-travel",
+      "prompt": "Suggest a weekend itinerary for Kyoto.",
+      "must": [],
+      "none": true
+    },
+    {
+      "id": "no-common",
+      "prompt": "how do I feel about this",
+      "must": [],
+      "none": true
+    },
+    {
+      "id": "oversize",
+      "prompt": "Axolotl census archive",
+      "must": [],
+      "none": true,
+      "named": [
+        "knowledge/oversized.md"
+      ]
+    },
+    {
+      "id": "follow-start",
+      "prompt": "Explain pi-memory3 injection withholding and prompt budget.",
+      "must": [
+        "knowledge/memory-injection.md"
+      ],
+      "session": "memory-follow"
+    },
+    {
+      "id": "follow-long",
+      "prompt": "What are its goods, bads, possible improvements, your assessment of each item and recommendation?",
+      "must": [
+        "knowledge/memory-injection.md"
+      ],
+      "session": "memory-follow"
+    },
+    {
+      "id": "follow-short",
+      "prompt": "Do it.",
+      "must": [
+        "knowledge/memory-injection.md"
+      ],
+      "session": "memory-follow"
+    },
+    {
+      "id": "topic-switch",
+      "prompt": "Switch topics: how do I build LUMO on macOS?",
+      "must": [
+        "knowledge/lumo-build.md"
+      ],
+      "session": "memory-follow"
+    },
+    {
+      "id": "none-after-switch",
+      "prompt": "Switch topics: what is 2 + 2?",
+      "must": [],
+      "none": true,
+      "session": "memory-follow"
+    },
+    {
+      "id": "follow-after-none",
+      "prompt": "And what about its tradeoffs?",
+      "must": [],
+      "none": true,
+      "session": "memory-follow"
+    }
+  ]
+}

@@ -82,7 +82,7 @@ export async function resolve(specifier, context, nextResolve) {
 			let entryFile;
 			if (name === "pi-ai" && subpath.length === 0) {
 				entryFile = path.join(candidate, "dist", "compat.js");
-			} else if (name === "pi-ai") {
+			} else if (subpath.length > 0) {
 				entryFile = path.join(candidate, "dist", ...subpath, "index.js");
 				if (!existsSync(entryFile)) {
 					entryFile = path.join(candidate, "dist", subpath.join("/") + ".js");

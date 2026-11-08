@@ -1,0 +1,38 @@
+{
+	"name": "memory",
+	"private": true,
+	"version": "0.0.1",
+	"description": "Persistent memory bank for Pi \u2014 active projects, daily context, and auto-discovered knowledge, searched with MiniSearch (BM25 + fuzzy).",
+	"type": "module",
+	"scripts": {
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"typecheck": "tsc -p tsconfig.json",
+		"clean": "echo 'nothing to clean'",
+		"build": "echo 'nothing to build'",
+		"smoke": "node scripts/smoke-rpc.mjs",
+		"audit": "node scripts/audit-sessions.mjs",
+		"replay": "node scripts/replay-injection.mjs",
+		"eval": "node scripts/evaluate-retrieval.mjs",
+		"race": "node scripts/race-probe.mjs",
+		"verify": "npm run typecheck && npm test && npm run smoke && npm run race",
+		"measure": "node scripts/measure-injection.mjs"
+	},
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		]
+	},
+	"dependencies": {
+		"minisearch": "^7.2.0"
+	},
+	"devDependencies": {
+		"jiti": "^2.6.1",
+		"@earendil-works/pi-coding-agent": "1.4.0",
+		"@types/node": "^26.6.5",
+		"memfs": "^4.80.0",
+		"typebox": "1.3.27",
+		"typescript": "^7.0.2",
+		"vitest": "^5.0.5"
+	}
+}

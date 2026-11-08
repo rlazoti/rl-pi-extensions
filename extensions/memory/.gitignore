@@ -1,0 +1,12 @@
+# Dependencies — installed, never committed
+node_modules/
+
+# OS cruft
+.DS_Store
+
+# Local overrides / scratch
+*.local
+scratch/
+
+# the pointer-disabled control copy, written by npm run measure -- --control
+.measure-variant/
