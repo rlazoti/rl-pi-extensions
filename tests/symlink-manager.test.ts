@@ -115,12 +115,12 @@ function makeExt(srcDir: string, name: string): string {
 
 // --- Registry & path derivation ---
 
-test("getAvailableExtensions returns the 10 managed extensions under the given root", () => {
+test("getAvailableExtensions returns the 11 managed extensions under the given root", () => {
 	const exts = getAvailableExtensions("/fake/path");
-	assert.equal(exts.length, 10);
+	assert.equal(exts.length, 11);
 	assert.deepEqual(
 		exts.map((e) => e.name),
-		["tmux-feedback", "session-banner", "session-attention", "snippets", "emacs-feedback", "memory", "co-authored-by-ai", "scan-guard", "settle-guard", "context-viewer"],
+		["tmux-feedback", "session-banner", "session-attention", "snippets", "emacs-feedback", "memory", "co-authored-by-ai", "scan-guard", "settle-guard", "context-viewer", "ask"],
 	);
 	assert.equal(exts[0].description, "Inline feedback for tmux scrollback selection");
 	assert.equal(exts[1].description, "Colored banner + auto-naming for Pi sessions");

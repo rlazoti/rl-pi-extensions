@@ -1,6 +1,6 @@
 {
 	"name": "rl-pi-extensions",
-	"version": "1.9.0",
+	"version": "1.10.0",
 	"description": "Personal Pi coding agent extensions — tmux feedback, session banner, session attention, snippets, emacs feedback, turn and scan guards",
 	"type": "module",
 	"license": "MIT",

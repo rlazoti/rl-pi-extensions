@@ -164,6 +164,12 @@ export function getAvailableExtensions(monorepoRoot: string): ExtensionDescripto
 			description: "Browse the context window: token cost per category, the system prompt, tool schemas, every message",
 			path: join(monorepoRoot, "extensions", "context-viewer"),
 		},
+		{
+			name: "ask",
+			label: "ask",
+			description: "Ask questions with single-select, multi-select, and custom answers",
+			path: join(monorepoRoot, "extensions", "ask"),
+		},
 	];
 }
 

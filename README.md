@@ -6,6 +6,7 @@ Personal Pi coding agent extensions, managed as a single package with a TUI for 
 
 | Extension | Description |
 |-----------|-------------|
+| **ask** | Ask structured single- or multi-select questions, with custom answers and notes |
 | **tmux-feedback** | Inline feedback for tmux scrollback selection |
 | **session-banner** | Colored banner + auto-naming for Pi sessions |
 | **session-attention** | Desktop notifications when Pi needs your attention |
@@ -39,7 +40,7 @@ Run `/rl-extensions` in Pi to open the TUI manager where you can:
 - Apply changes with Enter
 - Cancel with Esc
 
-**Changes take effect after `/reload`.** Extensions are enabled/disabled via symlinks in `~/.pi/agent/extensions/`. Only symlinked extensions appear in Pi's `[Extensions]` list.
+**Changes take effect after `/reload`.** Extensions are enabled/disabled via symlinks in `~/.pi/agent/extensions/`. Only symlinked extensions appear in Pi's `[Extensions]` list. If an existing standalone `ask` directory occupies the link path, see `extensions/ask/README.md` for the reversible cutover; the manager will not replace it.
 
 **Broken links** (e.g. after the repo was moved or renamed) show as `✕` in the picker; enabling them re-creates the symlink pointing at this checkout. Symlink targets are always derived from this package's location, so they can't drift into the directory Pi was started from.
 
