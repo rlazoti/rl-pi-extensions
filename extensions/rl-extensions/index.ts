@@ -7,8 +7,8 @@
  * - Changes take effect after /reload
  */
 
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { openExtensionPicker, type ExtensionPickerResult } from "./picker.js";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { openExtensionPicker } from "./picker.js";
 
 export default function managerExtension(pi: ExtensionAPI) {
 	pi.registerCommand("rl-extensions", {
@@ -23,18 +23,20 @@ export default function managerExtension(pi: ExtensionAPI) {
 			if (changedCount === 0) {
 				ctx.ui.notify(`No changes — ${enabledCount} enabled`, "info");
 			} else if (enabledCount === 0) {
-				ctx.ui.notify("All extensions disabled. Changes apply after /reload", "info");
+				ctx.ui.notify("All extensions disabled.", "info");
 			} else {
-				ctx.ui.notify(
-					`${changedCount} change(s) applied — ${enabledCount} enabled. Changes apply after /reload`,
-					"info",
-				);
+				ctx.ui.notify(`${changedCount} change(s) applied — ${enabledCount} enabled.`, "info");
 			}
-			// Surface per-extension failures (e.g. a non-symlink entry occupying
-			// the link path) instead of silently skipping them.
-			for (const error of result.errors) {
+			// Report failures before asking, including when only some changes succeeded.
+			for (const error of errors) {
 				ctx.ui.notify(`rl-extensions: ${error}`, "error");
 			}
+			if (changedCount === 0) return;
+			if (await ctx.ui.confirm("Reload Pi now?", "Changes take effect after reload. Other sessions must be reloaded separately.")) {
+				await ctx.reload();
+				return;
+			}
+			ctx.ui.notify("Changes apply after /reload", "info");
 		},
 	});
 }

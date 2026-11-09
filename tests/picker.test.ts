@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,6 +17,7 @@ const CATALOG_COUNT = getAvailableExtensions(getMonorepoRoot()).length;
 // only pin the shape of the module; the interaction bugs (hidden filter,
 // phantom rows, off-screen selection) are only observable by rendering.
 interface PickerHarness {
+	dir: string;
 	picker: ExtensionPicker;
 	readonly rows: string[];
 	readonly result?: ExtensionPickerResult;
@@ -43,6 +44,7 @@ function createPickerHarness(terminalRows = 40, terminalCols = 80): PickerHarnes
 		result = value;
 	});
 	return {
+		dir,
 		picker,
 		get rows() {
 			return picker.render(terminalCols).map((line) => line.replace(/\u001b\[[0-9;]*m/g, "").trimEnd());
@@ -56,6 +58,21 @@ function createPickerHarness(terminalRows = 40, terminalCols = 80): PickerHarnes
 		},
 	};
 }
+
+test("picker counts successful changes and reports occupied paths", () => {
+	const harness = createPickerHarness();
+	try {
+		const first = getAvailableExtensions(getMonorepoRoot())[0]!;
+		writeFileSync(join(harness.dir, first.name), "occupied");
+		harness.picker.handleInput(" ");
+		harness.picker.handleInput("enter");
+		assert.equal(harness.result?.kind, "apply");
+		if (harness.result?.kind !== "apply") throw new Error("not applied");
+		assert.equal(harness.result.changedCount, 0);
+		assert.equal(harness.result.enabledCount, 0);
+		assert.equal(harness.result.errors.length, 1);
+	} finally { harness.close(); }
+});
 
 function searchLine(rows: string[]): string | undefined {
 	return rows.find((row) => row.includes("Search"));

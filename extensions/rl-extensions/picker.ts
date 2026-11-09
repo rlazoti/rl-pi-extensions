@@ -162,14 +162,10 @@ export class ExtensionPicker implements Component, Focusable {
 		} else if (this.keybindings.matches(data, "tui.select.confirm")) {
 			// Apply all pending changes, reporting per-extension failures
 			const errors: string[] = [];
-			// Count what really differs from the disk, before anything is written:
-			// toggling an enabled extension off and back on queues an entry but
-			// changes nothing, and the caller's message must not claim a change.
-			const changedCount = EXTENSIONS.filter((e) => {
-				const pending = this.pendingChanges.get(e.name);
-				return pending !== undefined && pending !== (getExtensionStatus(e.name) === "enabled");
-			}).length;
+			// Count only successful changes, so failures do not trigger a reload prompt.
+			let changedCount = 0;
 			for (const [name, enabled] of this.pendingChanges) {
+				if (enabled === (getExtensionStatus(name) === "enabled")) continue;
 				try {
 					if (enabled) {
 						const ext = EXTENSIONS.find((e) => e.name === name);
@@ -181,6 +177,10 @@ export class ExtensionPicker implements Component, Focusable {
 					} else {
 						disableExtension(name);
 					}
+					if ((getExtensionStatus(name) === "enabled") !== enabled) {
+						throw new Error("Could not apply extension state");
+					}
+					changedCount++;
 				} catch (error) {
 					errors.push(`${name}: ${error instanceof Error ? error.message : String(error)}`);
 				}

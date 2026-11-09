@@ -5,9 +5,11 @@ import { readFileSync } from "node:fs";
 // Test that the manager extension registers the correct command
 // Behavioral harness: drive the registered /rl-extensions handler with a fake
 // picker result and capture what it tells the user.
-async function applyMessagesFor(result: unknown): Promise<string[]> {
+async function runManager(result: unknown, confirm = false): Promise<{ messages: string[]; prompts: string[]; reloads: number }> {
 	const { default: managerExtension } = await import("../extensions/rl-extensions/index.ts");
 	const messages: string[] = [];
+	const prompts: string[] = [];
+	let reloads = 0;
 	let handler: ((args: string, ctx: unknown) => Promise<void>) | undefined;
 	const pi = {
 		registerCommand: (_name: string, definition: { handler: (args: string, ctx: unknown) => Promise<void> }) => {
@@ -19,10 +21,31 @@ async function applyMessagesFor(result: unknown): Promise<string[]> {
 	const ui = {
 		custom: async () => result,
 		notify: (message: string) => messages.push(message),
+		confirm: async (title: string) => { prompts.push(title); return confirm; },
 	};
-	await handler("", { ui });
-	return messages;
+	await handler("", { ui, reload: async () => { reloads++; } });
+	return { messages, prompts, reloads };
 }
+
+async function applyMessagesFor(result: unknown): Promise<string[]> {
+	return (await runManager(result)).messages;
+}
+
+test("reload is offered only for applied changes and runs only on confirmation", async () => {
+	const change = { kind: "apply", enabledCount: 1, changedCount: 1, errors: [] };
+	const yes = await runManager(change, true);
+	assert.deepEqual(yes.prompts, ["Reload Pi now?"]);
+	assert.equal(yes.reloads, 1);
+	assert.ok(!yes.messages.some((m) => m.includes("after /reload")));
+	const no = await runManager(change);
+	assert.equal(no.reloads, 0);
+	assert.ok(no.messages.some((m) => m.includes("after /reload")));
+	for (const result of [{ kind: "cancel" }, { kind: "apply", enabledCount: 1, changedCount: 0, errors: ["failed"] }]) {
+		const outcome = await runManager(result, true);
+		assert.deepEqual(outcome.prompts, []);
+		assert.equal(outcome.reloads, 0);
+	}
+});
 
 test("manager notification says what changed, not how many are enabled", async () => {
 	// Disabling one of five used to print "4 extension(s) enabled", which read

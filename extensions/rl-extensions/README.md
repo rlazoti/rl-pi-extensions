@@ -4,7 +4,7 @@ TUI manager for enabling/disabling rl-pi-extensions.
 
 ## What it does
 
-Provides a framed picker to browse and toggle extensions on/off. Changes are tracked in-memory and only applied when you press Enter. Extensions are managed via symlinks in `~/.pi/agent/extensions/`. Changes take effect after `/reload`.
+Provides a framed picker to browse and toggle extensions on/off. Changes are tracked in-memory and only applied when you press Enter. Extensions are managed via symlinks in `~/.pi/agent/extensions/`. After successful changes, the manager asks whether to reload Pi. Choose No to reload later with `/reload`. Other open sessions need their own reload. No prompt appears if nothing changed; failures are reported separately.
 
 ## Usage
 
