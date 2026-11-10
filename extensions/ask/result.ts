@@ -1,25 +1,54 @@
-import type { QuestionData, AnswerData } from "./types.js";
+import type { QuestionData, AnswerData, AskResult } from "./types.js";
 
 export interface ToolResult {
 	content: { type: "text"; text: string }[];
 	details: Record<string, unknown>;
 }
 
+/**
+ * A note rendered as one line of prose. The stored value keeps its newlines — the
+ * JSON below it carries them — but the header line is meant to read as a sentence.
+ */
+function asLine(text: string): string {
+	return text.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Notes are written as lines above the JSON, not only as fields inside it: a string
+ * sitting next to `answers` reads like one more answer to choose between, and these
+ * are the user's words about all of them.
+ */
+function noteLines(result: AskResult, questions: QuestionData[]): string[] {
+	const lines: string[] = [];
+	if (result.note) lines.push(`User note: ${asLine(result.note)}`);
+	if (result.questionNotes) {
+		for (const q of questions) {
+			const note = result.questionNotes[q.id];
+			if (note) lines.push(`User note on ${q.id} (${JSON.stringify(q.question)}): ${asLine(note)}`);
+		}
+	}
+	return lines;
+}
+
 export function formatResult(
-	result: { answers: Record<string, AnswerData[]>; skipped: string[]; unanswered: string[] },
+	result: AskResult,
 	questions: QuestionData[],
 ): ToolResult {
 	const questionMap: Record<string, string> = {};
 	for (const q of questions) { questionMap[q.id] = q.question; }
 
+	const notes = noteLines(result, questions);
+
 	return {
-		content: [{ type: "text", text: JSON.stringify(result) }],
+		content: [{ type: "text", text: [...notes, JSON.stringify(result)].join("\n") }],
 		details: {
 			answered: Object.keys(result.answers).length > 0,
 			questions: questionMap,
 			answers: result.answers,
 			skipped: result.skipped,
 			unanswered: result.unanswered,
+			...(result.note ? { note: result.note } : {}),
+			...(result.questionNotes ? { questionNotes: result.questionNotes } : {}),
 		},
 	};
 }

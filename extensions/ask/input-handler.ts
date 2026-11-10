@@ -18,6 +18,8 @@ export const InputAction = {
 	ToggleOptionByNumber: "ToggleOptionByNumber",
 	StartCustom: "StartCustom",
 	StartNote: "StartNote",
+	StartQuestionNote: "StartQuestionNote",
+	StartSharedNote: "StartSharedNote",
 	Skip: "Skip",
 	Done: "Done",
 	Cancel: "Cancel",
@@ -54,6 +56,12 @@ export class InputHandler {
 			return InputAction.GoBackTab;
 		}
 
+		// The shared note belongs to the whole ask, so it is reachable from the Done tab
+		// too — which is where you are when you realise the context applies to everything.
+		if (matchesKey(data, "n")) {
+			return InputAction.StartSharedNote;
+		}
+
 		if (this.state.currentTab === this.state.getDonetab()) {
 			if (matchesKey(data, Key.enter)) {
 				return InputAction.Done;
@@ -63,6 +71,11 @@ export class InputHandler {
 
 		const q = this.state.currentQuestion();
 		if (!q) return InputAction.None;
+
+		// A note about this question, without having to pick an option to hang it on.
+		if (matchesKey(data, "m")) {
+			return InputAction.StartQuestionNote;
+		}
 
 		const hasOptions = q.options && q.options.length > 0;
 

@@ -1,8 +1,29 @@
-import type { QuestionData, OptionData, AnswerData } from "./types.js";
+import type { QuestionData, OptionData, AnswerData, AskResult } from "./types.js";
 import type { SelectionStrategy } from "./selection-strategy.js";
 import { MultiSelectStrategy, SingleSelectStrategy } from "./selection-strategy.js";
 
 export type { QuestionData, OptionData, AnswerData };
+
+/**
+ * What the inline editor is editing, when `editorActive` is true.
+ *
+ * The editor used to be either an option note or a custom answer, told apart by
+ * whether `noteEditingValue` was set. A note that belongs to a whole question, or to
+ * the whole ask, has no option to name, so the target is now stated.
+ */
+export const EditorTarget = {
+	Option: "option",
+	Custom: "custom",
+	Question: "question",
+	Shared: "shared",
+} as const;
+export type EditorTarget = (typeof EditorTarget)[keyof typeof EditorTarget];
+
+/** Notes that apply to one question, or to every question, keyed the way the result carries them. */
+export interface NoteFields {
+	note?: string;
+	questionNotes?: Record<string, string>;
+}
 
 const multiStrategy = new MultiSelectStrategy();
 const singleStrategy = new SingleSelectStrategy();
@@ -12,17 +33,44 @@ export class QuestionnaireState {
 	private custom = new Map<string, string>();
 	private customSelected = new Set<string>();
 	private notes = new Map<string, Map<string, string>>();
+	private questionNotes = new Map<string, string>();
+	private sharedNote: string | undefined;
 	private skipped = new Set<string>();
 
 	currentTab = 0;
 	focusedOptionIndex = 0;
 	editorActive = false;
+	editorTarget: EditorTarget | undefined;
 	noteEditingValue: string | null = null;
 
 	private questions: QuestionData[];
 
 	constructor(questions: QuestionData[]) {
 		this.questions = questions;
+	}
+
+	/**
+	 * Open the inline editor. One entry point so `editorActive`, the target, and the
+	 * option value the editor is drawn next to can never disagree — a note that is
+	 * saved against the wrong target lands on the wrong answer.
+	 */
+	beginEdit(target: EditorTarget, optionValue?: string): void {
+		this.editorActive = true;
+		this.editorTarget = target;
+		this.noteEditingValue = target === EditorTarget.Option ? optionValue ?? null : null;
+	}
+
+	/** Close the editor without saving: whatever was typed is dropped. */
+	cancelEdit(): void {
+		this.editorActive = false;
+		this.editorTarget = undefined;
+		this.noteEditingValue = null;
+	}
+
+	/** Text is kept only if it carries something; blank means the user removed it. */
+	private static trimmed(text: string): string | undefined {
+		const value = text.trim();
+		return value.length > 0 ? value : undefined;
 	}
 
 	getDonetab(): number {
@@ -155,6 +203,38 @@ export class QuestionnaireState {
 		this.notes.get(q.id)?.delete(optionValue);
 	}
 
+	// ── Notes that are not attached to an option ───────────────────────────────
+
+	setQuestionNote(questionId: string, text: string): void {
+		const value = QuestionnaireState.trimmed(text);
+		if (value) this.questionNotes.set(questionId, value);
+		else this.questionNotes.delete(questionId);
+	}
+
+	getQuestionNote(questionId: string): string | undefined {
+		return this.questionNotes.get(questionId);
+	}
+
+	/** The note for the tab the user is on; nothing on the Done tab, which has no question. */
+	getCurrentQuestionNote(): string | undefined {
+		const q = this.currentQuestion();
+		return q ? this.questionNotes.get(q.id) : undefined;
+	}
+
+	setCurrentQuestionNote(text: string): void {
+		const q = this.currentQuestion();
+		if (q) this.setQuestionNote(q.id, text);
+	}
+
+	setSharedNote(text: string): void {
+		this.sharedNote = QuestionnaireState.trimmed(text);
+	}
+
+	getSharedNote(): string | undefined {
+		return this.sharedNote;
+	}
+
+	/** Question notes survive skipping their question: the note is often the reason. */
 	skipCurrentQuestion(): void {
 		const q = this.currentQuestion();
 		if (q) {
@@ -164,6 +244,19 @@ export class QuestionnaireState {
 			this.notes.delete(q.id);
 			this.skipped.add(q.id);
 		}
+	}
+
+	/** The two note fields, present only when they carry something. */
+	noteFields(): NoteFields {
+		const fields: NoteFields = {};
+		if (this.sharedNote) fields.note = this.sharedNote;
+		const perQuestion: Record<string, string> = {};
+		for (const q of this.questions) {
+			const note = this.questionNotes.get(q.id);
+			if (note) perQuestion[q.id] = note;
+		}
+		if (Object.keys(perQuestion).length > 0) fields.questionNotes = perQuestion;
+		return fields;
 	}
 
 	totalOptionCount(): number {
@@ -206,11 +299,7 @@ export class QuestionnaireState {
 		return this.skipped.has(questionId);
 	}
 
-	buildResult(): {
-		answers: Record<string, AnswerData[]>;
-		skipped: string[];
-		unanswered: string[];
-	} {
+	buildResult(): AskResult {
 		const result: Record<string, AnswerData[]> = {};
 		const skippedIds: string[] = [];
 		const unansweredIds: string[] = [];
@@ -248,6 +337,7 @@ export class QuestionnaireState {
 			answers: result,
 			skipped: skippedIds,
 			unanswered: unansweredIds,
+			...this.noteFields(),
 		};
 	}
 }

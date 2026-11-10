@@ -18,6 +18,7 @@ Unified multi-question interface for gathering user input with single-select, mu
 - **Recommended badge** — ★ marker on recommended options, pre-focused
 - **Descriptions** — tooltip-style, shown only when option is focused
 - **Notes** — press Enter on an option to attach a note; it is included in the answer
+- **Notes that outlive one option** — `n` writes one note for the whole ask, `m` one for the current question (answered, skipped or not); both work on the Done tab, and both are rendered as context, never as an answer
 - **Free-form** — questions without options accept typed text
 - **Custom option** — inline "Custom..." option at the bottom of every option list
 - **Three-state tracking**: ✓ answered, ↷ skipped, ○ unanswered
@@ -90,8 +91,10 @@ await ask({
 | **k** / **↑** | Focus previous option |
 | **Space** | Toggle focused option |
 | **1-9** | Quick toggle by number |
-| **Enter** | Edit a note on an option, or open the custom/free-form editor; submit on Done |
-| **s** | Skip question (clears selections) |
+| **Enter** | Edit a note on an option, or open the custom/free-form editor; submit on Done (while a note editor is open, Enter saves the note instead) |
+| **n** | Note for **all** questions — works on any tab, including Done |
+| **m** | Note for **this** question, without picking an option (nothing to annotate on Done) |
+| **s** | Skip question (clears selections, keeps its note) |
 | **Esc** | Cancel |
 
 ## Result Format
@@ -100,14 +103,23 @@ await ask({
 {
   answers: {
     q1: [
-      { label: "Fast", value: "fast", description: "Skip tests" },
+      { label: "Fast", value: "fast", description: "Skip tests", note: "only if CI is green" },
       { value: "my custom text", custom: true }
     ]
   },
   skipped: ["q2"],
-  unanswered: ["q3"]
+  unanswered: ["q3"],
+  note: "applies to every question",
+  questionNotes: { q2: "this is the reason I skipped it" }
 }
 ```
+
+Notes are the user's own words, so they are the least ambiguous thing in the result: read them
+before weighing the options. `note` and `questionNotes` are omitted entirely when nobody typed one,
+and they survive skipping (an option note belongs to the answer it qualified, so it goes with the
+answer). The tool text puts them on lines above the JSON — `User note: …`, `User note on q2
+("…"): …` — so they read as context rather than as another answer; multi-line or padded text is
+folded to one line there and kept verbatim in the JSON.
 
 Results always return structured objects. Custom answers include `custom: true`. Option notes appear in the answer's `note` field.
 

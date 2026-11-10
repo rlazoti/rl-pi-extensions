@@ -9,10 +9,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { Text, Editor, Key, matchesKey, truncateToWidth, wrapTextWithAnsi, type EditorTheme } from "@earendil-works/pi-tui";
-import { QuestionnaireState, type QuestionData, type OptionData, type AnswerData } from "./state.js";
+import { QuestionnaireState, EditorTarget, type QuestionData, type OptionData, type AnswerData } from "./state.js";
 import { InputHandler, InputAction } from "./input-handler.js";
 import { normalizeQuestions } from "./types.js";
 import { formatResult, formatSingleFreeResult, formatCancelledResult, formatNoUIResult } from "./result.js";
+import type { AskResult } from "./types.js";
 import { defaultConfig, type AskConfig } from "./config.js";
 import { withHerdrBlocked } from "./herdr.js";
 
@@ -56,6 +57,7 @@ export default function askExtension(pi: ExtensionAPI) {
 			"For each question with options, decide: should the user pick ONE answer (multi: false) or MULTIPLE (default)? Use single-select for mutually exclusive choices.",
 			"Options can be strings or objects with { label, value, description?, recommended? }.",
 			"Users navigate tabs with Tab/h/l, options with j/k, toggle with Space, skip question with 's', submit with Enter.",
+			"Answers may carry a `note` — the user's own words about that choice — and the result may carry `note` (applies to every question) or `questionNotes` keyed by question id. Treat notes as constraints from the user, not as another option to weigh.",
 			"All text fields (question, label, context, option labels/descriptions) must be plain text — no markdown, no formatting.",
 		],
 		parameters: Type.Object({
@@ -96,7 +98,7 @@ export default function askExtension(pi: ExtensionAPI) {
 
 			// Tabbed interface
 			const result = await withHerdrBlocked(pi, "Waiting for input", () =>
-				ctx.ui.custom<{ answers: Record<string, AnswerData[]>; skipped: string[]; unanswered: string[] } | null>(
+				ctx.ui.custom<AskResult | null>(
 					(tui, theme, _kb, done) => {
 					const state = new QuestionnaireState(questions);
 					const inputHandler = new InputHandler(state);
@@ -122,7 +124,7 @@ export default function askExtension(pi: ExtensionAPI) {
 							state.toggleCustomSelected();
 						} else {
 							state.focusedOptionIndex = state.getCustomOptionIndex();
-							state.editorActive = true;
+							state.beginEdit(EditorTarget.Custom);
 							editor.setText("");
 						}
 					};
@@ -130,8 +132,20 @@ export default function askExtension(pi: ExtensionAPI) {
 					const openCustomEditor = (prefill: string) => {
 						if (!config.showCustomOption) return;
 						state.focusedOptionIndex = state.getCustomOptionIndex();
-						state.editorActive = true;
+						state.beginEdit(EditorTarget.Custom);
 						editor.setText(prefill);
+					};
+
+					/** A note that belongs to the ask or the tab, not to one option. */
+					const openNoteEditor = (target: EditorTarget) => {
+						if (!config.enableNotes) return;
+						if (target === EditorTarget.Question && !state.currentQuestion()) return;
+						state.beginEdit(target);
+						editor.setText(
+							target === EditorTarget.Shared
+								? state.getSharedNote() || ""
+								: state.getCurrentQuestionNote() || "",
+						);
 					};
 
 					const initTab = () => {
@@ -148,30 +162,31 @@ export default function askExtension(pi: ExtensionAPI) {
 						if (state.editorActive) {
 							if (matchesKey(data, Key.escape)) {
 								editor.setText("");
-								state.editorActive = false;
-								state.noteEditingValue = null;
+								state.cancelEdit();
 								refresh();
 								return;
 							}
 							if (matchesKey(data, Key.enter)) {
 								// Large pastes are displayed as markers; submit their original text.
 								const text = editor.getExpandedText().trim();
-								if (state.noteEditingValue) {
+								const target = state.editorTarget;
+								if (target === EditorTarget.Option && state.noteEditingValue) {
 									if (text) {
 										state.setNote(state.noteEditingValue, text);
 									} else {
 										state.clearNote(state.noteEditingValue);
 									}
-									state.noteEditingValue = null;
+								} else if (target === EditorTarget.Shared) {
+									state.setSharedNote(text);
+								} else if (target === EditorTarget.Question) {
+									state.setCurrentQuestionNote(text);
+								} else if (text) {
+									state.setCustomAnswer(text);
 								} else {
-									if (text) {
-										state.setCustomAnswer(text);
-									} else {
-										state.clearCustomAnswer();
-									}
+									state.clearCustomAnswer();
 								}
 								editor.setText("");
-								state.editorActive = false;
+								state.cancelEdit();
 								refresh();
 								return;
 							}
@@ -185,12 +200,12 @@ export default function askExtension(pi: ExtensionAPI) {
 						switch (action) {
 							case InputAction.AdvanceTab:
 								state.advanceTab();
-								state.editorActive = false;
+								state.cancelEdit();
 								initTab();
 								break;
 							case InputAction.GoBackTab:
 								state.goBackTab();
-								state.editorActive = false;
+								state.cancelEdit();
 								initTab();
 								break;
 							case InputAction.NextOption:
@@ -227,15 +242,20 @@ export default function askExtension(pi: ExtensionAPI) {
 								if (!state.isOptionSelected(opt.value)) {
 									state.toggleOption(opt.value);
 								}
-								state.noteEditingValue = opt.value;
-								state.editorActive = true;
+								state.beginEdit(EditorTarget.Option, opt.value);
 								editor.setText(state.getNote(opt.value) || "");
 								break;
 							}
+							case InputAction.StartSharedNote:
+								openNoteEditor(EditorTarget.Shared);
+								break;
+							case InputAction.StartQuestionNote:
+								openNoteEditor(EditorTarget.Question);
+								break;
 							case InputAction.Skip:
 								state.skipCurrentQuestion();
 								state.advanceTab();
-								state.editorActive = false;
+								state.cancelEdit();
 								initTab();
 								break;
 							case InputAction.Done:
@@ -291,7 +311,7 @@ export default function askExtension(pi: ExtensionAPI) {
 						lines.push("");
 
 						if (state.currentTab === state.getDonetab()) {
-							renderSummary(lines, add, theme, state, questions);
+							renderSummary(lines, add, theme, state, questions, editor, width, config);
 						} else {
 							const q = state.currentQuestion();
 							if (q) {
@@ -337,6 +357,8 @@ export default function askExtension(pi: ExtensionAPI) {
 				answers?: Record<string, AnswerData[]>;
 				skipped?: string[];
 				unanswered?: string[];
+				note?: string;
+				questionNotes?: Record<string, string>;
 				cancelled?: boolean;
 			} | undefined;
 
@@ -366,6 +388,17 @@ export default function askExtension(pi: ExtensionAPI) {
 				}
 			}
 
+			// Notes last: they qualify the answers above rather than being one more of them.
+			if (d?.questionNotes && d?.questions) {
+				for (const [id, note] of Object.entries(d.questionNotes)) {
+					const q = d.questions[id] || id;
+					lines.push(`${theme.fg("muted", `${q} note`)}: ${theme.fg("text", `"${inline(note)}"`)}`);
+				}
+			}
+			if (d?.note) {
+				lines.push(`${theme.fg("muted", "note")}: ${theme.fg("text", `"${inline(d.note)}"`)}`);
+			}
+
 			if (lines.length === 0) {
 				return new Text(theme.fg("dim", "no answers"), 0, 0);
 			}
@@ -373,6 +406,21 @@ export default function askExtension(pi: ExtensionAPI) {
 			return new Text(lines.join("\n"), 0, 0);
 		},
 	});
+}
+
+/**
+ * Text as one terminal row. A note or a custom answer can carry a newline, and one
+ * element of a `render()` array holding a newline is painted as two rows and shifts
+ * everything under it, so anything the user typed is folded before it is displayed.
+ * ANSI is dropped too: an escape from the buffer would be read as invisible width by
+ * the truncation that follows it and leak into the next row.
+ */
+export function inline(text: string): string {
+	return text
+		.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "")
+		.replace(/[\u0000-\u001f\u007f]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
 }
 
 function createEditorTheme(theme: any): EditorTheme {
@@ -406,6 +454,16 @@ function renderQuestion(
 		addWrapped(theme.fg("muted", q.context));
 	}
 
+	// A note about this question, shown whether or not it has an answer: the note is
+	// often the whole answer when the question was skipped.
+	if (config.enableNotes) {
+		const questionNote = state.getQuestionNote(q.id);
+		if (questionNote) {
+			lines.push("");
+			add(theme.fg("muted", ` note: ${theme.fg("text", `"${inline(questionNote)}"`)}`));
+		}
+	}
+
 	lines.push("");
 
 	if (q.options && q.options.length > 0) {
@@ -429,7 +487,7 @@ function renderQuestion(
 			const badge = (opt.recommended && config.enableRecommended) ? theme.fg("warning", " ★") : "";
 			const numLabel = isMulti ? `[${i + 1}]` : `(${i + 1})`;
 			const note = state.getNote(opt.value);
-			const noteDisplay = (note && config.enableNotes) ? theme.fg("muted", ` — "${note}"`) : "";
+			const noteDisplay = (note && config.enableNotes) ? theme.fg("muted", ` — "${inline(note)}"`) : "";
 			let line = `${focusMarker}${indicator}${theme.fg("accent", numLabel)} ${opt.label}${badge}${noteDisplay}`;
 
 			if (state.editorActive && state.noteEditingValue === opt.value && isFocused) {
@@ -469,7 +527,7 @@ function renderQuestion(
 
 			const customNumLabel = isMulti ? `[${customIdx + 1}]` : `(${customIdx + 1})`;
 
-			if (state.editorActive && customFocused) {
+			if (state.editorActive && state.editorTarget === EditorTarget.Custom && customFocused) {
 				let editorLabel = `${customFocusMarker}${customIndicator}${theme.fg("accent", customNumLabel)} `;
 				editorLabel = theme.bg("selectedBg", editorLabel);
 				add(editorLabel);
@@ -479,7 +537,7 @@ function renderQuestion(
 				add("    " + theme.fg("accent", "Enter") + theme.fg("dim", " to set • ") + theme.fg("accent", "Esc") + theme.fg("dim", " to cancel"));
 			} else {
 				const label = customText
-					? `${theme.fg("accent", "✎")} ${customText}`
+					? `${theme.fg("accent", "✎")} ${inline(customText)}`
 					: `${theme.fg("muted", "✎ Enter your own option...")}`;
 				let line = `${customFocusMarker}${customIndicator}${theme.fg("accent", customNumLabel)} ${label}`;
 				if (customFocused) {
@@ -502,7 +560,11 @@ function renderQuestion(
 			(state.isCustomSelected() ? 1 : 0);
 		const countText = selCount > 0 ? ` (${selCount} selected)` : "";
 
-		const noteHint = config.enableNotes ? (theme.fg("accent", " Enter") + theme.fg("dim", " note • ")) : "";
+		const noteHint = config.enableNotes
+			? (theme.fg("accent", " Enter") + theme.fg("dim", " note • ") +
+				theme.fg("accent", " n") + theme.fg("dim", " all • ") +
+				theme.fg("accent", " m") + theme.fg("dim", " here • "))
+			: "";
 		add(theme.fg("accent", " j/k") + theme.fg("dim", " navigate • ") +
 			theme.fg("accent", "Space") + theme.fg("dim", " toggle • ") +
 			theme.fg("dim", "1-9 quick select") + theme.fg("muted", countText));
@@ -510,7 +572,7 @@ function renderQuestion(
 			theme.fg("accent", "Tab/l") + theme.fg("dim", " next • ") +
 			theme.fg("accent", "Shift+Tab/h") + theme.fg("dim", " prev • ") +
 			theme.fg("accent", "s") + theme.fg("dim", " skip"));
-	} else if (state.editorActive) {
+	} else if (state.editorActive && state.editorTarget === EditorTarget.Custom) {
 		add(theme.fg("accent", " Your answer:"));
 		lines.push("");
 		for (const line of editor.render(width - 4)) {
@@ -521,14 +583,35 @@ function renderQuestion(
 	} else {
 		const customText = state.getCustomAnswer();
 		if (customText) {
-			add(`  ${theme.fg("success", "✓")} ${customText}`);
+			add(`  ${theme.fg("success", "✓")} ${inline(customText)}`);
 			lines.push("");
 		}
 
 		add(theme.fg("success", " Enter") + theme.fg("dim", " to write • ") +
-			theme.fg("accent", "s") + theme.fg("dim", " to skip"));
+			theme.fg("accent", "s") + theme.fg("dim", " to skip") +
+			(config.enableNotes
+				? " • " + theme.fg("accent", "n") + theme.fg("dim", " all • ") +
+					theme.fg("accent", "m") + theme.fg("dim", " here")
+				: ""));
 		add(theme.fg("accent", "Tab/l") + theme.fg("dim", " next • ") +
 			theme.fg("accent", "Shift+Tab/h") + theme.fg("dim", " prev"));
+	}
+
+	// A note that belongs to the tab or to the whole ask has no option row to be drawn
+	// next to, so it gets its own block at the bottom of whichever tab opened it.
+	if (state.editorActive && (state.editorTarget === EditorTarget.Shared || state.editorTarget === EditorTarget.Question)) {
+		lines.push("");
+		add(theme.fg("accent", state.editorTarget === EditorTarget.Shared ? " Note for all questions:" : " Note for this question:"));
+		for (const line of editor.render(Math.max(1, width - 6))) {
+			add(`    ${line}`);
+		}
+		add("    " + theme.fg("accent", "Enter") + theme.fg("dim", " to set • ") + theme.fg("accent", "Esc") + theme.fg("dim", " to cancel"));
+	} else if (config.enableNotes) {
+		const shared = state.getSharedNote();
+		if (shared) {
+			lines.push("");
+			add(theme.fg("muted", ` all-questions note: ${theme.fg("text", `"${inline(shared)}"`)}`));
+		}
 	}
 }
 
@@ -538,6 +621,9 @@ function renderSummary(
 	theme: any,
 	state: QuestionnaireState,
 	questions: QuestionData[],
+	editor: Editor,
+	width: number,
+	config: AskConfig,
 ) {
 	add(theme.fg("accent", theme.bold(" Summary")));
 	lines.push("");
@@ -547,17 +633,43 @@ function renderSummary(
 		if (result.answers[q.id]) {
 			add(`  ${theme.fg("success", "✓")} ${theme.fg("muted", q.question.slice(0, 40))}`);
 			for (const a of result.answers[q.id]) {
-				const display = a.custom ? `${theme.fg("accent", "✎")} ${a.value}` : a.value;
-				add(`     ${display}`);
+				const display = a.custom ? `${theme.fg("accent", "✎")} ${inline(a.value)}` : inline(a.label || a.value);
+				// The confirm screen is the last chance to see what is about to be sent, notes included.
+				const note = (a.note && config.enableNotes) ? theme.fg("muted", ` — "${inline(a.note)}"`) : "";
+				add(`     ${display}${note}`);
 			}
 		} else if (result.skipped.includes(q.id)) {
 			add(`  ${theme.fg("warning", "↷")} ${theme.fg("muted", q.question.slice(0, 40))} ${theme.fg("dim", "(skipped)")}`);
 		} else {
 			add(`  ${theme.fg("dim", "○")} ${theme.fg("muted", q.question.slice(0, 40))} ${theme.fg("dim", "(unanswered)")}`);
 		}
+
+		const questionNote = config.enableNotes ? result.questionNotes?.[q.id] : undefined;
+		if (questionNote) {
+			add(`     ${theme.fg("muted", `note: "${inline(questionNote)}"`)}`);
+		}
+	}
+
+	// Rendered set or not: a row that only appears once it is filled makes the panel
+	// jump under the person deciding whether to use it.
+	if (config.enableNotes) {
+		lines.push("");
+		if (state.editorActive && state.editorTarget === EditorTarget.Shared) {
+			add(theme.fg("accent", " Note for all questions:"));
+			for (const line of editor.render(Math.max(1, width - 4))) {
+				add(`  ${line}`);
+			}
+			add("  " + theme.fg("accent", "Enter") + theme.fg("dim", " to set • ") + theme.fg("accent", "Esc") + theme.fg("dim", " to cancel"));
+		} else {
+			const shared = state.getSharedNote();
+			add(shared
+				? `  ${theme.fg("muted", "note:")} ${theme.fg("text", `"${inline(shared)}"`)}`
+				: `  ${theme.fg("dim", "note: (none — ")}${theme.fg("accent", "n")}${theme.fg("dim", " to add)")}`);
+		}
 	}
 
 	lines.push("");
 	add(theme.fg("success", " Enter") + theme.fg("dim", " to submit • ") +
+		(config.enableNotes ? theme.fg("accent", " n") + theme.fg("dim", " note • ") : "") +
 		theme.fg("dim", "h/Tab back • l forward"));
 }

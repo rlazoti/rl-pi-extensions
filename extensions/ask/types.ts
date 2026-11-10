@@ -22,6 +22,23 @@ export interface AnswerData {
 	custom?: boolean;
 }
 
+/**
+ * What the questionnaire returns, and what the tool result is built from.
+ *
+ * Two kinds of note, neither of which is an answer: `note` is the user's note for
+ * the whole ask — one text applying to every question — and `questionNotes` is keyed
+ * by question id for notes attached to a single question without picking an option.
+ * They are absent rather than empty, so a questionnaire with no notes serialises
+ * exactly as it did before notes existed.
+ */
+export interface AskResult {
+	answers: Record<string, AnswerData[]>;
+	skipped: string[];
+	unanswered: string[];
+	note?: string;
+	questionNotes?: Record<string, string>;
+}
+
 import type { AskConfig } from "./config.js";
 
 export function normalizeOptions(raw?: (string | OptionData)[]): OptionData[] | undefined {

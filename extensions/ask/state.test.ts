@@ -11,7 +11,7 @@ function expect(actual: unknown) {
 		toContain: (expected: string) => assert.ok((actual as string | unknown[]).includes(expected)),
 	};
 }
-import { QuestionnaireState, type QuestionData, type OptionData } from "./state.ts";
+import { QuestionnaireState, EditorTarget, type QuestionData, type OptionData } from "./state.ts";
 import { InputHandler, InputAction } from "./input-handler.ts";
 import { normalizeOptions, normalizeQuestion, normalizeQuestions } from "./types.ts";
 import { MultiSelectStrategy, SingleSelectStrategy } from "./selection-strategy.ts";
@@ -1091,6 +1091,257 @@ describe("InputHandler", () => {
 			const { state, handler } = make();
 			handler.toggleOptionByIndex(10);
 			expect(state.focusedOptionIndex).toBe(0);
+		});
+	});
+});
+
+// ─── Notes that are not attached to an option ────────────────────────────────
+
+describe("shared and question notes", () => {
+	const questions = STRUCTURED;
+	function make() {
+		const state = new QuestionnaireState(questions);
+		const handler = new InputHandler(state);
+		return { state, handler };
+	}
+
+	describe("shared note", () => {
+		it("sets and reads back", () => {
+			const { state } = make();
+			state.setSharedNote("nothing ships without tests");
+			expect(state.getSharedNote()).toBe("nothing ships without tests");
+		});
+
+		it("trims, and blank text removes it", () => {
+			const { state } = make();
+			state.setSharedNote("  keep me  ");
+			expect(state.getSharedNote()).toBe("keep me");
+			state.setSharedNote("   \n  ");
+			expect(state.getSharedNote()).toBeUndefined();
+		});
+
+		it("survives moving between tabs", () => {
+			const { state } = make();
+			state.setSharedNote("context");
+			state.advanceTab();
+			state.advanceTab();
+			state.goBackTab();
+			expect(state.getSharedNote()).toBe("context");
+		});
+
+		it("survives skipping the question it was written on", () => {
+			const { state } = make();
+			state.setSharedNote("reason for skipping");
+			state.skipCurrentQuestion();
+			expect(state.getSharedNote()).toBe("reason for skipping");
+		});
+
+		it("is not carried by the option notes it sits beside", () => {
+			const { state } = make();
+			state.setNote("fast", "option note");
+			state.setSharedNote("shared note");
+			expect(state.getNote("fast")).toBe("option note");
+			state.skipCurrentQuestion();
+			// Option notes still go with the answer they qualified...
+			expect(state.getNote("fast")).toBeUndefined();
+			// ...while the note about the whole ask does not.
+			expect(state.getSharedNote()).toBe("shared note");
+		});
+	});
+
+	describe("question note", () => {
+		it("sets and reads back by id", () => {
+			const { state } = make();
+			state.setQuestionNote("q1", "only for the first one");
+			expect(state.getQuestionNote("q1")).toBe("only for the first one");
+			expect(state.getQuestionNote("q3")).toBeUndefined();
+		});
+
+		it("blank text removes it", () => {
+			const { state } = make();
+			state.setQuestionNote("q1", "here");
+			state.setQuestionNote("q1", " ");
+			expect(state.getQuestionNote("q1")).toBeUndefined();
+		});
+
+		it("reads and writes through the tab the user is on", () => {
+			const { state } = make();
+			state.setCurrentQuestionNote("for q1");
+			expect(state.getQuestionNote("q1")).toBe("for q1");
+			state.currentTab = 2;
+			expect(state.getCurrentQuestionNote()).toBeUndefined();
+			state.setCurrentQuestionNote("for q3");
+			expect(state.getQuestionNote("q3")).toBe("for q3");
+		});
+
+		it("has nothing to attach to on the Done tab", () => {
+			const { state } = make();
+			state.currentTab = state.getDonetab();
+			state.setCurrentQuestionNote("nowhere to put me");
+			expect(state.getCurrentQuestionNote()).toBeUndefined();
+			expect(Object.keys(state.noteFields()).filter((k) => k === "questionNotes")).toHaveLength(0);
+		});
+
+		it("survives skipping its question — the note is often the reason", () => {
+			const { state } = make();
+			state.setQuestionNote("q1", "I skipped because X");
+			state.skipCurrentQuestion();
+			expect(state.isQuestionSkipped("q1")).toBe(true);
+			expect(state.getQuestionNote("q1")).toBe("I skipped because X");
+		});
+	});
+
+	describe("noteFields and buildResult", () => {
+		it("adds nothing at all when there are no notes", () => {
+			const { state } = make();
+			state.toggleOption("fast");
+			expect(state.noteFields()).toEqual({});
+			expect(Object.keys(state.buildResult()).sort()).toEqual(["answers", "skipped", "unanswered"]);
+		});
+
+		it("carries the shared note as `note`", () => {
+			const { state } = make();
+			state.toggleOption("fast");
+			state.setSharedNote("shared");
+			expect(state.buildResult().note).toBe("shared");
+		});
+
+		it("carries question notes keyed by id, in question order", () => {
+			const { state } = make();
+			state.setQuestionNote("q3", "third");
+			state.setQuestionNote("q1", "first");
+			expect(state.buildResult().questionNotes).toEqual({ q1: "first", q3: "third" });
+			expect(Object.keys(state.buildResult().questionNotes!)).toEqual(["q1", "q3"]);
+		});
+
+		it("drops a note whose question is no longer being asked", () => {
+			const { state } = make();
+			state.setQuestionNote("q1", "kept");
+			state.setQuestionNote("gone", "orphan");
+			expect(state.getQuestionNote("gone")).toBe("orphan");
+			expect(state.buildResult().questionNotes).toEqual({ q1: "kept" });
+		});
+
+		it("keeps both notes when every question was skipped or unanswered", () => {
+			const { state } = make();
+			for (const q of questions) state.skipCurrentQuestion(), state.advanceTab();
+			state.setSharedNote("the whole ask is moot");
+			state.setQuestionNote("q2", "still worth knowing");
+			const result = state.buildResult();
+			expect(result.answers).toEqual({});
+			expect(result.note).toBe("the whole ask is moot");
+			expect(result.questionNotes).toEqual({ q2: "still worth knowing" });
+		});
+	});
+
+	describe("editor target bookkeeping", () => {
+		it("an option note remembers which option it belongs to", () => {
+			const { state } = make();
+			state.beginEdit(EditorTarget.Option, "fast");
+			expect(state.editorActive).toBe(true);
+			expect(state.editorTarget).toBe(EditorTarget.Option);
+			expect(state.noteEditingValue).toBe("fast");
+		});
+
+		it("a shared or question note remembers no option", () => {
+			const { state } = make();
+			state.beginEdit(EditorTarget.Option, "fast");
+			state.beginEdit(EditorTarget.Shared);
+			expect(state.editorTarget).toBe(EditorTarget.Shared);
+			expect(state.noteEditingValue).toBeNull();
+		});
+
+		it("cancel clears the target as well as the active flag", () => {
+			const { state } = make();
+			state.beginEdit(EditorTarget.Option, "fast");
+			state.cancelEdit();
+			expect(state.editorActive).toBe(false);
+			expect(state.editorTarget).toBeUndefined();
+			expect(state.noteEditingValue).toBeNull();
+		});
+	});
+
+	describe("keys", () => {
+		it("n opens the shared note on a question tab", () => {
+			const { handler } = make();
+			expect(handler.process("n")).toBe(InputAction.StartSharedNote);
+		});
+
+		it("n opens it on a free-form tab too", () => {
+			const { state, handler } = make();
+			state.currentTab = 1;
+			expect(handler.process("n")).toBe(InputAction.StartSharedNote);
+		});
+
+		it("n opens it on the Done tab, where Enter means submit", () => {
+			const { state, handler } = make();
+			state.currentTab = state.getDonetab();
+			expect(handler.process("n")).toBe(InputAction.StartSharedNote);
+			expect(handler.process("\r")).toBe(InputAction.Done);
+		});
+
+		it("m annotates the current question, options or not", () => {
+			const { state, handler } = make();
+			expect(handler.process("m")).toBe(InputAction.StartQuestionNote);
+			state.currentTab = 1;
+			expect(handler.process("m")).toBe(InputAction.StartQuestionNote);
+		});
+
+		it("m has no question to annotate on the Done tab", () => {
+			const { state, handler } = make();
+			state.currentTab = state.getDonetab();
+			expect(handler.process("m")).toBe(InputAction.None);
+		});
+
+		it("neither key reaches through an open editor", () => {
+			const { state, handler } = make();
+			state.editorActive = true;
+			expect(handler.process("n")).toBe(InputAction.None);
+			expect(handler.process("m")).toBe(InputAction.None);
+		});
+	});
+
+	describe("formatResult", () => {
+		const questions = STRUCTURED;
+
+		it("leaves the text untouched when there are no notes", () => {
+			const result = { answers: { q1: [{ label: "Fast", value: "fast" }] }, skipped: [], unanswered: [] };
+			const formatted = formatResult(result, questions);
+			expect(formatted.content[0].text).toBe(JSON.stringify(result));
+			expect("note" in formatted.details).toBe(false);
+			expect("questionNotes" in formatted.details).toBe(false);
+		});
+
+		it("writes the shared note as a line above the JSON", () => {
+			const result = { answers: {}, skipped: [], unanswered: ["q1"], note: "nothing without tests" };
+			const [first, ...rest] = formatResult(result, questions).content[0].text.split("\n");
+			expect(first).toBe("User note: nothing without tests");
+			expect(JSON.parse(rest.join("\n")).note).toBe("nothing without tests");
+		});
+
+		it("names the question a question note belongs to", () => {
+			const result = { answers: {}, skipped: [], unanswered: [], questionNotes: { q2: "free-form answer here" } };
+			const text = formatResult(result, questions).content[0].text;
+			expect(text).toContain('User note on q2 ("Free-form?"): free-form answer here');
+		});
+
+		it("keeps a multi-line note to one header line and the JSON to itself", () => {
+			const result = { answers: {}, skipped: [], unanswered: [], note: "first\n\tsecond" };
+			const [first, json] = [
+				formatResult(result, questions).content[0].text.split("\n")[0],
+				formatResult(result, questions).content[0].text.split("\n").slice(1).join("\n"),
+			];
+			expect(first).toBe("User note: first second");
+			expect(JSON.parse(json).note).toBe("first\n\tsecond");
+		});
+
+		it("mirrors both notes into details for the transcript renderer", () => {
+			const formatted = formatResult(
+				{ answers: {}, skipped: [], unanswered: [], note: "shared", questionNotes: { q1: "one" } },
+				questions,
+			);
+			expect(formatted.details.note).toBe("shared");
+			expect(formatted.details.questionNotes).toEqual({ q1: "one" });
 		});
 	});
 });
