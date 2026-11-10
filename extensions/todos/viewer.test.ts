@@ -13,7 +13,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { TaskViewer, type TaskAction, type TaskViewerResult } from "./viewer.ts";
+import { PANEL_HEIGHT_PERCENT, TaskViewer, type TaskAction, type TaskViewerResult } from "./viewer.ts";
 import type { Task, TaskStatus } from "./types.ts";
 
 const KEYS = {
@@ -383,3 +383,50 @@ describe("scrolling", () => {
 async function settled(): Promise<void> {
 	for (let index = 0; index < 8; index++) await Promise.resolve();
 }
+
+// ─── The height the host will actually show ──────────────────────────────────
+
+describe("the height the host will show", () => {
+	/**
+	 * pi-tui slices the overlay's lines to the maxHeight it was handed, so a frame
+	 * taller than the box is neither scrolled nor shrunk: its last rows are simply
+	 * cut, and the last rows are the key hints and the bottom border — the part a
+	 * reader needs in order to leave. The panel used to budget 92% of the terminal
+	 * while the host was told 90%, and paid for it with its footer.
+	 */
+	const cap = (rows: number) => Math.floor((rows * PANEL_HEIGHT_PERCENT) / 100);
+
+	const many = (count: number): Task[] =>
+		Array.from({ length: count }, (_, i) =>
+			task({
+				id: `t${i + 1}`,
+				content: `Task number ${i + 1}, long enough to be worth reading on its own row`,
+				status: (["pending", "in_progress", "blocked", "cancelled"] as const)[i % 4],
+			}),
+		);
+
+	it("never renders more rows than the host will show, at any terminal height", () => {
+		for (const rows of [10, 12, 16, 20, 24, 30, 40, 50, 70, 120]) {
+			for (const tasks of [many(40), many(3), [task({ id: "t1" })], []]) {
+				const lines = harness(tasks, { rows }).lines(80);
+				assert.ok(lines.length <= cap(rows), `${rows}-row terminal: ${lines.length} rows drawn, host shows ${cap(rows)}`);
+			}
+		}
+	});
+
+	it("keeps both key lines and the bottom border when the list does not fit", () => {
+		const h = harness(many(40), { rows: 40 });
+		const lines = h.lines();
+		assert.match(h.text(), /x delete/, "the first key line was cut");
+		assert.match(h.text(), /q close/, "the way out was cut");
+		assert.match(h.text(), /more below/, "and it still says the list did not fit");
+		assert.match(lines[lines.length - 1]!, /╚.*╝$/, "the frame ends on its bottom border, not mid-content");
+	});
+
+	it("puts the keys on the last rows, so they sit at the bottom of the screen", () => {
+		const h = harness([task({ id: "t1", status: "in_progress" }), task({ id: "t2", status: "completed" })], { rows: 40 });
+		const lines = h.lines();
+		const footer = lines.findIndex((line) => line.includes("q close"));
+		assert.ok(footer >= lines.length - 3, `keys sit ${lines.length - footer} rows above the bottom`);
+	});
+});

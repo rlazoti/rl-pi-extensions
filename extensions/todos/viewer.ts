@@ -6,7 +6,8 @@
  * editor. The layout borrows the repo's shared frame so this panel looks like the
  * other pickers, and the row budget works the way the context viewer's does: the
  * summary and the footer are structural, the progress bar is not, so a short
- * terminal loses the bar before it loses a task.
+ * terminal loses the bar before it loses a task. Spare rows go above the footer
+ * rather than below it, so the keys stay the last thing in the frame.
  *
  * Writing is delegated. The viewer never touches the store: it asks for an action
  * through `act`, which is where the write and its errors belong. That keeps this
@@ -60,11 +61,21 @@ interface Section {
 type Row = { kind: "section"; title: string; role: SectionRole; count: number } | { kind: "task"; task: Task };
 
 /**
- * The key hints, in two lines: the panel is 88% of the terminal, so a single line
- * of every binding is wider than the frame and the reader loses the keys at exactly
- * the moment the list gets long enough to need them.
+ * The key hints, in two lines: the panel is wide enough that a single line of every
+ * binding overflows the frame, and the reader loses the keys at exactly the moment
+ * the list gets long enough to need them.
  */
 const FOOTER_LINES = ["↑↓ move  enter act  s start  d done  b block  x delete", "c clear done  t show done  o settings  q close"];
+
+/**
+ * How much of the terminal the panel may take — and the number the host is told as
+ * `maxHeight` where the overlay is opened. Both sides must be this one number:
+ * pi-tui slices the overlay's lines to the cap it was given, so a component that
+ * budgets more rows than the box allows has its last rows cut off by the host.
+ * Those rows are the footer keys and the bottom border — the part a reader needs
+ * in order to leave.
+ */
+export const PANEL_HEIGHT_PERCENT = 80;
 
 /** `LineRole` → a theme token, because two roles are styles rather than colours. */
 function tokenFor(role: LineRole): ThemeColor {
@@ -261,7 +272,7 @@ export class TaskViewer {
 
 	render(width: number): string[] {
 		const safeWidth = Math.max(20, Math.floor(width));
-		const availableRows = Math.max(5, Math.floor((this.tui.terminal.rows * 92) / 100));
+		const availableRows = Math.max(5, Math.floor((this.tui.terminal.rows * PANEL_HEIGHT_PERCENT) / 100));
 		const paddingY = availableRows >= 14 ? 1 : 0;
 		const contentWidth = safeWidth - 4;
 		const contentRows = availableRows - 2 - paddingY * 2;
@@ -308,8 +319,16 @@ export class TaskViewer {
 			if (hidden > 0) body.push(fit(this.theme.fg("dim", `… ${hidden} more below (↓ to scroll)`), contentWidth));
 		}
 
-		if (this.status) body.push(fit(this.theme.fg("dim", this.status), contentWidth));
-		for (const line of FOOTER_LINES) body.push(fit(this.theme.fg("dim", line), contentWidth));
+		const statusLine: string[] = [];
+		const footer: string[] = [];
+		if (this.status) statusLine.push(fit(this.theme.fg("dim", this.status), contentWidth));
+		for (const line of FOOTER_LINES) footer.push(fit(this.theme.fg("dim", line), contentWidth));
+		// Spare rows go between the list and the keys, not below them: padding under the
+		// footer leaves the keys floating in the middle of a tall frame, which is where a
+		// reader looks for the way out and finds nothing.
+		const filler = Math.max(0, contentRows - body.length - statusLine.length - footer.length);
+		for (let row = 0; row < filler; row++) body.push("");
+		body.push(...statusLine, ...footer);
 
 		return frameLines(this.theme, fillRows(body, contentRows), safeWidth, paddingY, " Tasks ");
 	}

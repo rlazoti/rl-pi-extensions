@@ -141,6 +141,8 @@ rm ~/.pi/agent/extensions/tmux-feedback
 - Use Pi's built-in components (`SelectList`, `Container`, `Text`, `DynamicBorder`) over custom rendering.
 - For custom components, use `matchesKey()` for keyboard input matching.
 - Use `ctx.ui.custom()` for modal overlays, `ctx.ui.select()` for simple selections.
+- **The overlay's `maxHeight` and the component's own row budget are one number.** pi-tui slices the overlay's lines to the cap it was given (`resolveOverlayLayout` → `overlayLines.slice(0, maxHeight)`), so a component that budgets more rows than the box allows loses its last rows to the knife — the footer keys and the bottom border, the part a reader needs to leave. Keep the constant in the component and interpolate it into `overlayOptions`, as `rl-extensions/picker.ts` and `todos/viewer.ts` do.
+- **Spare rows go above the footer, not below it.** Padding under the key hints leaves them floating mid-frame, which is where a reader looks for the way out and finds an empty row.
 - Always call `tui.requestRender()` after state changes.
 - Guard TUI-only behavior with `ctx.mode === "tui"` when needed.
 
