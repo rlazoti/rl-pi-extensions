@@ -44,6 +44,7 @@ interface FakeCtx {
 		setWidget(key: string, factory: unknown, options?: unknown): void;
 		custom(factory: unknown, options?: unknown): Promise<unknown>;
 		select(title: string, options: string[]): Promise<string | undefined>;
+		confirm(title: string, message: string): Promise<boolean>;
 	};
 }
 
@@ -68,6 +69,7 @@ interface Options {
 	/** What `ctx.ui.select` answers, in order. A function sees the options it was asked with. */
 	answers?: (string | undefined | ((options: string[]) => string | undefined))[];
 	customResult?: unknown;
+	confirmResult?: boolean;
 }
 
 function harness(options: Options = {}) {
@@ -79,6 +81,7 @@ function harness(options: Options = {}) {
 	const widgetCalls: { key: string; factory: unknown; options?: unknown }[] = [];
 	const customCalls: { factory: unknown; options?: unknown }[] = [];
 	const selectCalls: { title: string; options: string[] }[] = [];
+	const confirmCalls: { title: string; message: string }[] = [];
 	const answers = [...(options.answers ?? [])];
 
 	const pi = {
@@ -100,6 +103,10 @@ function harness(options: Options = {}) {
 			custom: async (factory, opts) => {
 				customCalls.push({ factory, options: opts });
 				return options.customResult;
+			},
+			confirm: async (title, message) => {
+				confirmCalls.push({ title, message });
+				return options.confirmResult ?? false;
 			},
 			select: async (title: string, options: string[]) => {
 				// Recorded so a test can pick an option by its real label instead of
@@ -145,6 +152,7 @@ function harness(options: Options = {}) {
 		widgetCalls,
 		customCalls,
 		selectCalls,
+		confirmCalls,
 		fire,
 		runTool,
 		taskFiles,
@@ -175,6 +183,60 @@ function tempDir(): string {
 	dirs.push(dir);
 	return dir;
 }
+
+describe("opt-in continuation confirmation", () => {
+	const boundary = { outcome: "completed", continue: false, entries: [], context: { contextMessages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Work remains." }] }] } };
+	async function setup(confirmResult: boolean) {
+		const h = harness({ cwd: tempDir(), confirmResult });
+		await h.fire("session_start", { reason: "startup" });
+		await h.runTool("TodoCreate", { content: "Finish the work" });
+		return h;
+	}
+	it("never prompts without explicit opt-in, and asks just once after the next request", async () => {
+		const h = await setup(true);
+		await h.fire("agent_before_settle", boundary);
+		assert.equal(h.confirmCalls.length, 0);
+		await h.commands.get("todos")!.handler("watch" as never, h.ctx as never);
+		await h.fire("before_agent_start", { messageType: "user", prompt: "continue", systemPrompt: "base" });
+		const result = await h.fire("agent_before_settle", boundary) as { continue: boolean; entries: unknown[] };
+		assert.equal(h.confirmCalls.length, 1);
+		assert.equal(result.continue, true);
+		assert.equal(result.entries.length, 1);
+		await h.fire("agent_before_settle", boundary);
+		assert.equal(h.confirmCalls.length, 1);
+	});
+	it("leaves a declined confirmation alone", async () => {
+		const h = await setup(false);
+		await h.commands.get("todos")!.handler("watch" as never, h.ctx as never);
+		await h.fire("before_agent_start", { messageType: "user", prompt: "continue", systemPrompt: "base" });
+		assert.equal(await h.fire("agent_before_settle", boundary), undefined);
+		assert.equal(h.confirmCalls.length, 1);
+	});
+	it("does not prompt in non-interactive mode or supersede another continuation", async () => {
+		const h = await setup(true);
+		await h.commands.get("todos")!.handler("watch" as never, h.ctx as never);
+		await h.fire("before_agent_start", { messageType: "user", prompt: "work", systemPrompt: "base" });
+		assert.equal(await h.fire("agent_before_settle", { ...boundary, continue: true }), undefined);
+		assert.equal(h.confirmCalls.length, 0);
+		h.ctx.hasUI = false;
+		await h.commands.get("todos")!.handler("watch" as never, h.ctx as never);
+		await h.fire("before_agent_start", { messageType: "user", prompt: "work", systemPrompt: "base" });
+		assert.equal(await h.fire("agent_before_settle", boundary), undefined);
+		assert.equal(h.confirmCalls.length, 0);
+	});
+	it("does not ask on error, or when only blocked tasks remain", async () => {
+		const h = await setup(true);
+		await h.commands.get("todos")!.handler("watch" as never, h.ctx as never);
+		await h.fire("before_agent_start", { messageType: "user", prompt: "continue", systemPrompt: "base" });
+		await h.fire("agent_before_settle", { ...boundary, outcome: "error" });
+		assert.equal(h.confirmCalls.length, 0);
+		await h.runTool("TodoUpdate", { id: "t1", status: "blocked" });
+		await h.commands.get("todos")!.handler("watch" as never, h.ctx as never);
+		await h.fire("before_agent_start", { messageType: "user", prompt: "continue", systemPrompt: "base" });
+		await h.fire("agent_before_settle", boundary);
+		assert.equal(h.confirmCalls.length, 0);
+	});
+});
 
 // ── where the list lives ─────────────────────────────────────────────────────
 

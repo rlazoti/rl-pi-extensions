@@ -22,7 +22,7 @@ Then ask for a plan, or say "track this as tasks". Four tools appear:
 | `TodoGet` | One task in full: description, dependencies, owner, metadata, elapsed. |
 | `TodoUpdate` | `status`, fields, and `addBlocks` / `addBlockedBy` links. |
 
-And one command: `/todos` (panel), `/todos clear`, `/todos settings`.
+And one command: `/todos` (panel), `/todos clear`, `/todos settings`, `/todos watch`.
 
 ## What you see
 
@@ -99,7 +99,10 @@ cleared, which is the difference between tidying and losing the plan.
 
 - `before_agent_start` appends the **open** work only — in progress, then pending by
   priority, then blocked/failed — with the count of finished tasks on one line.
-  A list with nothing open adds nothing at all.
+  A list with nothing open adds nothing at all. When execution was requested, it
+  instructs the agent to continue actionable tasks without waiting; stop requests,
+  needed decisions, blockers, and status-only questions still take precedence.
+  This is guidance, not an automatic continuation or a guarantee.
 - Tool descriptions, `promptSnippet` and `promptGuidelines` carry the workflow
   (plan in one call, `in_progress` before starting, `completed` only when fully
   done) so the behaviour does not depend on your prompt.
@@ -109,6 +112,23 @@ cleared, which is the difference between tidying and losing the plan.
 - When the list *is* empty and file changes are starting, the **plan nudge** asks for
   a plan instead — see the next section. A result carries at most one of the two:
   one speaks to an empty list, the other to a non-empty one.
+
+## Ask before continuing unfinished work
+
+`/todos watch` opts in for the **next user request only**. When that run settles
+normally with actionable tasks still open, a confirmation asks whether to request
+one more model turn. Nothing continues unless you approve. The watch is then spent,
+even if you decline; call the command again to watch another request. Calling it
+again before that request cancels it. It requires an interactive TUI and is never
+persisted across sessions. Errors, aborts, an existing continuation, and lists with
+only blocked or failed work do not prompt. A pending task with open dependencies is
+not actionable.
+
+The confirmation cannot tell whether a final answer is a progress report, a request
+for a decision, or an intentional stop: read the answer before approving. This is
+not an autonomous execution guarantee; explicit user consent is what makes a retry
+safe. The retry carries an instruction to respect decisions, blockers and stop
+requests, and at most one retry is offered per watched request.
 
 ## Starting work with no plan
 

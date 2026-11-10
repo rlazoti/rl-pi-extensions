@@ -409,6 +409,7 @@ export function systemPromptBlock(tasks: readonly Task[]): string {
 		"## Current Task List",
 		"",
 		"Update these with `TodoUpdate` as you work — `in_progress` before starting, `completed` only when fully done.",
+		"When the user has requested execution of this plan, continue to the next actionable task without waiting for another prompt. Stop if the user asks you to stop, a decision or approval is needed, or you are blocked or cannot safely proceed. A status request or question alone is not permission to execute the plan.",
 		"",
 	];
 	for (const task of [...inProgress, ...pending, ...attention]) {

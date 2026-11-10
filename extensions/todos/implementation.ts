@@ -46,7 +46,7 @@ import {
 	saveTodoConfig,
 	type TaskScope,
 } from "./config.js";
-import { listForLLM, systemPromptBlock, taskDetailText, themePaint, toolResultText } from "./render.js";
+import { listForLLM, openBlockers, systemPromptBlock, taskDetailText, themePaint, toolResultText } from "./render.js";
 import { PLAN_NUDGE_REMINDER, PLAN_NUDGE_THRESHOLD, PlanNudge } from "./plan-nudge.js";
 import { TaskStore, type TaskUpdateFields } from "./store.js";
 import {
@@ -164,6 +164,9 @@ export default function todosExtension(pi: ExtensionAPI): void {
 	let turn = 0;
 	let lastTaskToolTurn = 0;
 	let reminderShown = false;
+	// Explicit opt-in for the next human request only; never persisted across sessions.
+	let watchNextRequest = false;
+	let watchActive = false;
 
 	function report(uiCtx: ExtensionUIContext, message: string): void {
 		if (reported.has(message)) return;
@@ -292,6 +295,8 @@ export default function todosExtension(pi: ExtensionAPI): void {
 		turn = 0;
 		lastTaskToolTurn = 0;
 		reminderShown = false;
+		watchNextRequest = false;
+		watchActive = false;
 		planNudge.reset(config.planNudge !== false);
 		reported.clear();
 		openedFor = undefined;
@@ -311,10 +316,39 @@ export default function todosExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
+		if (event.messageType === "user") {
+			watchActive = watchNextRequest;
+			watchNextRequest = false;
+		}
 		readContext(ctx);
 		const block = systemPromptBlock(store.list());
 		if (!block) return undefined;
 		return { systemPrompt: `${event.systemPrompt}\n\n${block}` };
+	});
+
+	// Never infer consent from a task list or a model's prose. Even an explicitly
+	// watched run gets at most one question, and only the human can approve a retry.
+	pi.on("agent_before_settle", async (event, ctx) => {
+		if (!watchActive) return undefined;
+		watchActive = false;
+		if (event.outcome !== "completed" || event.continue || !ctx.hasUI || ctx.mode !== "tui") return undefined;
+		const messages = event.context.contextMessages;
+		const last = messages[messages.length - 1];
+		if (!last || last.role !== "assistant" || last.stopReason !== "stop") return undefined;
+		const tasks = store.list();
+		const actionable = tasks.filter((task) => task.status === "in_progress" ||
+			(task.status === "pending" && openBlockers(task, tasks).length === 0));
+		if (!actionable.length) return undefined;
+		try {
+			const accepted = await ctx.ui.confirm("Unfinished tasks", `${actionable.length} actionable task(s) remain. Ask the agent to continue?`);
+			if (!accepted) return undefined;
+			return {
+				entries: [...event.entries, { type: "custom_message" as const, customType: "todos-continue", content: "The user approved continuing. Continue the requested work; stop for decisions, blockers, or a request to stop.", display: false }],
+				continue: true,
+			};
+		} catch {
+			return undefined;
+		}
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
@@ -567,7 +601,7 @@ Examples: { "id": "t1", "status": "in_progress" } · { "id": "t1", "status": "co
 	// ── Command: /todos ───────────────────────────────────────────────────────
 
 	pi.registerCommand("todos", {
-		description: "Open the task list panel: move tasks, see the plan. `/todos clear` drops finished work, `/todos settings` picks storage and auto-clear.",
+		description: "Open the task list panel. `/todos clear` drops finished work, `/todos settings` configures tasks, and `/todos watch` asks before continuing the next request.",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			readContext(ctx);
 			const wanted = args.trim().toLowerCase();
@@ -575,6 +609,15 @@ Examples: { "id": "t1", "status": "in_progress" } · { "id": "t1", "status": "co
 			// panel nobody can see — so the arguments that need no panel still work.
 			const interactive = ctx.mode === "tui" && ctx.hasUI;
 
+			if (wanted === "watch") {
+				if (!interactive) {
+					ctx.ui.notify("/todos watch needs an interactive session.", "warning");
+					return;
+				}
+				watchNextRequest = !watchNextRequest;
+				ctx.ui.notify(watchNextRequest ? "Tasks: will ask before continuing after your next request." : "Tasks: continuation watch cancelled.", "info");
+				return;
+			}
 			if (wanted === "clear") {
 				const cleared = await store.clearCompleted();
 				store.deleteFileIfEmpty();
@@ -596,7 +639,7 @@ Examples: { "id": "t1", "status": "in_progress" } · { "id": "t1", "status": "co
 				return;
 			}
 			if (wanted !== "" && wanted !== "open") {
-				ctx.ui.notify(`/todos: unknown argument "${args.trim()}". Use /todos, /todos clear, or /todos settings.`, "warning");
+				ctx.ui.notify(`/todos: unknown argument "${args.trim()}". Use /todos, /todos clear, /todos watch, or /todos settings.`, "warning");
 			}
 			await showPanel(ctx);
 		},

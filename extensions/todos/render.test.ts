@@ -313,6 +313,15 @@ describe("the block put in front of the model every turn", () => {
 		assert.ok(block.includes("1/3 tasks completed."));
 	});
 
+	it("encourages authorized execution without overriding a stop, question or blocker", () => {
+		const block = systemPromptBlock([task({ id: "t1" })]);
+		assert.match(block, /continue to the next actionable task/i);
+		assert.match(block, /user.*stop/i);
+		assert.match(block, /decision|approval/i);
+		assert.match(block, /blocked|cannot safely/i);
+		assert.match(block, /status|question/i);
+	});
+
 	it("shows what is blocked, and by whom", () => {
 		const block = systemPromptBlock([task({ id: "t1" }), task({ id: "t2", blockedBy: ["t1"] })]);
 		assert.ok(block.includes("[t2]") && block.includes("[blocked by #t1]"), block);
