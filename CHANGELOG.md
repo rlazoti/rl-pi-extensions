@@ -52,6 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`tests/gen-ts-paths.test.ts`** — the generator against fake installs,
   including a release with no declaration files (must not map a phantom) and a
   machine with no Pi install at all.
+- **`scripts/require-memory-deps.mjs`** — `npm test` and `npm run typecheck` now
+  stop with `Run: npm run setup:memory` instead of `sh: vitest: command not
+  found`, since a fresh clone no longer has memory's private toolchain. It checks
+  and says nothing else: a test command that installs from the network would be
+  its own trap.
 
 ## [1.11.0] - 2026-11-10
 

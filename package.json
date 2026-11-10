@@ -27,8 +27,8 @@
 		"setup:memory": "npm ci --prefix extensions/memory",
 		"test": "npm run test:extensions && npm run test:memory",
 		"test:extensions": "node --experimental-strip-types --import ./test-support/register.mjs --test $(find tests extensions -path extensions/memory -prune -o \\( -name '*.test.ts' -o -name '*.test.mjs' \\) -print)",
-		"test:memory": "npm --prefix extensions/memory test",
-		"typecheck": "tsc -p tsconfig.json && npm --prefix extensions/memory run typecheck",
+		"test:memory": "node scripts/require-memory-deps.mjs && npm --prefix extensions/memory test",
+		"typecheck": "tsc -p tsconfig.json && node scripts/require-memory-deps.mjs && npm --prefix extensions/memory run typecheck",
 		"verify:memory": "npm --prefix extensions/memory run verify"
 	},
 	"devDependencies": {

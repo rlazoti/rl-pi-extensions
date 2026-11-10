@@ -63,7 +63,7 @@ rm ~/.pi/agent/extensions/tmux-feedback
 npm install        # minisearch + typebox, then regenerates the Pi type mapping
 npm test           # Node extension suite, then memory's isolated Vitest suite
 npm run typecheck  # both TypeScript projects
-npm --prefix extensions/memory install   # only for memory's own dev tools (vitest)
+npm run setup:memory   # memory's own test tools (vitest); npm test names this if it is missing
 npm run verify:memory  # memory typecheck, tests, real-Pi smoke and race probes
 ```
 

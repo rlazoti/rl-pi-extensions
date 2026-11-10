@@ -383,7 +383,7 @@ Pi `1.4.0`. Two API facts from that version are relied on and were measured agai
 ## Development
 
 ```
-npm --prefix extensions/memory install   # from the repo root: this component's vitest
+npm run setup:memory                   # from the repo root: this component's vitest + tsc
 npm test            # vitest: config, search index, and handler/tool tests
 npm run test:watch
 npm run typecheck   # tsc gate — neither vitest nor jiti checks types
