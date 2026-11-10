@@ -47,6 +47,7 @@ import {
 	type TaskScope,
 } from "./config.js";
 import { listForLLM, systemPromptBlock, taskDetailText, themePaint, toolResultText } from "./render.js";
+import { PLAN_NUDGE_REMINDER, PLAN_NUDGE_THRESHOLD, PlanNudge } from "./plan-nudge.js";
 import { TaskStore, type TaskUpdateFields } from "./store.js";
 import {
 	TASK_PRIORITIES,
@@ -56,7 +57,7 @@ import {
 	type TaskPriority,
 	type TaskStatus,
 } from "./types.js";
-import { TaskViewer, type TaskAction, type TaskViewerResult } from "./viewer.js";
+import { PANEL_HEIGHT_PERCENT, TaskViewer, type TaskAction, type TaskViewerResult } from "./viewer.js";
 import { TaskWidget } from "./widget.js";
 
 const TOOL_NAMES = new Set(["TodoCreate", "TodoList", "TodoGet", "TodoUpdate"]);
@@ -157,6 +158,8 @@ export default function todosExtension(pi: ExtensionAPI): void {
 		() => config.autoClearCompleted ?? "on_list_complete",
 		AUTO_CLEAR_DELAY_TURNS,
 	);
+	/** Asks once when file-changing tools start with no task list (`plan-nudge.ts`). */
+	const planNudge = new PlanNudge();
 
 	let turn = 0;
 	let lastTaskToolTurn = 0;
@@ -289,6 +292,7 @@ export default function todosExtension(pi: ExtensionAPI): void {
 		turn = 0;
 		lastTaskToolTurn = 0;
 		reminderShown = false;
+		planNudge.reset(config.planNudge !== false);
 		reported.clear();
 		openedFor = undefined;
 		openStore(sessionIdOf(ctx));
@@ -329,9 +333,16 @@ export default function todosExtension(pi: ExtensionAPI): void {
 	});
 
 	/**
-	 * The nudge. It rides on a tool result rather than being sent as its own
-	 * message, so it costs nothing when no tool is running, and it waits
-	 * `REMINDER_INTERVAL_TURNS` quiet turns before firing once.
+	 * The two reminders. Both ride on a tool result rather than being sent as
+	 * their own message, so they cost nothing when no tool is running, and a
+	 * result carries at most one of them: the plan nudge speaks to an empty list,
+	 * the quiet-turns reminder to a non-empty one, so they cannot both be due.
+	 *
+	 * - The plan nudge asks once when file-changing tools start with no list —
+	 *   the case the injected block and the quiet-turns reminder both stay silent
+	 *   about (`plan-nudge.ts`).
+	 * - The quiet-turns reminder waits `REMINDER_INTERVAL_TURNS` turns without a
+	 *   task tool call, and only speaks when there is a list to come back to.
 	 */
 	pi.on("tool_result", async (event) => {
 		if (TOOL_NAMES.has(event.toolName)) {
@@ -339,8 +350,10 @@ export default function todosExtension(pi: ExtensionAPI): void {
 			reminderShown = false;
 			return undefined;
 		}
-		if (reminderShown || turn - lastTaskToolTurn < REMINDER_INTERVAL_TURNS) return undefined;
-		if (store.list().length === 0) return undefined;
+		const hasTasks = store.list().length > 0;
+		const plan = planNudge.note(event.toolName, hasTasks, turn);
+		if (plan) return { content: [...event.content, { type: "text" as const, text: PLAN_NUDGE_REMINDER }] };
+		if (reminderShown || !hasTasks || turn - lastTaskToolTurn < REMINDER_INTERVAL_TURNS) return undefined;
 		reminderShown = true;
 		lastTaskToolTurn = turn;
 		return { content: [...event.content, { type: "text" as const, text: REMINDER }] };
@@ -602,7 +615,9 @@ Examples: { "id": "t1", "status": "in_progress" } · { "id": "t1", "status": "co
 		return ctx.ui.custom<TaskViewerResult>(
 			(tui, theme, _keybindings, done) =>
 				new TaskViewer(() => store.list(), theme, tui, done, (task, action) => applyAction(task, action), {}),
-			{ overlay: true, overlayOptions: { width: "88%", maxHeight: "90%", anchor: "center" } },
+			// The same constant the viewer budgets rows with: the host cuts every line past
+			// this cap, and the lines it would cut are the key hints.
+			{ overlay: true, overlayOptions: { width: "88%", maxHeight: `${PANEL_HEIGHT_PERCENT}%`, anchor: "center" } },
 		);
 	}
 
@@ -616,8 +631,14 @@ Examples: { "id": "t1", "status": "in_progress" } · { "id": "t1", "status": "co
 		for (;;) {
 			const scope = config.taskScope ?? "session";
 			const mode = config.autoClearCompleted ?? "on_list_complete";
+			const nudged = config.planNudge !== false;
 			const heading = `Tasks · settings   file: ${store.path ?? "(in memory)"}   saved to: .pi/tasks-config.json`;
-			const choice = await ctx.ui.select(heading, [`Task storage: ${scope}`, `Auto-clear completed: ${mode}`, "Close"]);
+			const choice = await ctx.ui.select(heading, [
+				`Task storage: ${scope}`,
+				`Auto-clear completed: ${mode}`,
+				`Plan nudge: ${nudged ? "on" : "off"}`,
+				"Close",
+			]);
 			if (choice === undefined || choice === "Close") break;
 
 			if (choice.startsWith("Task storage")) {
@@ -634,6 +655,18 @@ Examples: { "id": "t1", "status": "in_progress" } · { "id": "t1", "status": "co
 				);
 				const value = MODE_CHOICES.find((option) => optionLabel(option, mode) === picked)?.value;
 				if (value) config.autoClearCompleted = value;
+			} else if (choice.startsWith("Plan nudge")) {
+				const picked = await ctx.ui.select(
+					`Plan nudge — after ${PLAN_NUDGE_THRESHOLD} turns containing file changes, with no task list, ask once to plan`,
+					NUDGE_CHOICES.map((option) => optionLabel(option, nudged ? "on" : "off")),
+				);
+				const value = NUDGE_CHOICES.find((option) => optionLabel(option, nudged ? "on" : "off") === picked)?.value;
+				if (value) {
+					config.planNudge = value === "on";
+					// Unlike storage, this takes effect right away: it is a rule about the
+					// rest of this session, not about where a file lives.
+					planNudge.reset(config.planNudge);
+				}
 			}
 
 			try {
@@ -651,6 +684,9 @@ Examples: { "id": "t1", "status": "in_progress" } · { "id": "t1", "status": "co
 		}
 		if (config.autoClearCompleted !== before.autoClearCompleted) {
 			ctx.ui.notify(`Auto-clear completed is now "${config.autoClearCompleted ?? "on_list_complete"}".`, "info");
+		}
+		if ((config.planNudge !== false) !== (before.planNudge !== false)) {
+			ctx.ui.notify(`Plan nudge is now "${config.planNudge !== false ? "on" : "off"}".`, "info");
 		}
 	}
 }
@@ -675,6 +711,11 @@ const MODE_CHOICES: Choice<AutoClearMode>[] = [
 	{ value: "on_list_complete", hint: "clear finished work once the whole list is done" },
 	{ value: "on_task_complete", hint: "clear each task a few turns after it finishes" },
 	{ value: "never", hint: "completed tasks stay until you clear them" },
+];
+
+const NUDGE_CHOICES: Choice<"on" | "off">[] = [
+	{ value: "on", hint: "ask once when file edits start with no task list" },
+	{ value: "off", hint: "stay silent — AGENTS.md is the only thing that asks" },
 ];
 
 /** The tool-result panel: the count line and the rows, in the widget's own vocabulary. */

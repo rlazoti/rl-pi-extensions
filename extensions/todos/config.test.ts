@@ -131,4 +131,12 @@ describe("the config file", () => {
 		writeFileSync(join(cwd, ".pi", "tasks-config.json"), "{ broken", "utf-8");
 		assert.deepEqual(loadTodoConfig(cwd), {}, "a hand-edited typo must not break the session");
 	});
+
+	it("keeps planNudge as a boolean and drops anything else", () => {
+		saveTodoConfig(cwd, { planNudge: false });
+		assert.deepEqual(loadTodoConfig(cwd), { planNudge: false });
+
+		saveTodoConfig(cwd, { planNudge: "no" as never });
+		assert.deepEqual(loadTodoConfig(cwd), {}, "an absent flag means on, so a typo must not read as off");
+	});
 });

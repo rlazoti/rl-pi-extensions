@@ -47,6 +47,8 @@ export const REMINDER_INTERVAL_TURNS = 4;
 export interface TodoConfig {
 	taskScope?: TaskScope;
 	autoClearCompleted?: AutoClearMode;
+	/** Ask once when file-changing tools start with an empty list. Default on. */
+	planNudge?: boolean;
 }
 
 export interface StorePathInput {
@@ -88,6 +90,7 @@ export function loadTodoConfig(cwd: string): TodoConfig {
 	if (scope) config.taskScope = scope;
 	const mode = safeMode(raw.autoClearCompleted);
 	if (mode) config.autoClearCompleted = mode;
+	if (typeof raw.planNudge === "boolean") config.planNudge = raw.planNudge;
 	return config;
 }
 
@@ -100,6 +103,7 @@ export function saveTodoConfig(cwd: string, config: TodoConfig): void {
 	if (scope) clean.taskScope = scope;
 	const mode = safeMode(config.autoClearCompleted);
 	if (mode) clean.autoClearCompleted = mode;
+	if (typeof config.planNudge === "boolean") clean.planNudge = config.planNudge;
 	writeFileSync(path, JSON.stringify(clean, null, 2));
 }
 

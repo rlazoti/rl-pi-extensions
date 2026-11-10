@@ -16,6 +16,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, it, mock } from "node:test";
 
 import { ENV_VAR, REMINDER_INTERVAL_TURNS } from "./config.ts";
+import { PLAN_NUDGE_THRESHOLD } from "./plan-nudge.ts";
+import { PANEL_HEIGHT_PERCENT } from "./viewer.ts";
 import todosExtension from "./implementation.ts";
 
 // ── the fake Pi ──────────────────────────────────────────────────────────────
@@ -63,8 +65,8 @@ interface Options {
 	sessionId?: string;
 	mode?: string;
 	hasUI?: boolean;
-	/** What `ctx.ui.select` answers, in order. */
-	answers?: (string | undefined)[];
+	/** What `ctx.ui.select` answers, in order. A function sees the options it was asked with. */
+	answers?: (string | undefined | ((options: string[]) => string | undefined))[];
 	customResult?: unknown;
 }
 
@@ -76,6 +78,7 @@ function harness(options: Options = {}) {
 	const notes: { message: string; type?: string }[] = [];
 	const widgetCalls: { key: string; factory: unknown; options?: unknown }[] = [];
 	const customCalls: { factory: unknown; options?: unknown }[] = [];
+	const selectCalls: { title: string; options: string[] }[] = [];
 	const answers = [...(options.answers ?? [])];
 
 	const pi = {
@@ -98,7 +101,13 @@ function harness(options: Options = {}) {
 				customCalls.push({ factory, options: opts });
 				return options.customResult;
 			},
-			select: async () => answers.shift(),
+			select: async (title: string, options: string[]) => {
+				// Recorded so a test can pick an option by its real label instead of
+				// hardcoding a string the menu is free to reword.
+				selectCalls.push({ title, options });
+				const answer = answers.shift();
+				return typeof answer === "function" ? answer(options) : answer;
+			},
 		},
 	};
 
@@ -135,6 +144,7 @@ function harness(options: Options = {}) {
 		notes,
 		widgetCalls,
 		customCalls,
+		selectCalls,
 		fire,
 		runTool,
 		taskFiles,
@@ -472,6 +482,98 @@ describe("the nudge", () => {
 	});
 });
 
+// ── the plan nudge ───────────────────────────────────────────────────────────
+
+describe("the plan nudge", () => {
+	/** A file change on a fresh turn — the unit the rule counts. */
+	async function work(h: ReturnType<typeof harness>, tool = "edit") {
+		await h.turn();
+		return h.fire("tool_result", { toolName: tool, content: [{ type: "text", text: "patched" }] });
+	}
+
+	it("asks on the third turn of file changes, never on a batch in one turn", async () => {
+		const h = harness({ cwd: tempDir() });
+		await h.fire("session_start", { reason: "new" });
+		await h.turn();
+
+		// Three writes in one turn is one job. Both live sessions did exactly this
+		// and rightly ignored the ask, so the trigger is the turn, not the call.
+		for (let i = 0; i < PLAN_NUDGE_THRESHOLD; i++) {
+			assert.equal(
+				await h.fire("tool_result", { toolName: "write", content: [{ type: "text", text: "wrote" }] }),
+				undefined,
+				"three files, one turn: no ask",
+			);
+		}
+
+		assert.equal(await work(h), undefined, "a second turn of work");
+		const asked = (await work(h, "write")) as { content: Array<{ text: string }> };
+		assert.equal(asked.content.length, 2, "it rides on the result, it is not its own message");
+		assert.match(asked.content[1]!.text, /separate turns/);
+		assert.match(asked.content[1]!.text, /TodoCreate/);
+
+		for (let i = 0; i < PLAN_NUDGE_THRESHOLD; i++) {
+			assert.equal(
+				await work(h),
+				undefined,
+				"a model that ignores the ask is not nagged again",
+			);
+		}
+	});
+
+	it("never speaks to a session that is only reading", async () => {
+		const h = harness({ cwd: tempDir() });
+		await h.fire("session_start", { reason: "new" });
+
+		for (let i = 0; i < PLAN_NUDGE_THRESHOLD * 3; i++) {
+			assert.equal(await work(h, "read"), undefined);
+		}
+	});
+
+	it("never speaks to a session that already planned", async () => {
+		const h = harness({ cwd: tempDir() });
+		await h.fire("session_start", { reason: "new" });
+		await h.runTool("TodoCreate", { content: "A" });
+
+		// Three turns is the plan threshold; staying under four keeps the other
+		// reminder (which this list *should* earn) out of the assertion.
+		for (let i = 0; i < PLAN_NUDGE_THRESHOLD; i++) {
+			assert.equal(await work(h), undefined);
+		}
+	});
+
+	it("carries the plan ask, not the quiet-turns one, once a list has gone", async () => {
+		const h = harness({ cwd: tempDir() });
+		await h.fire("session_start", { reason: "new" });
+		await h.runTool("TodoCreate", { content: "A" });
+		await h.runTool("TodoUpdate", { id: "t1", status: "deleted" });
+		await h.turn(REMINDER_INTERVAL_TURNS * 2);
+
+		for (let i = 0; i < PLAN_NUDGE_THRESHOLD - 1; i++) {
+			assert.equal(await work(h), undefined);
+		}
+		const asked = (await work(h)) as { content: Array<{ text: string }> };
+		assert.match(asked.content.at(-1)!.text, /separate turns/);
+		assert.doesNotMatch(
+			asked.content.at(-1)!.text,
+			/Task tools have not been used recently/,
+			"an empty list has nothing to come back to",
+		);
+	});
+
+	it("is inert when the config says planNudge: false", async () => {
+		const cwd = tempDir();
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "tasks-config.json"), JSON.stringify({ planNudge: false }), "utf-8");
+		const h = harness({ cwd });
+		await h.fire("session_start", { reason: "new" });
+
+		for (let i = 0; i < PLAN_NUDGE_THRESHOLD * 2; i++) {
+			assert.equal(await work(h), undefined);
+		}
+	});
+});
+
 // ── the widget and the row ───────────────────────────────────────────────────
 
 describe("the widget", () => {
@@ -527,6 +629,17 @@ describe("/todos", () => {
 		assert.deepEqual((h.customCalls[0]!.options as { overlay: boolean }).overlay, true);
 	});
 
+	it("tells the host the height the viewer budgets rows with", async () => {
+		// The host cuts every line past maxHeight while the viewer sizes itself from a
+		// constant of its own: two numbers that drift apart lose the footer keys. One
+		// constant is exported and used in both places, and this pin keeps them equal.
+		const h = harness({ cwd: tempDir() });
+		await h.fire("session_start", { reason: "new" });
+		await h.commands.get("todos")!.handler("" as never, h.ctx as never);
+		const options = h.customCalls[0]!.options as { overlayOptions: { maxHeight: string } };
+		assert.deepEqual(options.overlayOptions.maxHeight, `${PANEL_HEIGHT_PERCENT}%`);
+	});
+
 	it("clears finished work on request", async () => {
 		const h = harness({ cwd: tempDir(), mode: "print", hasUI: false });
 		await h.fire("session_start", { reason: "new" });
@@ -568,5 +681,31 @@ describe("/todos", () => {
 		await backed.fire("session_start", { reason: "new" });
 		await backed.commands.get("todos")!.handler("settings" as never, backed.ctx as never);
 		assert.equal(JSON.parse(readFileSync(join(cwd, ".pi", "tasks-config.json"), "utf-8")).taskScope, "memory");
+	});
+
+	it("offers the plan nudge and switches it off for this session too", async () => {
+		const cwd = tempDir();
+		const h = harness({
+			cwd,
+			answers: ["Plan nudge: on", (options) => options.find((option) => option.startsWith("off"))],
+		});
+		await h.fire("session_start", { reason: "new" });
+		await h.commands.get("todos")!.handler("settings" as never, h.ctx as never);
+
+		assert.ok(
+			h.selectCalls[0]!.options.some((option) => option === "Plan nudge: on"),
+			"the menu is where a flag is findable",
+		);
+		assert.equal(JSON.parse(readFileSync(join(cwd, ".pi", "tasks-config.json"), "utf-8")).planNudge, false);
+		assert.ok(h.notes.some((note) => note.message === 'Plan nudge is now "off".'));
+
+		for (const _ of Array.from({ length: PLAN_NUDGE_THRESHOLD * 2 })) {
+			await h.turn();
+			assert.equal(
+				await h.fire("tool_result", { toolName: "edit", content: [{ type: "text", text: "patched" }] }),
+				undefined,
+				"storage waits for the next session; this rule does not",
+			);
+		}
 	});
 });
