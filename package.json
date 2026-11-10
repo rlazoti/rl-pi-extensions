@@ -21,7 +21,7 @@
 	},
 	"scripts": {
 		"postinstall": "node scripts/gen-ts-paths.mjs --allow-missing",
-		"types:gen": "node scripts/gen-ts-paths.mjs",
+		"gen:ts-paths": "node scripts/gen-ts-paths.mjs",
 		"pretest": "node scripts/gen-ts-paths.mjs",
 		"pretypecheck": "node scripts/gen-ts-paths.mjs",
 		"setup:memory": "npm ci --prefix extensions/memory",

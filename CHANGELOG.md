@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `PI_CODING_AGENT_DIR` works when it names the **agent dir** (the form Pi's own launcher exports),
+  a release dir, or a `node_modules` dir — not only the package dir. Each candidate is accepted only
+  if the package every Pi install ships is really inside it. Before,
+  `dirname(dirname($PI_CODING_AGENT_DIR))` of an agent dir returned `/`, so the generator wrote an
+  empty type map and reported `0 Pi type entries from /` instead of saying there was no Pi install
+  there — which is what `pi install` logged into a temp `PI_CODING_AGENT_DIR`, and it would have
+  made `npm run typecheck` resolve every Pi import against nothing.
+- The generator's npm script is now named what the docs always called it: `npm run gen:ts-paths`.
+  It was added as `types:gen`, so all four places that document it named a command npm answered with
+  `Missing script`. `tests/documented-commands.test.ts` now reads every `npm run <name>` in every
+  markdown file in the repo and checks the script exists where the reader would be standing — a
+  component's README may name that package's own scripts.
+
 ## [1.11.1] - 2026-11-10
 
 ### Fixed

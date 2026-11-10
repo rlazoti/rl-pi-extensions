@@ -8,8 +8,16 @@ const PI_PACKAGE_RE = /^@(?:earendil-works|mariozechner)\/pi-[a-z0-9-]+(\/.*)?$/
 
 /**
  * Find the node_modules dir of a local Pi install (the packages Pi itself
- * runs), or null when Pi is not installed here. Override the layout with
- * PI_CODING_AGENT_DIR pointing at a .../@earendil-works/pi-coding-agent dir.
+ * runs), or null when Pi is not installed here.
+ *
+ * `PI_CODING_AGENT_DIR` overrides the layout at whatever depth the variable is
+ * used at — the agent dir (what Pi's own launcher exports), a release dir, a
+ * `node_modules` dir, or the package dir. Every candidate is accepted only if
+ * the package every Pi install ships is really inside it: an unvalidated path
+ * is worse than none, because a wrong one produces an empty result that reads
+ * as success. (`dirname(dirname(override))` of an agent dir used to return `/`,
+ * and the generator reported "0 Pi type entries from /" while writing an empty
+ * type map that turns every Pi import into a missing module.)
  *
  * Pi runs the release named in <install>/current-version, so the tests must run
  * against that one: a machine can hold several releases (Pi keeps the previous
@@ -20,20 +28,42 @@ const PI_PACKAGE_RE = /^@(?:earendil-works|mariozechner)\/pi-[a-z0-9-]+(\/.*)?$/
  */
 export function findPiInstallNodeModulesDir() {
 	const override = process.env.PI_CODING_AGENT_DIR;
-	if (override) {
-		if (!existsSync(override)) return null;
-		return path.dirname(path.dirname(override));
-	}
-	const managedRoot = path.join(os.homedir(), ".pi", "agent", "install");
+	if (override) return resolvePiInstallOverride(override);
+	return pickManagedRelease(path.join(os.homedir(), ".pi", "agent", "install"));
+}
+
+/** True when `nodeModulesDir` holds the package every Pi install ships. */
+function isPiNodeModules(nodeModulesDir) {
+	return existsSync(path.join(nodeModulesDir, "@earendil-works", "pi-coding-agent"));
+}
+
+/** The release `managedRoot` names in current-version, else the highest on disk. */
+function pickManagedRelease(managedRoot) {
 	const releases = path.join(managedRoot, "releases");
 	if (!existsSync(releases)) return null;
 	const present = readdirSync(releases).filter((entry) =>
-		existsSync(path.join(releases, entry, "node_modules", "@earendil-works", "pi-coding-agent")),
+		isPiNodeModules(path.join(releases, entry, "node_modules")),
 	);
 	const active = readCurrentVersion(path.join(managedRoot, "current-version"));
 	if (active && present.includes(active)) return path.join(releases, active, "node_modules");
 	const highest = [...present].sort(compareReleaseNames).reverse()[0];
 	return highest ? path.join(releases, highest, "node_modules") : null;
+}
+
+/** `PI_CODING_AGENT_DIR` at any of its depths, or null when none of them is a Pi. */
+function resolvePiInstallOverride(dir) {
+	const absolute = path.resolve(dir);
+	const candidates = [
+		// The agent dir — the form Pi itself exports, and the one that used to
+		// resolve to `/`.
+		pickManagedRelease(path.join(absolute, "install")),
+		// A release directory, or a node_modules directory.
+		path.join(absolute, "node_modules"),
+		absolute,
+		// The package dir — how this variable was first used in this repo.
+		path.dirname(path.dirname(absolute)),
+	];
+	return candidates.filter(Boolean).find(isPiNodeModules) ?? null;
 }
 
 function readCurrentVersion(file) {
@@ -88,7 +118,8 @@ function noPiInstallError(specifier) {
 	return new Error(
 		`[test-support] cannot resolve ${specifier}: no Pi install found.\n` +
 			"  These tests run against the packages the running Pi loads, and this repo keeps no copy.\n" +
-			"  Install Pi, or set PI_CODING_AGENT_DIR to <release>/node_modules/@earendil-works/pi-coding-agent.\n",
+			"  Install Pi, or set PI_CODING_AGENT_DIR to its agent dir (default ~/.pi/agent),\n" +
+			"  a release dir, or <release>/node_modules/@earendil-works/pi-coding-agent.\n",
 	);
 }
 

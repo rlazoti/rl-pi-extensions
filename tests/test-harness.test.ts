@@ -45,7 +45,7 @@ function fakePiPackage(root: string, name: string, version: string): string {
 		path.join(pkg, "package.json"),
 		JSON.stringify({ name: `@earendil-works/${name}`, version, type: "module" }),
 	);
-	writeFileSync(path.join(pkg, "dist", "index.js"), "export const __fake = true;\n");
+	writeFileSync(path.join(pkg, "dist", "index.js"), `export const __fake = true;\nexport const __version = ${JSON.stringify(version)};\n`);
 	writeFileSync(path.join(pkg, "dist", "index.d.ts"), "export {};\n");
 	return pkg;
 }
@@ -182,6 +182,61 @@ test("test harness: PI_CODING_AGENT_DIR is honoured by both the runtime hook and
 	}
 });
 
+test("test harness: PI_CODING_AGENT_DIR is honoured at every depth it is used at", () => {
+	const tmp = mkdtempSync(path.join(os.tmpdir(), "pi-override-depths-"));
+	const saved = process.env.PI_CODING_AGENT_DIR;
+	try {
+		const agent = path.join(tmp, "agent");
+		const nodeModules = path.join(agent, "install", "releases", "1.5.1", "node_modules");
+		const packageDir = fakePiPackage(nodeModules, "pi-coding-agent", "1.5.1");
+		writeFileSync(path.join(agent, "install", "current-version"), "1.5.1\n");
+		const release = path.dirname(nodeModules);
+		// The agent dir is the form Pi's own launcher exports, and the one the
+		// dirname(dirname()) shortcut turned into "/": an unvalidated path is worse
+		// than none, because a wrong one reports success with an empty type map.
+		for (const candidate of [agent, release, nodeModules, packageDir]) {
+			process.env.PI_CODING_AGENT_DIR = candidate;
+			assert.equal(findPiInstallNodeModulesDir(), nodeModules, `${candidate} must resolve to the install`);
+		}
+		const empty = path.join(tmp, "no-pi-here");
+		mkdirSync(path.join(empty, "install"), { recursive: true });
+		process.env.PI_CODING_AGENT_DIR = empty;
+		assert.equal(findPiInstallNodeModulesDir(), null, "an install-less override must be null, not a path");
+	} finally {
+		if (saved === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = saved;
+		rmSync(tmp, { recursive: true, force: true });
+	}
+});
+
+test("test harness: the runtime hook resolves from an agent-dir override too", () => {
+	// The generator and the hook must agree on any override depth, or tsc checks
+	// one Pi while the tests run another.
+	const tmp = mkdtempSync(path.join(os.tmpdir(), "pi-override-runtime-"));
+	try {
+		const agent = path.join(tmp, "agent");
+		const nodeModules = path.join(agent, "install", "releases", "9.9.9", "node_modules");
+		fakePiPackage(nodeModules, "pi-coding-agent", "0.0.2-fake");
+		writeFileSync(path.join(agent, "install", "current-version"), "9.9.9\n");
+		const result = spawnSync(
+			process.execPath,
+			[
+				"--experimental-strip-types",
+				"--import",
+				"./test-support/register.mjs",
+				"-e",
+				'import("@earendil-works/pi-coding-agent").then((m) => console.log("loaded:" + m.__version))',
+			],
+			{ cwd: repoRoot, encoding: "utf8", env: { ...process.env, PI_CODING_AGENT_DIR: agent } },
+		);
+		const output = `${result.stdout}${result.stderr}`;
+		assert.equal(result.status, 0, output);
+		assert.match(output, /loaded:0\.0\.2-fake/, "the agent-dir override was not used to resolve");
+	} finally {
+		rmSync(tmp, { recursive: true, force: true });
+	}
+});
+
 test("test harness: this repo installs no copy of Pi, at any version", () => {
 	// The regression this guards is an install failure, not a test failure: pnpm
 	// resolves devDependencies even under `--prod`, so an exact pin here made
@@ -204,7 +259,7 @@ test("test harness: the type-check reads the same install the tests run", (t) =>
 	if (noPiInstall) return t.skip("no local Pi install");
 	const file = path.join(repoRoot, OUTPUT_RELATIVE);
 	if (!existsSync(file)) {
-		assert.fail(`${OUTPUT_RELATIVE} is missing — run \`npm run types:gen\` (npm install, test and typecheck generate it)`);
+		assert.fail(`${OUTPUT_RELATIVE} is missing — run \`npm run gen:ts-paths\` (npm install, test and typecheck generate it)`);
 	}
 	const { paths } = JSON.parse(readFileSync(file, "utf-8")).compilerOptions;
 	for (const name of PI_PACKAGES) {

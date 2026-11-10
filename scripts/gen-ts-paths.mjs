@@ -141,7 +141,8 @@ function missingInstallMessage() {
 	return (
 		"[gen-ts-paths] no Pi install found — the type-check and the tests read Pi's\n" +
 		"  declarations from the running Pi, so neither can resolve @earendil-works/*\n" +
-		"  without one. Install Pi, or point PI_CODING_AGENT_DIR at\n" +
+		"  without one. Install Pi, or point PI_CODING_AGENT_DIR at its agent dir\n" +
+		"  (default ~/.pi/agent), a release dir, or\n" +
 		"  <release>/node_modules/@earendil-works/pi-coding-agent.\n"
 	);
 }

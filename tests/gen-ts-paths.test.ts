@@ -190,7 +190,7 @@ test("gen-ts-paths: a generated config in this checkout matches the live install
 	const install = findPiInstallNodeModulesDir();
 	if (!install) return t.skip("no local Pi install");
 	const file = path.join(repoRoot, OUTPUT_RELATIVE);
-	if (!existsSync(file)) return t.skip("not generated yet (npm run types:gen)");
+	if (!existsSync(file)) return t.skip("not generated yet (npm run gen:ts-paths)");
 	const onDisk = JSON.parse(readFileSync(file, "utf-8"));
 	const fresh = buildPiTypePaths(install).paths;
 	// Stale here means the type gate reads a different Pi than the tests run.
