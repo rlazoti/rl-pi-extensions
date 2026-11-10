@@ -165,6 +165,14 @@ export function getAvailableExtensions(monorepoRoot: string): ExtensionDescripto
 			path: join(monorepoRoot, "extensions", "context-viewer"),
 		},
 		{
+			name: "todos",
+			label: "todos",
+			// Says who the list is for, because "todo tool" sounds like something the
+			// human types into rather than something the agent maintains.
+			description: "Let the agent plan with a task list, and open it above the editor with /todos",
+			path: join(monorepoRoot, "extensions", "todos"),
+		},
+		{
 			name: "ask",
 			label: "ask",
 			description: "Ask questions with single-select, multi-select, and custom answers",

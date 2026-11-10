@@ -115,12 +115,12 @@ function makeExt(srcDir: string, name: string): string {
 
 // --- Registry & path derivation ---
 
-test("getAvailableExtensions returns the 11 managed extensions under the given root", () => {
+test("getAvailableExtensions returns the 12 managed extensions under the given root", () => {
 	const exts = getAvailableExtensions("/fake/path");
-	assert.equal(exts.length, 11);
+	assert.equal(exts.length, 12);
 	assert.deepEqual(
 		exts.map((e) => e.name),
-		["tmux-feedback", "session-banner", "session-attention", "snippets", "emacs-feedback", "memory", "co-authored-by-ai", "scan-guard", "settle-guard", "context-viewer", "ask"],
+		["tmux-feedback", "session-banner", "session-attention", "snippets", "emacs-feedback", "memory", "co-authored-by-ai", "scan-guard", "settle-guard", "context-viewer", "todos", "ask"],
 	);
 	assert.equal(exts[0].description, "Inline feedback for tmux scrollback selection");
 	assert.equal(exts[1].description, "Colored banner + auto-naming for Pi sessions");
@@ -146,6 +146,10 @@ test("getAvailableExtensions returns the 11 managed extensions under the given r
 	// Names what the panel is made of, so it is obvious this is not the status bar
 	// again: the categories are the promise.
 	assert.match(exts[9].description, /token cost per category/);
+	// Names both halves a reader would look for: the list is the agent's to keep, and
+	// it is visible above the editor without having to ask for it.
+	assert.match(exts[10].description, /task list/i);
+	assert.match(exts[10].description, /above the editor/);
 });
 
 test("getMonorepoRoot resolves to the directory containing extensions/symlink-manager.ts", () => {
