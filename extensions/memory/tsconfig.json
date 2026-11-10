@@ -2,6 +2,10 @@
 	// Type-check gate only. Pi loads extensions through jiti, which strips types
 	// without checking them, and vitest runs the same erasure, so neither command
 	// alone ever sees a type error — that is what `npm run typecheck` is for.
+	// Pi's declarations come from the installed Pi via the generated config (see
+	// scripts/gen-ts-paths.mjs): this component's Pi imports are `import type`, so
+	// a pin here would age the type gate silently rather than the tests.
+	"extends": "../../.pi/tsconfig.pi-types.json",
 	"compilerOptions": {
 		"target": "es2023",
 		"lib": ["es2023"],

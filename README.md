@@ -60,9 +60,10 @@ rm ~/.pi/agent/extensions/tmux-feedback
 ## Development
 
 ```bash
-npm install        # also installs memory's locked dependencies in extensions/memory
+npm install        # minisearch + typebox, then regenerates the Pi type mapping
 npm test           # Node extension suite, then memory's isolated Vitest suite
 npm run typecheck  # both TypeScript projects
+npm --prefix extensions/memory install   # only for memory's own dev tools (vitest)
 npm run verify:memory  # memory typecheck, tests, real-Pi smoke and race probes
 ```
 
@@ -71,11 +72,21 @@ type error never reaches `npm test` — run both before committing. Test files
 import extension sources through `test-support/` resolve hooks, which load the
 real `.ts` files in bare `node --test`.
 
-The three `@earendil-works/*` packages are pinned as devDependencies purely so
-the type-check can resolve them. Tests resolve them from the *live Pi install*
-(`~/.pi/agent/install/releases/<version>`), i.e. the code the extensions
-actually run; `tests/test-harness.test.ts` fails if the pinned copy's version
-drifts from that, so bump the pins whenever Pi upgrades.
+The three `@earendil-works/*` packages are declared as `*` optional peer
+dependencies and installed by nobody — Pi provides them, and this checkout
+installs no copy of Pi at any version. Nothing here may name a Pi version: Pi
+installs a git checkout with dev dependencies omitted and peers disabled, but
+pnpm still resolves `devDependencies`, so a pinned copy became a request to the
+registry for `@earendil-works/pi-ai@1.5.1` on every install — which fails on a
+lagging mirror even though the extension would never have loaded that copy.
+
+Types and tests read the *live Pi install* instead, the code the extensions
+actually run: `npm run gen:ts-paths` writes `.pi/tsconfig.pi-types.json` (an
+absolute `paths` map generated from that release's `.d.ts` files and its `exports`
+maps, with Pi's own rule that the `pi-ai` root means `dist/compat`), and
+`test-support/hooks.mjs` maps the same specifiers at runtime, choosing the release
+the way Pi does (`~/.pi/agent/install/current-version`). `tests/test-harness.test.ts`
+fails if the two halves ever disagree.
 
 ## Architecture
 

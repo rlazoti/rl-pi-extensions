@@ -369,7 +369,7 @@ pi -e ./index.ts                       # this extension only, plus whatever else
 PI_MEMORY_DIR=$(mktemp -d) pi -e ./index.ts   # try it out against a throwaway bank
 ```
 
-Or add the directory to `packages` in `~/.pi/agent/settings.json` to load it in every session. `npm install` first: the extension needs `minisearch` at runtime.
+Or add the directory to `packages` in `~/.pi/agent/settings.json` to load it in every session. `npm install` in the repository root first: the extension needs `minisearch` at runtime, and the root declares it — Node resolves it by walking up from this directory, so nothing has to be installed inside `extensions/memory/` to load the extension.
 
 ## Requirements
 
@@ -378,12 +378,12 @@ Pi `1.4.0`. Two API facts from that version are relied on and were measured agai
 - `before_agent_start` is a union — a run started by an idle custom message carries `message`, not `prompt`, so the prompt is read only when `messageType === "user"`.
 - A tool's `execute` must return `details` next to `content` (`AgentToolResult.details`). Every tool here reports the file or query it acted on there; `content` stays the model-facing text.
 
-`typebox` and `@earendil-works/pi-coding-agent` are devDependencies only: Pi supplies both at runtime, and the `ExtensionAPI` import is type-only, so jiti erases it and nothing is installed at load time.
+`typebox` is a root **runtime** dependency: the tool schemas are built with it, so it is imported, not merely typed. `@earendil-works/pi-coding-agent` is an optional peer that nothing installs — Pi supplies it, and the `ExtensionAPI` import is type-only, so jiti erases it and no package is fetched at load time. The manifest here keeps only what this component's own test tools need (vitest), which Pi never installs.
 
 ## Development
 
 ```
-npm install
+npm --prefix extensions/memory install   # from the repo root: this component's vitest
 npm test            # vitest: config, search index, and handler/tool tests
 npm run test:watch
 npm run typecheck   # tsc gate — neither vitest nor jiti checks types

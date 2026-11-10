@@ -4,3 +4,4 @@
 // the harness exposes for its own self-checks.
 export declare function findPiInstallNodeModulesDir(): string | null;
 export declare function packageVersion(packageDir: string): string | null;
+export declare function compareReleaseNames(a: string, b: string): number;

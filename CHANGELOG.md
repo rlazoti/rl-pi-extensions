@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Installing this package no longer requires a specific Pi release from the
+  registry.** The three `@earendil-works/*` packages were pinned at `1.5.1` as
+  devDependencies and peer dependencies. Pi installs a git checkout with dev
+  dependencies omitted and peer resolution disabled — and pnpm resolves
+  `devDependencies` even under `--prod` — so every install became a registry
+  request for `@earendil-works/pi-ai@1.5.1`, failing on a lagging mirror with
+  `ERR_PNPM_NO_MATCHING_VERSION` (reported on npmmirror) although Pi supplies
+  those packages at runtime. They are now `*` **optional** peers that nothing
+  installs, and the repo's dependency graph names no Pi version at all: under
+  Pi's own install flags the graph went from 143 resolved packages (6 of them
+  Pi, all pinned to one release) to 24 with zero.
+- **`typebox` is declared.** `memory`, `ask` and `todos` build their tool
+  parameter schemas with it, and it was declared nowhere: it resolved only
+  because the Pi packages that depend on it were hoisted into this repo's
+  `node_modules` (in production, because jiti walks up into Pi's own install).
+  It is a root dependency now, alongside `minisearch`.
+- **The test suite no longer silently tests a stale Pi.** The `@earendil-works/*`
+  copy in this repo's `node_modules` is gone, so nothing can shadow the live
+  install; the runtime resolve hook picks the release `current-version` names
+  (numerically, not lexicographically — `1.5.2` used to beat `1.5.10`) and throws
+  with the fix instead of falling through to Node resolution, which produced
+  `ERR_MODULE_NOT_FOUND` from inside `pi-coding-agent`'s own `dist/index.js`.
+  `PI_CODING_AGENT_DIR` is now honoured as the agent directory, accepting the
+  agent dir, a release root, or the package dir.
+
+### Added
+
+- **`npm run gen:ts-paths`** (runs on `npm install`) generates
+  `.pi/tsconfig.pi-types.json` — an absolute `paths` map built from the `.d.ts`
+  files and `exports` maps the live Pi release actually ships, including Pi's
+  rule that the `pi-ai` root means `dist/compat`, and mapping `@mariozechner/*`
+  so a published extension's imports type-check too. Both tsconfigs extend it, so
+  the type gate reads the same install the tests run. It replaces the pinned copy,
+  which had to be bumped by hand and drifted anyway; `--allow-missing` and a
+  non-fatal postinstall keep it from ever breaking an install.
+- **`tests/declared-deps.test.ts`** — every imported package must be named by a
+  manifest, the Pi imports must equal the declared optional peers, no runtime
+  import may be satisfied by a devDependency, and no manifest may name a Pi
+  package. This is the gate that would have caught the two bugs above; the last
+  rule is what keeps the install failure from coming back.
+- **`tests/gen-ts-paths.test.ts`** — the generator against fake installs,
+  including a release with no declaration files (must not map a phantom) and a
+  machine with no Pi install at all.
+
 ## [1.11.0] - 2026-11-10
 
 ### Added

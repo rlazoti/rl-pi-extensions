@@ -5,16 +5,16 @@
 // - Extension sources use `.js` relative specifiers (jiti/Pi convention);
 //   Node's type stripping does not remap `.js` to `.ts`, so the hook does.
 // - Extensions import Pi packages (@earendil-works/*, @mariozechner/*) that
-//   are peer dependencies provided by the Pi runtime. The hook maps them to
-//   the real packages in the local Pi install
-//   (~/.pi/agent/install/releases/<version>/node_modules) — the same code Pi
-//   loads — *before* normal resolution, because `npm install` also puts a
-//   pinned copy in this repo's node_modules for the sake of `npm run
-//   typecheck`. Letting that copy win would silently test against versions
-//   that lag the running Pi (it happened once: pi-ai's root has no `complete`
-//   export, while Pi serves the root as the compat entrypoint).
-// - tests/test-harness.test.ts pins all of this, including a check that the
-//   pinned copy matches the runtime version.
+//   the Pi runtime provides. This repo deliberately keeps no copy: an exact pin
+//   in package.json is resolved by pnpm even under --prod, so a registry mirror
+//   that lags one Pi release would block installing this package at all. The
+//   hook maps those specifiers to the packages the running Pi actually loaded
+//   (the release named in ~/.pi/agent/install/current-version) *before* normal
+//   resolution, and refuses with instructions when there is no Pi install —
+//   `npm run typecheck` reads the same install via .pi/tsconfig.pi-types.json,
+//   so the type gate cannot check a different Pi than the one under test.
+// - tests/test-harness.test.ts pins all of this, including that the repo's
+//   manifests carry no @earendil-works dependency and no pinned peer.
 
 import { register } from "node:module";
 

@@ -1,8 +1,15 @@
 {
 	// Type-check gate only: Pi loads extensions through jiti, which strips types
 	// without checking them, so `npm test` alone never sees a type error. Run
-	// `npm run typecheck` (needs `npm install` first — the Pi packages come in as
-	// auto-installed peer dependencies). Nothing is emitted.
+	// `npm run typecheck` (needs `npm install`, which generates .pi/tsconfig.pi-types.json).
+	// Nothing is emitted.
+	//
+	// The extends is generated, machine-local, and points at the installed Pi:
+	// @earendil-works/* is deliberately NOT a dependency, because a pin there is
+	// resolved by pnpm even under --prod and an internal registry mirror that
+	// lags one Pi release then blocks installing the package outright. See
+	// scripts/gen-ts-paths.mjs.
+	"extends": "./.pi/tsconfig.pi-types.json",
 	"compilerOptions": {
 		"target": "es2023",
 		"lib": ["es2023"],
