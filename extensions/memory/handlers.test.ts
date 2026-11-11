@@ -1352,6 +1352,33 @@ describe("day rollover", () => {
 		expect(after2).toContain("ASK ABOUT THE VACATION");
 	});
 
+	it("is not blocked by the write gates: an over-cap day still rolls over", async () => {
+		// The gates guard the two tools, not rollover, and this pins that it stays so: refusing
+		// an archive would leave a stale day unarchivable forever, which is the worse failure —
+		// its staleness warning then fires every turn. The cost of the exemption is visible
+		// instead: /memory doctor warns on the size, and the next growing write meets the gate.
+		const stale = daysAgo(2);
+		const carried = Array.from(
+			{ length: 90 },
+			(_, i) => `- carried item ${i} with enough words in the line to make the section cost real characters`,
+		).join("\n");
+		expect(carried.length, "the fixture must really exceed the 6,000-character gate").toBeGreaterThan(6000);
+		write("core/dailyContext.md", `## ${stale}\n\n### Carried Forward\n${carried}\n`);
+		notifications.length = 0;
+		await emit("session_start", { type: "session_start", reason: "reload" });
+
+		expect(archivesFor(stale), "an over-cap day must still be archived").toContain(`${stale}-dailyContext.md`);
+		const live = read("core/dailyContext.md");
+		// Assert the reset happened, not just that bytes remain: the stale file would satisfy a
+		// size/substring check unchanged if rollover bailed out on the way.
+		expect(live, "the live file must carry today's date").toContain(`## ${dayString(new Date())}`);
+		expect(live, "the stale day must have left the live file").not.toContain(stale);
+		expect(live).toContain("### In Progress"); // the empty sections only the reset writes
+		expect(live).toContain("carried item 89"); // nothing dropped to make the size fit
+		expect(live.length, "the fresh file starts over the gate, and that is the accepted cost").toBeGreaterThan(6000);
+		expect(notifications.some((n) => n.level === "error"), "rollover must not report a gate refusal").toBe(false);
+	});
+
 	it("leaves a daily file dated in the future alone", async () => {
 		const tomorrow = dayString(new Date(Date.now() + 86_400_000));
 		write("core/dailyContext.md", `## ${tomorrow}\n\n### Completed\n- notes written by a UTC clock\n`);

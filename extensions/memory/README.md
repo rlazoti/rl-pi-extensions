@@ -378,6 +378,8 @@ Three rules keep a gate from becoming a wall:
 
 The refusal names the numbers and what to do (`[Completed: 36 words > 30]`, `6,412 characters, 412 over the 6,000-character cap`). `/memory doctor` shows the limits, the refusals this session, and warns when the file is already over the character gate. With `/memory log on`, each refusal is a `gate` event.
 
+**Rollover is exempt, on purpose.** Day rollover writes `core/dailyContext.md` outside the gate. Refusing it would leave a stale day permanently unarchivable — the failure the archive exists to prevent, with its staleness warning firing every turn — which is worse than a fresh day starting too big. The fresh file's size is its `### Carried Forward` section, so an over-cap day can hand on an over-cap successor: `/memory doctor` names the size, and the next write that *grows* the file meets the gate. `handlers.test.ts` pins the exemption so a future "fix" cannot quietly gate rollover.
+
 **What the gates cannot see:** a write made through `bash` (`cat >> …`), the harness `write`/`edit` tools, or another program. Those reach the file around the lock and around the gate; the character cap at injection (8,000) and `/memory doctor` remain the backstop.
 
 **Why characters and not lines.** A 150-line cap was measured elsewhere on a bank where files sat at 149-150 lines and were 20 KB: lines did not bound the cost. The number of lines stays in the guidelines as a reading aid, not a limit.

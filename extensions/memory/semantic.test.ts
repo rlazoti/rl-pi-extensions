@@ -44,6 +44,25 @@ const verbs = () => calls().map((a) => {
 	const rest = a[0] === "--index" ? a.slice(2) : a;
 	return rest[0] === "collection" ? "collection " + rest[1] : rest[0];
 });
+const embeds = () => verbs().filter((v) => v === "embed").length;
+
+/**
+ * Wait for a scheduled pass to appear in the call log rather than sleeping a fixed number
+ * of milliseconds. The first child process a test process spawns costs 350-480 ms
+ * (measured 2026-11-10 with `execFile` inside a vitest fork; later spawns cost 7-143 ms),
+ * so a fixed wait comfortable on one machine fails on another — and a fixed wait that
+ * expires early passes while asserting about a pass that has not happened yet. Polling the
+ * log keeps the assertion about the thing the test is watching, and a timeout says what
+ * qmd was actually asked. `handlers.test.ts` waits the same way, which is why its
+ * equivalent tests were green while these two were red.
+ */
+async function until(check: () => boolean, ms = 8000): Promise<void> {
+	const end = Date.now() + ms;
+	while (!check()) {
+		if (Date.now() > end) throw new Error(`timed out after ${ms} ms; qmd was called with: ${verbs().join(", ") || "(nothing)"}`);
+		await new Promise((r) => setTimeout(r, 25));
+	}
+}
 
 beforeEach(() => {
 	for (const k of ENV_KEYS) saved[k] = process.env[k];
@@ -226,8 +245,12 @@ describe("Refresher", () => {
 	it("collapses a burst of schedule() calls into one pass", async () => {
 		refresher = new Refresher(root, { debounceMs: 60 });
 		for (let i = 0; i < 6; i++) refresher.schedule();
-		await new Promise((r) => setTimeout(r, 500));
-		expect(verbs().filter((v) => v === "embed")).toHaveLength(1);
+		await until(() => embeds() === 1 && !refresher.status().running);
+		// One pass's four calls and nothing queued behind them, checked after a quiet stretch
+		// far longer than the debounce. Counting `embed` alone would miss a second pass that a
+		// burst had queued: it is still on its first call when the first pass's `embed` lands.
+		await new Promise((r) => setTimeout(r, 400));
+		expect(verbs()).toEqual(["--version", "collection add", "update", "embed"]);
 	});
 
 	it("runs one pass at a time, and remembers that a write landed meanwhile", async () => {
@@ -237,9 +260,9 @@ describe("Refresher", () => {
 		await new Promise((r) => setTimeout(r, 100));
 		expect(await refresher.run()).toEqual({ ran: false, skipped: "running" });
 		await first;
-		await new Promise((r) => setTimeout(r, 900));
 		// The skipped request was not lost: one follow-up pass ran after the first finished.
-		expect(verbs().filter((v) => v === "embed")).toHaveLength(2);
+		await until(() => embeds() === 2);
+		expect(embeds()).toBe(2);
 	});
 
 	it("does not start while another live process holds the lock", async () => {
@@ -295,13 +318,14 @@ describe("Refresher", () => {
 	});
 
 	it("reads a debounce given as a function each time it schedules", async () => {
-		let delay = 5000;
+		// The first value is a ten-minute wait, so honouring it means no pass ever arrives: the
+		// pass appearing at all is the proof that the function was read again at schedule().
+		let delay = 600_000;
 		refresher = new Refresher(root, { debounceMs: () => delay });
 		refresher.schedule();
 		delay = 20;
 		refresher.schedule();
-		await new Promise((r) => setTimeout(r, 400));
-		expect(verbs()).toContain("embed");
+		await until(() => embeds() === 1);
 	});
 
 	it("dispose cancels a pending pass and stops a running one", async () => {
