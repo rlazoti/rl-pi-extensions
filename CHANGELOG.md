@@ -16,13 +16,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write changes no bytes and takes no recovery snapshot. Settings `gates.*`; `/memory doctor` shows them.
   The cap is in characters, not lines: a 150-line cap was measured elsewhere on files that sat at 149-150
   lines and were still 20 KB.
-- **memory: optional semantic search through qmd.** `memory_search` also asks `qmd vsearch` which files mean
-  what the query means and fuses the two ranked lists (reciprocal rank fusion); each result says
-  `via: bm25|semantic|both`. On by default, a no-op without qmd, and any failure answers from keywords exactly
-  as before. Never used by automatic injection. The extension keeps its own qmd index fresh (debounced,
-  single-flight, safe across Pi sessions) and `/memory doctor` reports it. 15 agent-labelled prompts, correct
-  file in the top 5: keywords 9, meaning alone 12, fused 14. the memory package's `smoke:semantic` script checks the real qmd;
-  its `eval:semantic` script re-measures on your bank.
+- **memory: optional semantic search through qmd.** `memory_search` also asks qmd which files *mean* what the
+  query means and fuses the two ranked lists (reciprocal rank fusion, k = 60); each result says
+  `via: bm25|semantic|both`, and a file both lists found outranks a file only one found. The call is
+  `qmd query "vec: …" --format json --no-rerank` — one typed `vec:` line, the only shape that answers from the
+  vectors alone. `qmd vsearch`, which this first shipped with, expands every query into four sub-queries with a
+  1.7 B model first: **11.4 s median and 3 timeouts in 18** against **2.6 s and none** for the typed line, for a
+  ranking measured no better — correct file in the top 3 over 18 bank-labelled cases: keywords 11, `vsearch` 14,
+  `vec:` 15. Reranking is off because fusion ranks rather than compares scores, and qmd's 0-1 scores cannot be
+  thresholded. On by default (`search.semantic auto`), a no-op without qmd, and any failure — missing binary, no
+  answer inside `search.semanticTimeoutMs` (8 s), index not built yet, non-zero exit, output of the wrong shape —
+  answers from keywords exactly as before, never as an error. Never used by automatic injection. The extension
+  keeps its own qmd index fresh (debounced, single-flight, one pass at a time across Pi sessions through a lock
+  file) and `/memory doctor` reports the index, the files still without vectors, and the last failure. A timeout
+  kills qmd's whole **process group**, not just the process it started: `qmd` is a launcher that spawns the real
+  CLI as its child, so killing only the launcher left 12 workers alive at ~2 GB each after 18 timed-out searches.
+  qmd 2.8.3 answers with a file's real path where 2.5.1 answered with its own slug, so both forms are accepted
+  and mapped back, and a name neither resolves to is dropped rather than guessed. The memory package's
+  `smoke:semantic` script checks the real qmd end to end; its `eval:semantic` script re-measures on your own bank.
 
 ## [1.11.2] - 2026-11-10
 
