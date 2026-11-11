@@ -124,9 +124,9 @@ Keywords find a file only when the prompt uses words the file contains. `memory_
 | | |
 | --- | --- |
 | Where it applies | `memory_search` only. **Automatic injection never starts qmd**: vector search has no relevance floor, and an injected file costs tokens on every turn. |
-| Which qmd mode | `qmd vsearch` (vectors only). Latency is the catch: 0.8-1.3 s once warm, but the first calls after a pause were erratic when measured (3, 4, 13 and 15 s in one run, on a machine at load average 4), so many real searches land in the slow stretch. The default timeout is 8 s; searches slower than that answer from keywords, and `/memory config search.semanticTimeoutMs 20000` waits out the worst case seen. Not `qmd query`: its reranking found 12 of 15 test targets against vsearch's 13, and takes 10-16 s a call. |
+| Which qmd call | `qmd query "vec: <the query>" --format json --no-rerank` — one typed `vec:` line, which is the only shape that answers from the vectors alone. `qmd vsearch`, despite its help text, expands every query into four sub-queries with a 1.7 B model first: **11.4 s median and 3 timeouts in 18** here, against **2.6 s and none** for the typed line, for a ranking measured no better (14 of 18 in the top 3 against 15). Reranking is off because fusion ranks rather than compares scores, and qmd's 0-1 scores cannot be thresholded. The default timeout is 8 s (the setting allows 200..30000); a search slower than that answers from keywords. |
 | Result | The keyword list and the vector list are fused by rank (reciprocal rank fusion, k = 60). A file **both** lists found outranks a file only one found, so a loosely related vector hit cannot push a keyword match out. Each result says `via: bm25`, `semantic` or `both`; a semantic-only result shows its cosine score as `0.43 (meaning)`. |
-| When it fails | Missing binary, no answer within `search.semanticTimeoutMs` (default 8000), index not built yet, non-zero exit or output of the wrong shape: the answer is the keyword answer, byte for byte what it is with `search.semantic off`. Never an error for the agent. `/memory doctor` shows the last attempt and why it fell back. |
+| When it fails | Missing binary, no answer within `search.semanticTimeoutMs` (default 8000), index not built yet, non-zero exit or output of the wrong shape: the answer is the keyword answer, byte for byte what it is with `search.semantic off`. Never an error for the agent. `/memory doctor` shows the last attempt and why it fell back. A timeout kills qmd's whole **process group**, not just the process it started: `qmd` is a launcher that spawns the real CLI as its child, and killing only the launcher left 12 workers alive at ~2 GB each after 18 timed-out searches. On Windows `detached` is ignored, so only the launcher is killed there. |
 | Its own index | `pi-memory-<hash of the bank path>`, one collection called `bank`. Another bank, a test bank or a moved bank never shares vectors with this one. The default qmd index is not touched. |
 | Which files | Only files the keyword index also knows, so semantic results obey the same rules: no internal files, nothing below the index depth, nothing deleted since the last embed. qmd rewrites file names (`with space.md` becomes `with-space.md`); they are mapped back to the real files, and a name two files would share is dropped rather than guessed. |
 
@@ -143,16 +143,17 @@ Settings: `search.semantic auto|off`, `search.semanticTimeoutMs 200..30000`, `se
 
 Not covered: a file renamed to something qmd would give the same name as another file (`a b.md` and `a-b.md`) is dropped from semantic results rather than guessed. Changing `PI_MEMORY_DIR` builds a second index; the old one stays in `~/.cache/qmd/` until deleted (`qmd --index <name> cleanup`, or remove the file).
 
-**Measured, 2026-11-10, a copy of a live bank (402 files), 15 prompts (9 that avoid the target file's own words), with a fresh index.** The prompts and the labels were written by the agent that ran them, so this is a direction, not a benchmark. `npm run eval:semantic` reruns it on your own bank and your own labels.
+**Measured, 2026-11-11, a copy of a live bank (75 files, 190 vectors), 18 cases: the 12 where meaning can change the outcome plus 6 where keywords already rank the right file first.** The cases were proposed by the agent and the labels confirmed by the bank's owner (three corrections), and the run is a copy — the live index was not touched. `npm run eval:semantic` reruns it on your own bank and your own labels.
 
-| | correct file first | in the top 3 | in the top 5 (the default `limit`) |
+| | correct file in the top 3 | median latency | fell back |
 | --- | --- | --- | --- |
-| keywords (MiniSearch) | 6 | 8 | 9 |
-| meaning alone (`qmd vsearch`) | 11 | 12 | 12 |
-| both, fused equally (what ships) | 7 | 12 | **14** |
-| both, meaning weighted 2x | 9 | 12 | 12 |
+| keywords (MiniSearch) | 11 of 18 | ~0 s | — |
+| + `qmd vsearch` (what this branch first shipped) | 14 | 11.4 s | 3 |
+| + `qmd query "vec:"` (what ships) | **15** | **2.6 s** | 0 |
 
-Fusion trades first-place precision for coverage: meaning alone puts the right file first more often, but fused search finds it somewhere in the five results the agent reads in 14 of 15 cases, where either list alone misses 3 or 6. Weighting meaning 2x was tried and rejected: it pushed a keyword hit that ranked 2nd down to 12th, because ten semantic results outrank it. In an earlier run on a stale index (six weeks old, 38% of knowledge files without vectors) meaning alone found 7 in the top 3: an index nobody refreshes is worth about what keywords are. The real qmd is checked end to end by `npm run smoke:semantic`.
+Both qmd arms lost the same one case — a current-decision row whose true file keywords ranked 3rd and fusion pushed to 7th — and 13 of 18 rankings were identical, so the faster shape is not buying speed with quality. Fusion trades first-place precision for coverage; that is the shape of the trade, not a bug in it.
+
+Two things from an earlier run (2026-11-10, a different 402-file bank, 15 agent-labelled prompts, `vsearch`) still stand and still gate the design: **weighting meaning 2x in the fusion was tried and rejected** — it pushed a keyword hit that ranked 2nd down to 12th, because ten semantic results outrank it — and **an index nobody refreshes is worth about what keywords are** (six weeks stale, 38% of knowledge files without vectors: meaning alone found 7 in the top 3). The real qmd is checked end to end by `npm run smoke:semantic`.
 
 ### Legacy `index.csv` (not read)
 

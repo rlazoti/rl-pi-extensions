@@ -1,5 +1,5 @@
 /**
- * Optional semantic search (`qmd vsearch`) with a silent fallback.
+ * Optional semantic search (`qmd query "vec: …"`) with a silent fallback.
  *
  * Nothing here mocks a module. A stand-in `qmd` (fixtures/fake-qmd.mjs) is put on disk behind a
  * tiny shell wrapper, PI_MEMORY_QMD points at it, and the code under test spawns it as a real child
@@ -22,6 +22,7 @@ import {
 	qmdSlug,
 	semanticSearch,
 	slugMap,
+	vecQuery,
 } from "./semantic.js";
 
 const FAKE = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "fake-qmd.mjs");
@@ -30,7 +31,7 @@ let tmp: string;
 let root: string;
 let logFile: string;
 const saved: Record<string, string | undefined> = {};
-const ENV_KEYS = ["PI_MEMORY_QMD", "FAKE_QMD_LOG", "FAKE_QMD_MODE", "FAKE_QMD_HITS", "FAKE_QMD_ADD", "FAKE_QMD_EMBED", "FAKE_QMD_DELAY_MS", "FAKE_QMD_TOTAL", "FAKE_QMD_PENDING"];
+const ENV_KEYS = ["PI_MEMORY_QMD", "FAKE_QMD_LOG", "FAKE_QMD_MODE", "FAKE_QMD_HITS", "FAKE_QMD_ADD", "FAKE_QMD_EMBED", "FAKE_QMD_DELAY_MS", "FAKE_QMD_TOTAL", "FAKE_QMD_PENDING", "FAKE_QMD_MARKER", "FAKE_QMD_WORKER_DELAY_MS"];
 
 function installFake(): void {
 	const wrapper = path.join(tmp, "qmd");
@@ -137,17 +138,41 @@ describe("parseVsearch", () => {
 	});
 });
 
+describe("vecQuery", () => {
+	it("types the query as one vector arm, so qmd skips query expansion", () => {
+		expect(vecQuery("what did we decide about locking")).toBe("vec: what did we decide about locking");
+	});
+	it("collapses a multi-line query into the single line the typed grammar allows", () => {
+		expect(vecQuery("first line\nsecond\ttab")).toBe("vec: first line second tab");
+	});
+	it("drops quote characters and collapses the runs they leave, because a typed line needs balanced quotes", () => {
+		expect(vecQuery('the "build" step\'s `flags`')).toBe("vec: the build step s flags");
+	});
+	it("refuses a query with no words, which is what a vector search answers with noise", () => {
+		expect(vecQuery("  --  ")).toBe("");
+		expect(vecQuery("\n\t \"\"")).toBe("");
+		expect(vecQuery("")).toBe("");
+		expect(vecQuery("42")).toBe("vec: 42");
+	});
+	it("keeps the caller's own words, including a leading dash, since the argument starts with vec:", () => {
+		expect(vecQuery("--verbose logging")).toBe("vec: --verbose logging");
+	});
+});
+
 describe("semanticSearch", () => {
 	const known = ["knowledge/csv output location.md", "knowledge/branch-naming.md", "core/dailyContext.md"];
 	const hits = (...files: string[]) => { process.env.FAKE_QMD_HITS = JSON.stringify(files.map((f) => `qmd://${COLLECTION}/${f}`)); };
 
-	it("runs vsearch against this bank's own index and collection, as JSON, and never the slow `query` mode", async () => {
+	it("asks for a typed vector query against this bank's own index and collection — never the expanding form", async () => {
 		hits("knowledge/csv-output-location.md");
 		const r = await semanticSearch(root, "where do I save the spreadsheet", 7, 3000, known);
 		expect(r).toEqual({ ok: true, hits: [{ path: "knowledge/csv output location.md", score: 0.6 }], dropped: 0 });
-		const args = calls().find((a) => a.includes("vsearch"))!;
-		expect(args).toEqual(["--index", indexNameFor(root), "vsearch", "where do I save the spreadsheet", "-c", COLLECTION, "-n", "7", "--json"]);
-		expect(calls().flat()).not.toContain("query");
+		const args = calls().find((a) => a.includes("query"))!;
+		expect(args).toEqual(["--index", indexNameFor(root), "query", "vec: where do I save the spreadsheet", "-c", COLLECTION, "-n", "7", "--format", "json", "--no-rerank"]);
+		// `vsearch` is the shape that costs 11.4 s a call here (it expands the query into four sub-queries
+		// with a 1.7B model) for a ranking measured no better; the fixture refuses it, so this pin is not
+		// the only thing keeping it out.
+		expect(calls().flat()).not.toContain("vsearch");
 	});
 
 	it("maps qmd's slugged names back to the real files and drops what the bank no longer holds", async () => {
@@ -160,8 +185,10 @@ describe("semanticSearch", () => {
 	it("keeps a query that starts with a dash from being read as a flag", async () => {
 		hits("knowledge/branch-naming.md");
 		await semanticSearch(root, "--files and more", 5, 3000, known);
-		const args = calls().find((a) => a.includes("vsearch"))!;
-		expect(args[3]).toBe("files and more");
+		const args = calls().find((a) => a.includes("query"))!;
+		// The typed document is one argument that always begins with "vec:", so a dash can no longer be
+		// mistaken for an option — and the caller's words survive intact, which the old strip-and-hope did not.
+		expect(args[3]).toBe("vec: --files and more");
 	});
 
 	it("answers zero hits, without spawning anything, for a query with no words", async () => {
@@ -190,6 +217,27 @@ describe("semanticSearch", () => {
 		const r = await semanticSearch(root, "q", 5, 300, known);
 		expect(Date.now() - started).toBeLessThan(2500);
 		expect(r.ok === false && r.reason).toBe("timeout");
+	});
+
+	it("kills the worker the launcher spawned, not just the launcher", async () => {
+		// The real `qmd` is a launcher that spawns the actual CLI as its child, so a timeout that SIGKILLs
+		// only the process it started leaves the worker running with its models loaded: 18 searches that
+		// timed out at 8 s left 12 of them alive at ~2 GB each on the author's machine (2026-11-11), each
+		// still eating the CPU the next search needs. The fake reproduces the shape: a worker in the same
+		// process group that writes this file 400 ms later, which is after the 300 ms timeout.
+		const marker = path.join(tmp, "worker-survived");
+		process.env.FAKE_QMD_MODE = "leak";
+		process.env.FAKE_QMD_MARKER = marker;
+		process.env.FAKE_QMD_WORKER_DELAY_MS = "2000"; // after the 1500 ms timeout below, so a survivor is visible
+		const r = await semanticSearch(root, "q", 5, 1500, known);
+		expect(r.ok === false && r.reason).toBe("timeout");
+		expect(fs.existsSync(`${marker}.pid`), "the fake never reached its worker: the timeout cut it off too early").toBe(true);
+		const pid = Number(fs.readFileSync(`${marker}.pid`, "utf8"));
+		await new Promise((resolve) => setTimeout(resolve, 900));
+		expect(fs.existsSync(marker), "the worker outlived the search that timed out").toBe(false);
+		let alive = true;
+		try { process.kill(pid, 0); } catch { alive = false; }
+		expect(alive, `worker ${pid} is still running`).toBe(false);
 	});
 
 	it("reports a missing binary as such", async () => {

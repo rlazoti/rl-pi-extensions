@@ -1,6 +1,6 @@
 /**
  * Reciprocal rank fusion for `memory_search`: one ranked list from keywords (BM25),
- * one from meaning (`qmd vsearch`), one list out.
+ * one from meaning (`qmd query "vec: …"`), one list out.
  *
  * Why rank fusion and not a score blend: the two scores are not on one scale. BM25
  * magnitudes move with corpus size and query length (one prompt scored 39 in a one-file

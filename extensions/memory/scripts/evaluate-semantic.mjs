@@ -7,16 +7,17 @@
  * cases.json:  [{ "id": "csv", "prompt": "where do I save the spreadsheet I export", "expect": ["knowledge/csv-output-location.md"] }]
  *
  * For each case it reports the rank of the first expected file for keywords alone and for keywords fused with
- * `qmd vsearch`, then how many landed in the top 3 each way, which cases meaning gained, and which the fusion
+ * the semantic arm (qmd), then how many landed in the top 3 each way, which cases meaning gained, and which the fusion
  * lost (should be none). The cases are never shipped with the repo: they name files of a private bank, and a label
- * is only as good as whoever wrote it. The first numbers (a live bank, 15 prompts, labels by the agent that ran
- * them) are in the README, as a direction.
+ * is only as good as whoever wrote it. The first numbers (a live bank, 18 owner-labelled cases) are in the README.
  *
  * It works on a COPY of the bank in a temp directory, never on the bank itself: running the extension starts a
  * session, and a session may roll the daily file over, scaffold files and write a config. The copy gets its own qmd
  * index, built by the extension's own Refresher (about a minute for 400 files, so the index measured is the one the
  * extension would build), and both are deleted afterwards. The bank and the operator's indexes are never touched.
- * Needs qmd's models to be present already. `--limit N` sets k (default 3).
+ * Needs qmd's models to be present already. `--limit N` sets k (default 3). The 30 s timeout below is the most the
+ * setting allows: `search.semanticTimeoutMs` accepts 200..30000, and a larger value is rejected in favour of the
+ * 8 s default, which on a CPU-only machine is how a measured 11 s arm silently becomes "no semantic results".
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -60,6 +61,9 @@ try {
 
 	const search = (query, mode) => harness.commands.get("memory").handler(`config search.semantic ${mode}`, harness.ctx)
 		.then(() => harness.tools.get("memory_search").execute("eval", { query, limit: 10 }));
+	// One query before the measured loop. qmd loads its models on first use, and a case should not be
+	// scored on that: the load can eat the whole timeout and turn the first fused arm into keywords alone.
+	await search(cases[0].prompt, "auto");
 	const rows = [];
 	for (const c of cases) {
 		const keyword = await search(c.prompt, "off");

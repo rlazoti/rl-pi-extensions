@@ -1,18 +1,24 @@
 /**
- * Optional semantic search: `qmd vsearch` behind `memory_search`, with a silent fallback.
+ * Optional semantic search: `qmd query "vec: …"` behind `memory_search`, with a silent fallback.
  *
- * What was measured before this was written (2026-11-10, a live bank of 402 files, 15 prompts of
- * which 9 avoid the target file's own words; labels by the agent, so a direction, not a benchmark):
+ * What was measured before this was written, and what changed the shape (2026-11-10 → 11-11, this
+ * machine: Intel CPU, 32 GB, no GPU; 18 cases labelled by the owner on a copy of the live bank):
  *
- *   correct file in the top 3    MiniSearch 8 of 15 · qmd vsearch (fresh index) 13 · qmd query 12
- *   latency per call             vsearch ~0.7 s · query 10-16 s (it loads an expansion and a rerank model each call)
- *   re-embedding a whole bank    51 s
+ *   correct file in the top 3    MiniSearch 11 of 18 · qmd vsearch 14 · qmd query "vec:" 15
+ *   latency per call             vsearch 11.4 s median (3 timeouts in 18) · "vec:" 2.6 s (none)
+ *   re-embedding a whole bank    ~6 min for 75 files
  *
  * Hence the decisions this file carries out:
  *
- *   - `vsearch`, never `query`. Reranking was not better and costs 15x the time.
+ *   - A **typed** `query`: one `vec:` line, which is the only shape that skips query expansion. `qmd vsearch`
+ *     is not the vector-only call its help claims — it expands every query into four sub-queries with a 1.7 B
+ *     model (its own log says so), and on CPU that is 4x the time for the same or worse ranking. Reranking is
+ *     off too: fusion ranks, and qmd's 0-1 scores cannot be thresholded (an unrelated greeting scored 0.41
+ *     against a true match's 0.43). The one thing the fast shape shares with the slow one is the case it loses:
+ *     a current-decision row whose true file went from rank 3 to 7 under fusion.
  *   - Async child processes with a timeout. The extension this was modelled on blocks Pi for up
  *     to 30 s per call (`execFileSync`); here a slow qmd costs the search its semantic half, not the session.
+ *   - A timeout kills the whole **process group**, because the qmd launcher spawns the real CLI as a child.
  *   - Its own index, named after the bank (`pi-memory-<hash of the bank root>`). A shared index goes
  *     stale: the one on the author's machine was last embedded six weeks before this was written,
  *     with 38% of the knowledge files missing vectors, because nothing ever re-embedded.
@@ -27,10 +33,12 @@
  * Nothing here is mocked in tests: PI_MEMORY_QMD names the binary, and the tests point it at a
  * stand-in (fixtures/fake-qmd.mjs) that real child processes spawn.
  */
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
+import type { ChildProcessByStdio } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { Readable } from "node:stream";
 
 export interface SearchConfig {
 	/** `auto`: use qmd when it is installed and answers in time. `off`: keywords only. */
@@ -100,26 +108,70 @@ type RunResult =
 	| { kind: "timeout" }
 	| { kind: "aborted" };
 
+/**
+ * Spawn qmd and wait for it, never longer than `timeoutMs`.
+ *
+ * The group kill is the part that cannot be simplified. `/usr/local/bin/qmd` is a launcher that
+ * `spawn`s the real CLI (`dist/cli/qmd.js`) as its own child, so SIGKILLing the process we started
+ * leaves the worker alive with its models loaded: 18 searches that timed out at 8 s left 12 such
+ * processes running at ~2 GB each, still using the CPU the next search needs (measured 2026-11-11).
+ * `detached: true` gives the child a process group of its own, and `process.kill(-pid)` then reaches
+ * everything inside it. On Windows `detached` is ignored and a negative pid is not a signal target,
+ * so only the direct child is killed there — a documented limit, not a silent one.
+ *
+ * Output is capped by hand for the same reason `maxBuffer` exists: a runaway qmd must not balloon
+ * the Pi process, and the truncation is reported as a failure rather than parsed.
+ */
+const QMD_MAX_BUFFER = 16 * 1024 * 1024;
+
 function runQmd(args: string[], timeoutMs: number, signal?: AbortSignal): Promise<RunResult> {
 	return new Promise((resolve) => {
 		if (signal?.aborted) return resolve({ kind: "aborted" });
+		let child: ChildProcessByStdio<null, Readable, Readable>;
 		try {
-			execFile(
-				qmdBinary(),
-				args,
-				{ timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: 16 * 1024 * 1024, signal, env: { ...process.env, NO_COLOR: "1" } },
-				(error, stdout, stderr) => {
-					if (!error) return resolve({ kind: "exit", code: 0, stdout: String(stdout), stderr: String(stderr) });
-					const e = error as unknown as { code?: number | string; killed?: boolean; name?: string };
-					if (e.code === "ENOENT" || e.code === "EACCES") return resolve({ kind: "missing" });
-					if (e.name === "AbortError") return resolve({ kind: "aborted" });
-					if (e.killed) return resolve({ kind: "timeout" });
-					resolve({ kind: "exit", code: typeof e.code === "number" ? e.code : 1, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
-				},
-			);
+			child = spawn(qmdBinary(), args, { detached: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, NO_COLOR: "1" } });
 		} catch {
-			resolve({ kind: "missing" });
+			return resolve({ kind: "missing" });
 		}
+		let stdout = "";
+		let stderr = "";
+		const pid = child.pid; // undefined only when the spawn never happened — then there is no group to kill
+		let outcome: RunResult | null = null;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const killGroup = () => {
+			if (pid !== undefined && process.platform !== "win32") { try { process.kill(-pid, "SIGKILL"); } catch { /* the group is already gone */ } }
+			try { child.kill("SIGKILL"); } catch { /* so is the child */ }
+		};
+		const finish = (result: RunResult) => {
+			if (outcome) return;
+			outcome = result;
+			if (timer) clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
+			killGroup();
+			resolve(result);
+		};
+		const onAbort = () => finish({ kind: "aborted" });
+		timer = setTimeout(() => { finish({ kind: "timeout" }); }, timeoutMs);
+		signal?.addEventListener("abort", onAbort, { once: true });
+
+		const take = (which: "stdout" | "stderr") => (chunk: Buffer) => {
+			const room = QMD_MAX_BUFFER - (which === "stdout" ? stdout.length : stderr.length);
+			if (room <= 0) return finish({ kind: "exit", code: 1, stdout: "", stderr: `qmd output exceeded ${QMD_MAX_BUFFER} bytes` });
+			if (which === "stdout") stdout += chunk.subarray(0, room).toString();
+			else stderr += chunk.subarray(0, room).toString();
+		};
+		child.stdout?.on("data", take("stdout"));
+		child.stderr?.on("data", take("stderr"));
+		child.on("error", (error) => {
+			const code = (error as NodeJS.ErrnoException).code;
+			finish(code === "ENOENT" || code === "EACCES" ? { kind: "missing" } : { kind: "exit", code: 1, stdout: "", stderr: String(error) });
+		});
+		child.on("close", (code, signalName) => {
+			if (outcome) return;
+			// Killed by a signal we did not send (OOM, a terminal kill): qmd never answered, so the semantic half is lost.
+			if (signalName) return finish({ kind: "timeout" });
+			finish({ kind: "exit", code: code ?? 1, stdout, stderr });
+		});
 	});
 }
 
@@ -160,6 +212,9 @@ export async function indexStatus(root: string, timeoutMs = 5000): Promise<Index
 export interface RawHit { file: string; score: number }
 
 /**
+ * Read qmd's answer rows. The name is the command this call replaced; `query --format json` prints
+ * the same rows, so the reader survived the change and this function's tests are its proof.
+ *
  * Strict on purpose: a format change in qmd must read as "bad output" and fall back to keywords,
  * not as a half-parsed answer. A leading warning line (qmd prints one while vectors are missing)
  * is tolerated; the array itself must be complete.
@@ -197,6 +252,23 @@ export type SemanticOutcome =
  * hit is kept only if it maps to one of those, so semantic results obey the same eligibility as
  * keyword results (no internal files, no files below the index depth, nothing deleted since).
  */
+/**
+ * The query as qmd's typed-document grammar wants it: one `vec:` line, so qmd answers from the
+ * vectors alone. `qmd vsearch` is not the vector-only call its help claims — it expands every query
+ * into four sub-queries with a 1.7B model first, which on a CPU-only Mac measured 11.4 s median and
+ * three timeouts in eighteen. A typed document skips the expansion: 2.6 s median, no timeouts, and
+ * one case *more* in the top 3 than the expanded form (15 of 18 against 14).
+ *
+ * A typed line must be single-line text with balanced quotes, so newlines and quote characters are
+ * dropped rather than escaped: the words carry the meaning and the quoting carries nothing here. A
+ * leading dash is harmless now — the argument always starts with `vec:`.
+ */
+export function vecQuery(query: string): string {
+	const oneLine = query.replace(/["'`]/g, " ").replace(/\s+/g, " ").trim();
+	// Words, not punctuation: a query with none is what a vector search answers with noise.
+	return /[\p{L}\p{N}]/u.test(oneLine) ? `vec: ${oneLine}` : "";
+}
+
 export async function semanticSearch(
 	root: string,
 	query: string,
@@ -204,11 +276,10 @@ export async function semanticSearch(
 	timeoutMs: number,
 	knownPaths: string[],
 ): Promise<SemanticOutcome> {
-	// A query that begins with "-" would be read as a flag. Words are what carry meaning, not the dashes.
-	const cleaned = query.replace(/^[-\s]+/, "").trim();
-	if (!cleaned) return { ok: true, hits: [], dropped: 0 };
+	const typed = vecQuery(query);
+	if (!typed) return { ok: true, hits: [], dropped: 0 };
 	const r = await runQmd(
-		["--index", indexNameFor(root), "vsearch", cleaned, "-c", COLLECTION, "-n", String(Math.max(1, Math.floor(limit))), "--json"],
+		["--index", indexNameFor(root), "query", typed, "-c", COLLECTION, "-n", String(Math.max(1, Math.floor(limit))), "--format", "json", "--no-rerank"],
 		timeoutMs,
 	);
 	if (r.kind === "missing") return { ok: false, reason: "missing", detail: `qmd not found (${qmdBinary()})` };

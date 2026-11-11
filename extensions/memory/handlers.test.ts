@@ -2802,14 +2802,15 @@ describe("memory_search: keywords, plus meaning when qmd answers", () => {
 		expect(text).toContain("**Pair programming**");
 	});
 
-	it("asks qmd for a vector search against this bank's index, and never for the slow query mode", async () => {
+	it("asks qmd for a typed vector query against this bank's index, and never for the expanding form", async () => {
 		hits("knowledge/rubber-duck.md");
 		await search("duck");
-		const call = qmdCalls().find((a) => a.includes("vsearch"))!;
+		const call = qmdCalls().find((a) => a.includes("query"))!;
 		expect(call[0]).toBe("--index");
 		expect(call[1]).toMatch(/^pi-memory-[0-9a-f]{8}$/);
-		expect(call).toContain("--json");
-		expect(qmdCalls().flat()).not.toContain("query");
+		expect(call[3]).toBe("vec: duck");
+		expect(call).toContain("--no-rerank");
+		expect(qmdCalls().flat()).not.toContain("vsearch");
 	});
 
 	it("answers from keywords alone, in the text it always had, when qmd is not there", async () => {
@@ -2882,7 +2883,7 @@ describe("memory_search: keywords, plus meaning when qmd answers", () => {
 	it("keeps injection on keywords: a prompt never starts qmd", async () => {
 		hits("knowledge/pair-programming.md");
 		await injectedContent(userEvent("tell me about the duck"));
-		expect(qmdCalls().filter((a) => a.includes("vsearch"))).toEqual([]);
+		expect(qmdCalls().filter((a) => a.includes("query") || a.includes("vsearch"))).toEqual([]);
 	});
 });
 
