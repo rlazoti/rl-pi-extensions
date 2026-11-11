@@ -13,7 +13,9 @@
 //
 // Shapes copied from qmd 2.8.3 as probed on 2026-11-11: `query "vec: …" --format json` prints an array of
 // {docid, score, file, line, title, snippet}; `status` prints "Total: N files indexed" and
-// "Pending: N need embedding". The query branch also *checks the shape it was given* — see below.
+// "Pending: N need embedding". 2.8.3 answers with a file's **real** path; the 2.5.1 build answered with its
+// own slug — the tests cover both, so keep the fixture able to replay either (FAKE_QMD_HITS passes through).
+// The query branch also *checks the shape it was given* — see below.
 import { spawn } from "node:child_process";
 import { appendFileSync, writeFileSync } from "node:fs";
 

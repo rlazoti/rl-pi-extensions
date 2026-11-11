@@ -4,8 +4,9 @@
  *
  * Why rank fusion and not a score blend: the two scores are not on one scale. BM25
  * magnitudes move with corpus size and query length (one prompt scored 39 in a one-file
- * bank and 176 in a sixty-file bank), and a cosine score has no meaning next to them.
- * Ranks do. Why not a vector score floor: measured on a live bank, an unrelated greeting
+ * bank and 176 in a sixty-file bank), and a qmd score — cosine, reranker weight, or the
+ * reciprocal rank `--no-rerank` returns — has no meaning next to them.
+ * Ranks do. Why not a vector score floor: measured on a live bank with the reranker on, an unrelated greeting
  * scored 0.41 against an unrelated file while a true match scored 0.43, so no cut-off
  * separates them. Fusion gives the property that matters instead: a file BOTH lists found
  * outranks a file only one list found, so a loosely related vector hit cannot displace a

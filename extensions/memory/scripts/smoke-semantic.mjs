@@ -62,10 +62,21 @@ try {
 	// Shares no word with the answer: "stuffed animal", "narrate", "defect" against "toy", "explain", "bug".
 	const search = await harness.tools.get("memory_search").execute("smoke", { query: "narrate your program to a stuffed animal to find the defect", limit: 3 });
 	const results = search.details.results;
+	// What the bank holds now, not what this script wrote: starting a session scaffolds files
+	// (`core/dailyContext.md`), and a result for one of those is a result for a real file.
+	const bankPaths = new Set();
+	const walk = (rel) => {
+		for (const entry of fs.readdirSync(path.join(bank, rel), { withFileTypes: true })) {
+			const p = rel ? `${rel}/${entry.name}` : entry.name;
+			if (entry.isDirectory()) walk(p);
+			else if (p.endsWith(".md")) bankPaths.add(p);
+		}
+	};
+	walk("");
 	console.log(search.content[0].text.split("\n").filter((l) => l.includes("Path:")).join("\n"));
 	check(search.details.semantic.used === true, `semantic search answered (${search.details.semantic.reason ?? "used"})`);
 	check(results[0]?.path === "knowledge/rubber duck debugging.md", "the file with a space in its name came back under its real name, first");
-	check(results.every((r) => files[r.path] !== undefined), "every result is a file in the bank");
+	check(results.every((r) => bankPaths.has(r.path)), `every result is a file the bank really holds (${[...bankPaths].join(", ")})`);
 	check(results.some((r) => r.via === "semantic" || r.via === "both"), "at least one result says it was found by meaning");
 
 	// A name qmd rewrites twice over: spaces, brackets and a year.

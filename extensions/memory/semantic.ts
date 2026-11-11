@@ -75,10 +75,13 @@ export function indexNameFor(root: string): string {
 const slugSegment = (s: string): string => s.replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "");
 
 /**
- * The path qmd files a document under. qmd rewrites every run of non-letter, non-digit characters
- * in each path segment to one hyphen (and the stem's dots too, keeping `.md`), so `with space é.md`
- * is `with-space-é.md`. Checked against `qmd ls` for the names in semantic.test.ts and for all 402
- * files of a live bank. Needed to turn qmd's answers back into files this bank knows.
+ * The path qmd would file a document under *if it slugs names*: it rewrites every run of non-letter,
+ * non-digit characters in each path segment to one hyphen (and the stem's dots too, keeping `.md`), so
+ * `with space é.md` is `with-space-é.md`. Measured on qmd 2.5.1 with `qmd ls` over a 402-file bank; qmd
+ * 2.8.3 lists and answers with the **real** name instead (measured 2026-11-11, `qmd ls` on a temp bank:
+ * `knowledge/rubber duck debugging.md` intact). So this is the compatibility form, and `semanticSearch`
+ * tries the real path first — a bank whose names all slug to themselves cannot tell the two apart, which
+ * is how the change went unnoticed for a release.
  */
 export function qmdSlug(rel: string): string {
 	const segments = rel.normalize("NFC").split("/");
@@ -293,12 +296,18 @@ export async function semanticSearch(
 	}
 	const raw = parseVsearch(r.stdout);
 	if (!raw) return { ok: false, reason: "bad-output", detail: `not JSON of the expected shape: ${firstLine(r.stdout).slice(0, 80)}` };
-	const map = slugMap(knownPaths);
+	const knownReal = new Set(knownPaths.map((p) => p.normalize("NFC")));
+	const knownSlug = slugMap(knownPaths);
 	const hits: Array<{ path: string; score: number }> = [];
 	const seen = new Set<string>();
 	let dropped = 0;
 	for (const hit of raw) {
-		const real = map.get(hit.file.normalize("NFC"));
+		// Two answer shapes, one per qmd build: 2.8.3 returns the file's real relative path (`qmd ls` lists
+		// `knowledge/rubber duck debugging.md`), while the 2.5.1 build this was written against returned the
+		// slug it stored the document under (`with space.md` → `with-space.md`). Accept either, and nothing
+		// else — an unknown name is dropped, never guessed at, because a wrong path cites the wrong file.
+		const written = hit.file.normalize("NFC");
+		const real = knownReal.has(written) ? written : knownSlug.get(written);
 		if (!real) { dropped++; continue; }
 		if (seen.has(real)) continue;
 		seen.add(real);

@@ -182,6 +182,30 @@ describe("semanticSearch", () => {
 		expect(r.ok && r.dropped).toBe(1);
 	});
 
+	it("accepts the real path as well, because qmd 2.8.3 answers with it instead of its own slug", async () => {
+		// Measured on 2.8.3: `qmd ls` lists `knowledge/rubber duck debugging.md` and `query` answers with the
+		// same name. Reading only the slugged form silently dropped every bank file whose name has a space or
+		// a bracket in it — invisible on a bank of hyphenated names, which is why the fixture has to answer
+		// both ways.
+		hits("knowledge/csv output location.md", "knowledge/branch-naming.md");
+		const r = await semanticSearch(root, "q", 5, 3000, known);
+		expect(r.ok && r.hits.map((h) => h.path)).toEqual(["knowledge/csv output location.md", "knowledge/branch-naming.md"]);
+		expect(r.ok && r.dropped).toBe(0);
+	});
+
+	it("still maps a real name whose slug another file would share, because the real name is not ambiguous", async () => {
+		// Two files that collide in qmd's slug (both `a b.md` and `a  b.md` become `a-b.md`) but not in the bank.
+		const two = [...known, "knowledge/a b.md", "knowledge/a  b.md"];
+		hits("knowledge/a b.md", "knowledge/a  b.md");
+		const realNames = await semanticSearch(root, "q", 5, 3000, two);
+		expect(realNames.ok && realNames.hits.map((h) => h.path)).toEqual(["knowledge/a b.md", "knowledge/a  b.md"]);
+		// A slugged answer to the same pair cannot be resolved, so it stays dropped: guessing cites the wrong file.
+		hits("knowledge/a-b.md");
+		const slugged = await semanticSearch(root, "q", 5, 3000, two);
+		expect(slugged.ok && slugged.hits).toEqual([]);
+		expect(slugged.ok && slugged.dropped).toBe(1);
+	});
+
 	it("keeps a query that starts with a dash from being read as a flag", async () => {
 		hits("knowledge/branch-naming.md");
 		await semanticSearch(root, "--files and more", 5, 3000, known);
