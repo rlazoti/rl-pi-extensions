@@ -1,6 +1,6 @@
 {
 	"name": "rl-pi-extensions",
-	"version": "1.11.2",
+	"version": "1.12.0",
 	"description": "Personal Pi coding agent extensions — memory, todos, ask, snippets, context viewer, session banner, session attention, tmux and emacs feedback, turn, scan and settle guards",
 	"type": "module",
 	"license": "MIT",
