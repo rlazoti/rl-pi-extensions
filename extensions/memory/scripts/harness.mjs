@@ -20,6 +20,9 @@ export function checkArgs(known) {
 
 export async function loadHarness(source, bank) {
   process.env.PI_MEMORY_DIR = bank;
+  // These scripts measure injection and keyword retrieval. They must not start the operator's qmd (it would index the
+  // bank under test and load models), so semantic search is pointed at a binary that does not exist.
+  process.env.PI_MEMORY_QMD = "/nonexistent/qmd-off-in-measurement-scripts";
   const jiti = createJiti(import.meta.url);
   const { default: extension } = await jiti.import(source);
   const handlers = new Map(), tools = new Map(), commands = new Map(), notices = [];

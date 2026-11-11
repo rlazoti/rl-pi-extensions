@@ -636,7 +636,8 @@ describe("tool results", () => {
 	it("say so when a search matches nothing", async () => {
 		const result = await tools.get("memory_search").execute("tc-7", { query: "zzzzqqq-nothing-matches" });
 		expect(result.content[0].text).toContain("No results found");
-		expect(result.details).toEqual({ query: "zzzzqqq-nothing-matches", results: [] });
+		// `semantic` joined the details when meaning-based search did: it says whether that half ran.
+		expect(result.details).toMatchObject({ query: "zzzzqqq-nothing-matches", results: [], semantic: { used: false } });
 		expect(result.isError).toBe(false);
 	});
 });
@@ -2580,5 +2581,426 @@ describe("prompt guidelines", () => {
 		expect(rule).toContain("memory_search"); // look for the existing record first
 		expect(rule).toContain("memory_read");   // and read it before overwriting the file
 		expect(rule).toContain("rather than creating a second file");
+	});
+});
+
+describe("write gates on core/dailyContext.md", () => {
+	const DAILY = "core/dailyContext.md";
+	const words = (n: number) => Array.from({ length: n }, (_, i) => `w${i}`).join(" ");
+	const append = (text: string, section = "Completed") =>
+		tools.get("memory_append").execute("gate-append", { file: DAILY, section, text });
+	const update = (content: string, file = DAILY) =>
+		tools.get("memory_update").execute("gate-update", { file, content, allowUnread: true });
+	const snapshots = () => {
+		const dir = path.join(BANK, ".revisions");
+		if (!fs.existsSync(dir)) return [] as string[];
+		return fs.readdirSync(dir, { recursive: true, encoding: "utf8" }).filter((f) => f.endsWith(".json"));
+	};
+	const dailyText = (extra = "") => `## ${dayString(new Date())}\n\n### Completed\n- Wired up tests\n\n### Key Decisions\n${extra}`;
+	let previousConfig: string;
+	let previousDaily: string;
+
+	beforeEach(async () => {
+		previousConfig = fs.existsSync(path.join(BANK, "config.json")) ? read("config.json") : "{}";
+		previousDaily = read(DAILY);
+		fs.rmSync(path.join(BANK, ".revisions"), { recursive: true, force: true });
+		write("config.json", JSON.stringify({ revisions: { enabled: true } }));
+		write(DAILY, dailyText());
+		await freshSession();
+	});
+	afterEach(async () => {
+		write("config.json", previousConfig);
+		write(DAILY, previousDaily);
+		fs.rmSync(path.join(BANK, ".revisions"), { recursive: true, force: true });
+		await freshSession();
+	});
+
+	it("refuses an over-long bullet, leaves the file byte-identical and takes no recovery snapshot", async () => {
+		const before = read(DAILY);
+		const result = await append(words(31));
+		expect(result.isError).toBe(true);
+		expect(result.content[0].text).toContain("31 words > 30");
+		expect(result.details.refused).toBe("gate");
+		expect(read(DAILY)).toBe(before);
+		expect(snapshots()).toEqual([]);
+	});
+
+	it("accepts a bullet at the limit", async () => {
+		const result = await append(`- ${words(30)}`);
+		expect(result.isError).toBe(false);
+		expect(read(DAILY)).toContain("w29");
+	});
+
+	it("accepts the third identical attempt with a warning, and the lock is free for the next write", async () => {
+		const long = words(31);
+		expect((await append(long)).isError).toBe(true);
+		expect((await append(long)).isError).toBe(true);
+		const third = await append(long);
+		expect(third.isError).toBe(false);
+		expect(third.content[0].text).toContain("Accepted over-limit write");
+		expect(read(DAILY)).toContain("w30");
+		// Counters reset on the accepted write: the next long bullet is refused again, not waved through.
+		expect((await append(words(32))).isError).toBe(true);
+		// ...and a clean write still goes through, so no lock was left behind.
+		expect((await append("a short one")).isError).toBe(false);
+	});
+
+	it("a new session starts with fresh counters", async () => {
+		const long = words(31);
+		await append(long);
+		await append(long);
+		await freshSession();
+		const first = await append(long);
+		expect(first.isError).toBe(true);
+		expect(first.content[0].text).toContain("rejection 1 of 2");
+	});
+
+	it("checks Key Decisions against its own, smaller limit", async () => {
+		const result = await append(words(26), "Key Decisions");
+		expect(result.isError).toBe(true);
+		expect(result.content[0].text).toContain("[Key Decisions: 26 words > 25]");
+	});
+
+	it("memory_update is gated too, and judges only the bullets it adds", async () => {
+		const oldLong = words(40);
+		write(DAILY, dailyText(`- ${oldLong}\n`));
+		await freshSession();
+		// Rewriting the file with the old long bullet untouched plus one short new one passes.
+		const ok = await update(dailyText(`- ${oldLong}\n- brief\n`));
+		expect(ok.isError).toBe(false);
+		// A brand-new long bullet does not.
+		const refused = await update(dailyText(`- ${oldLong}\n- brief\n- ${words(26)}\n`));
+		expect(refused.isError).toBe(true);
+	});
+
+	it("refuses a write that grows dailyContext past the character cap, naming the numbers", async () => {
+		const huge = dailyText() + "x".repeat(6000);
+		const result = await update(huge);
+		expect(result.isError).toBe(true);
+		expect(result.content[0].text).toContain(`${huge.length.toLocaleString()} characters`);
+		expect(result.content[0].text).toContain("6,000-character cap");
+	});
+
+	it("lets an over-cap file shrink, even though it is still over the cap", async () => {
+		write(DAILY, dailyText() + "x".repeat(9000));
+		await freshSession();
+		const shorter = dailyText() + "x".repeat(7000);
+		expect((await update(shorter)).isError).toBe(false);
+	});
+
+	it("never gates another file, however long", async () => {
+		const result = await update("# Big note\n\n" + "y".repeat(20_000), "knowledge/gate-other.md");
+		expect(result.isError).toBe(false);
+		fs.rmSync(path.join(BANK, "knowledge/gate-other.md"), { force: true });
+	});
+
+	it("is configurable and can be switched off", async () => {
+		await commands.get("memory").handler("config gates.completedWords 5", ctx);
+		expect((await append(words(6))).isError).toBe(true);
+		await commands.get("memory").handler("config gates.completedWords 0", ctx);
+		expect((await append(words(60))).isError).toBe(false);
+		await commands.get("memory").handler("config gates.enabled false", ctx);
+		await commands.get("memory").handler("config gates.completedWords 5", ctx);
+		expect((await append(words(60))).isError).toBe(false);
+	});
+
+	it("refuses a bad setting value with the expected shape", async () => {
+		await commands.get("memory").handler("config gates.dailyContextMaxChars lots", ctx);
+		expect(notifications.at(-1)?.message).toContain("gates.dailyContextMaxChars: expected integer");
+	});
+
+	it("shows the gates in /memory doctor and warns when the file is already over the cap", async () => {
+		await commands.get("memory").handler("doctor", ctx);
+		expect(notifications.at(-1)?.message).toContain("write gates on dailyContext: 30 words per Completed bullet");
+		write(DAILY, dailyText() + "x".repeat(7000));
+		await commands.get("memory").handler("doctor", ctx);
+		expect(notifications.at(-1)?.message).toContain("over the 6,000-character gate");
+	});
+
+	it("tells the agent about the limits it will be held to", () => {
+		const guidelines: string[] = tools.get("memory_update").promptGuidelines;
+		expect(guidelines.some((g) => g.includes("Writes to dailyContext.md are checked") && g.includes("30 words"))).toBe(true);
+	});
+});
+
+describe("memory_search: keywords, plus meaning when qmd answers", () => {
+	const FAKE = path.join(path.dirname(new URL(import.meta.url).pathname), "fixtures", "fake-qmd.mjs");
+	const KEYS = ["PI_MEMORY_QMD", "FAKE_QMD_LOG", "FAKE_QMD_MODE", "FAKE_QMD_HITS"];
+	const saved: Record<string, string | undefined> = {};
+	const files = ["knowledge/rubber duck.md", "knowledge/duck pond.md", "knowledge/pair programming.md"];
+	let dir: string;
+	let log: string;
+	let previousConfig: string;
+
+	const search = (query: string, limit = 5) => tools.get("memory_search").execute("sem-search", { query, limit });
+	const hits = (...rels: string[]) => { process.env.FAKE_QMD_HITS = JSON.stringify(rels.map((r) => `qmd://bank/${r}`)); };
+	const qmdCalls = (): string[][] => fs.existsSync(log) ? fs.readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l).args) : [];
+
+	beforeEach(async () => {
+		for (const k of KEYS) saved[k] = process.env[k];
+		dir = fs.mkdtempSync(path.join(os.tmpdir(), "memory-sem-handler-"));
+		log = path.join(dir, "calls.log");
+		fs.writeFileSync(path.join(dir, "qmd"), `#!/bin/sh\nexec "${process.execPath}" "${FAKE}" "$@"\n`, { mode: 0o755 });
+		process.env.PI_MEMORY_QMD = path.join(dir, "qmd");
+		process.env.FAKE_QMD_LOG = log;
+		previousConfig = fs.existsSync(path.join(BANK, "config.json")) ? read("config.json") : "{}";
+		write("config.json", "{}");
+		write(files[0], "# Rubber duck\n\nDebugging by explaining code aloud to a toy duck.\n");
+		write(files[1], "# Duck pond\n\nWhere the ducks swim.\n");
+		write(files[2], "# Pair programming\n\nTalk through the problem with a colleague at one keyboard.\n");
+		await freshSession();
+	});
+	afterEach(async () => {
+		for (const k of KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+		for (const f of files) fs.rmSync(path.join(BANK, f), { force: true });
+		write("config.json", previousConfig);
+		fs.rmSync(dir, { recursive: true, force: true });
+		await freshSession();
+	});
+
+	it("fuses meaning with keywords: a file both found leads, and a file only meaning found is added and labelled", async () => {
+		hits("knowledge/pair-programming.md", "knowledge/rubber-duck.md");
+		const r = await search("duck");
+		const byPath = Object.fromEntries(r.details.results.map((x: any) => [x.path, x]));
+		expect(r.details.results[0].path).toBe(files[0]);
+		expect(byPath[files[0]].via).toBe("both");
+		expect(byPath[files[1]].via).toBe("bm25");
+		expect(byPath[files[2]].via).toBe("semantic");
+		expect(r.details.semantic).toEqual({ tried: true, used: true });
+		const text: string = r.content[0].text;
+		expect(text).toContain(`Path: ${files[0]} | Score: `);
+		expect(text).toContain("| via: both");
+		expect(text).toMatch(/Path: knowledge\/pair programming\.md \| Score: 0\.\d\d \(meaning\) \| via: semantic/);
+		// The snippet and title of a file only meaning found come from the file itself.
+		expect(text).toContain("**Pair programming**");
+	});
+
+	it("asks qmd for a vector search against this bank's index, and never for the slow query mode", async () => {
+		hits("knowledge/rubber-duck.md");
+		await search("duck");
+		const call = qmdCalls().find((a) => a.includes("vsearch"))!;
+		expect(call[0]).toBe("--index");
+		expect(call[1]).toMatch(/^pi-memory-[0-9a-f]{8}$/);
+		expect(call).toContain("--json");
+		expect(qmdCalls().flat()).not.toContain("query");
+	});
+
+	it("answers from keywords alone, in the text it always had, when qmd is not there", async () => {
+		process.env.PI_MEMORY_QMD = path.join(dir, "no-such-qmd");
+		const without = await search("duck");
+		expect(without.isError).toBe(false);
+		expect(without.content[0].text).not.toContain("via:");
+		expect(without.content[0].text).not.toContain("meaning");
+		expect(without.details.semantic).toMatchObject({ tried: true, used: false, reason: "missing" });
+		// Byte-compatible with search.semantic off: switching it off changes nothing for the reader.
+		await commands.get("memory").handler("config search.semantic off", ctx);
+		const off = await search("duck");
+		expect(off.content[0].text).toBe(without.content[0].text);
+		expect(off.details.semantic).toEqual({ tried: false, used: false });
+		expect(qmdCalls()).toEqual([]);
+	});
+
+	for (const mode of ["fail", "garbage", "notready"]) {
+		it(`falls back to the same keyword answer, without an error, when qmd is in ${mode} mode`, async () => {
+			const baseline = await (async () => { await commands.get("memory").handler("config search.semantic off", ctx); const b = await search("duck"); await commands.get("memory").handler("config search.semantic auto", ctx); return b; })();
+			process.env.FAKE_QMD_MODE = mode;
+			const r = await search("duck");
+			expect(r.isError).toBe(false);
+			expect(r.content[0].text).toBe(baseline.content[0].text);
+			expect(r.details.semantic.used).toBe(false);
+		});
+	}
+
+	it("gives up at search.semanticTimeoutMs instead of waiting on a slow qmd", async () => {
+		process.env.FAKE_QMD_MODE = "slow";
+		await commands.get("memory").handler("config search.semanticTimeoutMs 300", ctx);
+		const started = Date.now();
+		const r = await search("duck");
+		expect(Date.now() - started).toBeLessThan(2500);
+		expect(r.isError).toBe(false);
+		expect(r.details.semantic).toMatchObject({ used: false, reason: "timeout" });
+		expect(r.details.results.length).toBeGreaterThan(0);
+	});
+
+	it("leaves a query of only common words to the keyword path, which says why nothing was searched", async () => {
+		hits("knowledge/pair-programming.md");
+		const r = await search("what about the");
+		expect(r.content[0].text).toContain("Nothing searched");
+		expect(qmdCalls()).toEqual([]);
+	});
+
+	it("ignores a semantic hit for a file the bank no longer has", async () => {
+		hits("knowledge/deleted-long-ago.md", "knowledge/rubber-duck.md");
+		const r = await search("duck");
+		expect(r.details.results.map((x: any) => x.path)).not.toContain("knowledge/deleted-long-ago.md");
+		expect(r.details.semantic.used).toBe(true);
+	});
+
+	it("respects the limit after fusion", async () => {
+		hits("knowledge/pair-programming.md", "knowledge/rubber-duck.md");
+		const r = await search("duck", 2);
+		expect(r.details.results).toHaveLength(2);
+	});
+
+	it("reports the last attempt in /memory doctor", async () => {
+		await search("duck");
+		await commands.get("memory").handler("doctor", ctx);
+		expect(notifications.at(-1)?.message).toContain("semantic search: the last search answered");
+		process.env.FAKE_QMD_MODE = "fail";
+		await search("duck");
+		await commands.get("memory").handler("doctor", ctx);
+		expect(notifications.at(-1)?.message).toContain("fell back to keywords — failed: boom");
+	});
+
+	it("keeps injection on keywords: a prompt never starts qmd", async () => {
+		hits("knowledge/pair-programming.md");
+		await injectedContent(userEvent("tell me about the duck"));
+		expect(qmdCalls().filter((a) => a.includes("vsearch"))).toEqual([]);
+	});
+});
+
+describe("the semantic index keeps itself fresh", () => {
+	const FAKE = path.join(path.dirname(new URL(import.meta.url).pathname), "fixtures", "fake-qmd.mjs");
+	const KEYS = ["PI_MEMORY_QMD", "FAKE_QMD_LOG", "FAKE_QMD_MODE", "FAKE_QMD_HITS", "FAKE_QMD_EMBED", "FAKE_QMD_DELAY_MS", "FAKE_QMD_TOTAL", "FAKE_QMD_PENDING"];
+	const saved: Record<string, string | undefined> = {};
+	const DAILY = "core/dailyContext.md";
+	let dir: string;
+	let log: string;
+	let previousConfig: string;
+	let previousDaily: string;
+
+	const verbs = (): string[] => !fs.existsSync(log) ? [] : fs.readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => {
+		const args: string[] = JSON.parse(l).args;
+		const rest = args[0] === "--index" ? args.slice(2) : args;
+		return rest[0] === "collection" ? "collection add" : rest[0];
+	});
+	const embeds = () => verbs().filter((v) => v === "embed").length;
+	async function until(check: () => boolean, ms = 5000): Promise<void> {
+		const end = Date.now() + ms;
+		while (!check()) {
+			if (Date.now() > end) throw new Error(`timed out; qmd was called with: ${verbs().join(", ") || "(nothing)"}`);
+			await new Promise((r) => setTimeout(r, 25));
+		}
+	}
+	const memory = (args: string) => commands.get("memory").handler(args, ctx);
+	const lockFile = () => path.join(BANK, ".write-locks", "semantic-refresh.lock");
+
+	beforeEach(async () => {
+		for (const k of KEYS) saved[k] = process.env[k];
+		dir = fs.mkdtempSync(path.join(os.tmpdir(), "memory-sem-refresh-"));
+		log = path.join(dir, "calls.log");
+		fs.writeFileSync(path.join(dir, "qmd"), `#!/bin/sh\nexec "${process.execPath}" "${FAKE}" "$@"\n`, { mode: 0o755 });
+		process.env.PI_MEMORY_QMD = path.join(dir, "qmd");
+		process.env.FAKE_QMD_LOG = log;
+		previousConfig = fs.existsSync(path.join(BANK, "config.json")) ? read("config.json") : "{}";
+		previousDaily = read(DAILY);
+		// A short wait after a write keeps these tests fast; the default (30 s) is what a person gets.
+		write("config.json", JSON.stringify({ search: { refreshDelayMs: 60 } }));
+		await freshSession();
+	});
+	afterEach(async () => {
+		await emit("session_shutdown", { type: "session_shutdown" });
+		for (const k of KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+		write("config.json", previousConfig);
+		write(DAILY, previousDaily);
+		fs.rmSync(dir, { recursive: true, force: true });
+		fs.rmSync(path.join(BANK, ".write-locks", "semantic-refresh.lock"), { force: true });
+		await freshSession();
+	});
+
+	it("builds the index after a session starts: collection, update, embed", async () => {
+		await until(() => embeds() === 1);
+		expect(verbs()).toEqual(["--version", "collection add", "update", "embed"]);
+		// The pass is still finishing when embed is first seen; the lock goes when it does.
+		await until(() => !fs.existsSync(lockFile()));
+	});
+
+	it("does nothing at all when semantic search is off", async () => {
+		write("config.json", JSON.stringify({ search: { semantic: "off", refreshDelayMs: 60 } }));
+		await freshSession();
+		await memory("config search.semantic off");
+		await new Promise((r) => setTimeout(r, 400));
+		expect(verbs()).toEqual([]);
+	});
+
+	it("refreshes once after a burst of writes, not once per write", async () => {
+		await until(() => embeds() === 1);
+		for (let i = 0; i < 3; i++) await tools.get("memory_append").execute(`burst-${i}`, { file: DAILY, section: "Completed", text: `- burst ${i}` });
+		await until(() => embeds() === 2);
+		await new Promise((r) => setTimeout(r, 400));
+		expect(embeds()).toBe(2);
+	});
+
+	it("refreshes after memory_update too, and after a harness write into the bank", async () => {
+		await until(() => embeds() === 1);
+		await tools.get("memory_update").execute("upd", { file: "knowledge/refresh probe.md", content: "# Refresh probe\n\nx\n", allowUnread: true });
+		await until(() => embeds() === 2);
+		write("knowledge/refresh probe 2.md", "# Probe two\n\nx\n");
+		await emit("tool_result", { toolName: "write", isError: false, input: { path: path.join(BANK, "knowledge/refresh probe 2.md") } });
+		await until(() => embeds() === 3);
+		for (const f of ["knowledge/refresh probe.md", "knowledge/refresh probe 2.md"]) fs.rmSync(path.join(BANK, f), { force: true });
+	});
+
+	it("builds the index when a search finds none, if nothing has tried yet this session", async () => {
+		write("config.json", JSON.stringify({ search: { semantic: "off", refreshDelayMs: 60 } }));
+		await freshSession();
+		expect(verbs()).toEqual([]);
+		await memory("config search.semantic auto");
+		process.env.FAKE_QMD_MODE = "notready";
+		write("knowledge/probe note.md", "# Probe note\n\nsearchable words\n");
+		await tools.get("memory_search").execute("nr", { query: "searchable" });
+		await until(() => embeds() === 1);
+		fs.rmSync(path.join(BANK, "knowledge/probe note.md"), { force: true });
+	});
+
+	it("/memory refresh starts a semantic refresh and says so", async () => {
+		await until(() => embeds() === 1);
+		await memory("refresh");
+		expect(notifications.at(-1)?.message).toContain("(semantic index refresh started)");
+		await until(() => embeds() === 2);
+	});
+
+	it("a session that ends cancels a running refresh, frees the lock, and the next session starts its own", async () => {
+		process.env.FAKE_QMD_EMBED = "slow"; process.env.FAKE_QMD_DELAY_MS = "4000";
+		await freshSession();
+		await until(() => verbs().includes("update") && fs.existsSync(lockFile()));
+		const started = Date.now();
+		await emit("session_shutdown", { type: "session_shutdown" });
+		await until(() => !fs.existsSync(lockFile()), 2500);
+		expect(Date.now() - started).toBeLessThan(3000);
+		process.env.FAKE_QMD_EMBED = "ok";
+		const before = embeds();
+		await freshSession();
+		await until(() => embeds() > before);
+	});
+
+	it("shows the qmd version, the index counts and the last refresh in /memory doctor", async () => {
+		process.env.FAKE_QMD_TOTAL = "12"; process.env.FAKE_QMD_PENDING = "0";
+		await until(() => embeds() === 1);
+		await memory("doctor");
+		const text = notifications.at(-1)!.message;
+		expect(text).toMatch(/ok\s+qmd 2\.5\.1 at .*qmd, index pi-memory-[0-9a-f]{8}/);
+		expect(text).toContain("qmd index: 12 files, all embedded");
+		expect(text).toContain("index refreshed");
+	});
+
+	it("warns in /memory doctor when files have no vectors yet", async () => {
+		process.env.FAKE_QMD_TOTAL = "12"; process.env.FAKE_QMD_PENDING = "5";
+		await memory("doctor");
+		expect(notifications.at(-1)!.message).toContain("warn  qmd index: 12 files, 5 without vectors");
+	});
+
+	it("says in /memory doctor that semantic search is idle when qmd is not installed", async () => {
+		process.env.PI_MEMORY_QMD = path.join(dir, "no-such-qmd");
+		await memory("doctor");
+		expect(notifications.at(-1)!.message).toContain("semantic search is idle");
+	});
+
+	it("shows semantic search in /memory status", async () => {
+		await memory("status");
+		expect(notifications.at(-1)!.message).toMatch(/semantic search:\s+auto \(qmd\)/);
+		await memory("config search.semantic off");
+		await memory("status");
+		expect(notifications.at(-1)!.message).toMatch(/semantic search:\s+off \(keywords only\)/);
 	});
 });

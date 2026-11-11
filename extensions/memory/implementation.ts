@@ -51,6 +51,9 @@ import { archiveReason, auditCarryForward } from "./maintenance.js";
 import { describeScope, detectScope, scopeFolders, scopeLabel, scopeReason } from "./scope.js";
 import { RevisionStore, internalPath } from "./revisions.js";
 import { changeSetting, parseSettings, settingsLines, SETTING_SPECS, type RuntimeSettings } from "./settings.js";
+import { NO_REJECTIONS, checkDailyWrite, type GateState } from "./writeGates.js";
+import { fuse, type Via } from "./fusion.js";
+import { Refresher, indexNameFor, indexStatus, probe, qmdBinary, semanticSearch } from "./semantic.js";
 
 import { MemoryIndex, MAX_WITHHELD_SHARE, admitsToContext, contentTerms, extractTitle, topEligibleScore, withheldShare, walkMarkdownFiles, scanMarkdownFiles, INDEX_MAX_DEPTH, type SearchResult } from "./search.js";
 /** Below this, truncating a file costs more in notice than it saves in text. */
@@ -168,6 +171,36 @@ const topic = new TopicContext();
 let config: InjectionConfig = loadConfig();
 let debugMode = loadDebug();
 let logCfg = loadLogConfig();
+
+// ── Write gates (core/dailyContext.md) ───────────────────────────────
+
+const DAILY_CONTEXT_REL = "core/dailyContext.md";
+/** Consecutive refusals per gate, held for the session. Reset when a session starts. */
+let gateState: GateState = NO_REJECTIONS;
+/** Refusals this session, for `/memory doctor`. */
+let gateRefusals = 0;
+
+/**
+ * Ask the write gates about one write. Returns what the tool should do: a refusal
+ * result, or an optional warning to append to its answer. Files other than
+ * dailyContext are never gated. Called under the write lock and before the recovery
+ * snapshot, so a refused write leaves no revision and no half state.
+ */
+function gateWrite(file: string, before: string, after: string): { refuse?: AgentToolResult<unknown>; warning?: string } {
+	if (bankRel(file) !== DAILY_CONTEXT_REL) return {};
+	const { decision, state } = checkDailyWrite(before, after, settings.gates, gateState);
+	gateState = state;
+	if (decision.action === "reject") {
+		gateRefusals++;
+		logEvent(logCfg, { t: "gate", f: file, action: "reject", sid: sessionId() });
+		return { refuse: toolResult(decision.message, { file, refused: "gate" }, true) };
+	}
+	if (decision.warning) {
+		logEvent(logCfg, { t: "gate", f: file, action: "accept-with-warning", sid: sessionId() });
+		return { warning: decision.warning };
+	}
+	return {};
+}
 const injectedTypes: Record<keyof InjectionConfig, boolean> = {
 	activeProjects: false,
 	dailyContext: false,
@@ -355,6 +388,39 @@ function doctorReport(): { header: string; lines: string[]; warnings: number } {
 			note(`and ${overlaps.length - MAX_OVERLAP_WARNINGS} more possible topic overlaps`);
 		}
 		if (overlaps.length === 0 && knowledge.length > 1) ok("no two knowledge files look like the same topic");
+	}
+
+	// 4c. Write gates: what they hold dailyContext to, and whether it already breaks them.
+	const gates = settings.gates;
+	if (!gates.enabled) {
+		note("write gates: off (gates.enabled false)");
+	} else {
+		const limit = (n: number, unit: string) => (n > 0 ? `${n.toLocaleString()} ${unit}` : `no ${unit} limit`);
+		ok(
+			`write gates on dailyContext: ${limit(gates.completedWords, "words per Completed bullet")}, ` +
+			`${limit(gates.keyDecisionsWords, "words per Key Decisions bullet")}, ${limit(gates.dailyContextMaxChars, "characters")}; ` +
+			`${gateRefusals} refused this session`,
+		);
+		if (gates.dailyContextMaxChars > 0 && (daily ?? "").length > gates.dailyContextMaxChars) {
+			warn(
+				`core/dailyContext.md is ${(daily ?? "").length.toLocaleString()} characters, over the ${gates.dailyContextMaxChars.toLocaleString()}-character gate — ` +
+				"a write that grows it is refused until it is trimmed or archived",
+			);
+		}
+	}
+
+	// 4d. Semantic search: what the last attempt did. The version and index counts need qmd itself,
+	// so they are added by the doctor command, which can wait for it.
+	if (settings.search.semantic === "off") {
+		note("semantic search: off (search.semantic) — memory_search uses keywords alone");
+	} else if (!lastSemantic) {
+		note("semantic search: auto, not tried yet this session");
+	} else if (lastSemantic.ok) {
+		ok(`semantic search: the last search answered (${lastSemantic.hits ?? 0} hits)`);
+	} else {
+		const line = `semantic search: the last search fell back to keywords — ${lastSemantic.reason}: ${lastSemantic.detail}`;
+		if (lastSemantic.reason === "missing" || lastSemantic.reason === "not-ready") note(line);
+		else warn(line);
 	}
 
 	// 5. history/ archives
@@ -548,6 +614,110 @@ function listBank(dir: string, root: string): { entries: string[]; hidden: numbe
 
 // ── Extension ────────────────────────────────────────────────────
 
+/** One line about the last index refresh, for status and doctor. */
+function refreshSummary(): string {
+	const r = refresher.status();
+	if (r.running) return "refresh running";
+	if (r.lastOk) return `index refreshed ${new Date(r.lastFinishedAt ?? 0).toLocaleTimeString()}`;
+	if (r.lastError) return `index refresh failed: ${r.lastError}`;
+	return "index not refreshed yet this session";
+}
+
+function semanticSummary(): string {
+	if (settings.search.semantic === "off") return "off (keywords only)";
+	const last = !lastSemantic ? "not tried yet" : lastSemantic.ok ? "last search used it" : `last search fell back: ${lastSemantic.reason}`;
+	return `auto (qmd) — ${last}; ${refreshSummary()}`;
+}
+
+/** The doctor lines that need qmd itself, so they wait for it. Empty when semantic search is off. */
+async function semanticDoctorLines(): Promise<string[]> {
+	if (settings.search.semantic !== "auto") return [];
+	const found = await probe(3000);
+	if (!found.available) return [`  note  qmd: ${found.reason} — semantic search is idle and memory_search answers from keywords`];
+	const lines = [`  ok    qmd ${found.version ?? "(version unknown)"} at ${qmdBinary()}, index ${indexNameFor(MEMORY_ROOT)}`];
+	const status = await indexStatus(MEMORY_ROOT);
+	if (!status) {
+		lines.push("  note  qmd has no index for this bank yet — one is built in the background after the next session start or write");
+	} else if (status.pending > 0) {
+		lines.push(`  warn  qmd index: ${status.total} files, ${status.pending} without vectors — semantic search misses them until a refresh embeds them (/memory refresh)`);
+	} else {
+		lines.push(`  ok    qmd index: ${status.total} files, all embedded`);
+	}
+	if (status && status.total !== memoryIndex.documentCount) {
+		lines.push(`  note  qmd holds ${status.total} files, the keyword index ${memoryIndex.documentCount} — the next refresh reconciles them`);
+	}
+	const r = refresher.status();
+	lines.push(`  ${r.lastOk === false ? "warn" : "note"}  ${refreshSummary()}`);
+	return lines;
+}
+
+// ── memory_search: keywords, plus meaning when qmd answers ─────────────
+
+/** What the last semantic attempt did, for `/memory doctor`. Kept even when it failed: that is the point. */
+let lastSemantic: { at: number; ok: boolean; reason?: string; detail?: string; hits?: number } | null = null;
+
+/**
+ * Keeps this bank's qmd index current. One per process; a session that ends cancels what is running and
+ * starts clean (`/new` reuses the process, so a disposed refresher must be replaced, not kept).
+ */
+function newRefresher(): Refresher {
+	return new Refresher(MEMORY_ROOT, { debounceMs: () => settings.search.refreshDelayMs, enabled: () => settings.search.semantic === "auto" });
+}
+let refresher = newRefresher();
+
+/** The bank changed on disk: refresh the semantic index once things settle. A no-op when semantic search is off. */
+function noteBankChanged(): void {
+	if (settings.search.semantic === "auto") refresher.schedule();
+}
+
+/** Re-index one changed file for keyword search, and schedule the semantic refresh. */
+function indexChanged(rel: string): void {
+	memoryIndex.updateDocument(rel);
+	noteBankChanged();
+}
+
+interface SearchOutcome {
+	results: Array<SearchResult & { scope: string; via?: Via; semanticScore?: number }>;
+	/** Whether semantic search contributed, and if it was tried and did not, why. */
+	semantic: { tried: boolean; used: boolean; reason?: string; detail?: string };
+}
+
+/**
+ * One search for the tool. With `search.semantic` off, or when qmd is missing, slow, not set up or
+ * answers badly, this is exactly the keyword search it always was (same results, same text).
+ * With semantic hits, the two ranked lists are fused and every result says which found it.
+ */
+async function searchBank(query: string, limit: number): Promise<SearchOutcome> {
+	const keywordOnly = (semantic: SearchOutcome["semantic"]): SearchOutcome => ({
+		results: memoryIndex.search(query, limit).map((r) => ({ ...r, scope: scopeLabel(r.path) })),
+		semantic,
+	});
+	// A query with no content word searches nothing; a vector search would answer it with noise.
+	if (settings.search.semantic !== "auto" || contentTerms(query).length === 0) return keywordOnly({ tried: false, used: false });
+
+	const wide = Math.max(limit * 2, 10);
+	const outcome = await semanticSearch(MEMORY_ROOT, query, wide, settings.search.semanticTimeoutMs, memoryIndex.knownPaths());
+	if (!outcome.ok) {
+		lastSemantic = { at: Date.now(), ok: false, reason: outcome.reason, detail: outcome.detail };
+		// No index for this bank yet and nothing has tried to build one this session: build it now, in the background.
+		if (outcome.reason === "not-ready" && !refresher.status().running && refresher.status().passes === 0) refresher.kick();
+		return keywordOnly({ tried: true, used: false, reason: outcome.reason, detail: outcome.detail });
+	}
+	lastSemantic = { at: Date.now(), ok: true, hits: outcome.hits.length };
+	if (outcome.hits.length === 0) return keywordOnly({ tried: true, used: false });
+
+	const keyword = memoryIndex.search(query, wide);
+	const byPath = new Map(keyword.map((r) => [r.path, r]));
+	const semanticScore = new Map(outcome.hits.map((h) => [h.path, h.score]));
+	const results: SearchOutcome["results"] = [];
+	for (const f of fuse(keyword.map((r) => r.path), outcome.hits.map((h) => h.path), limit)) {
+		const base = byPath.get(f.path) ?? memoryIndex.describe(f.path, query);
+		if (!base) continue;
+		results.push({ ...base, scope: scopeLabel(f.path), via: f.via, semanticScore: semanticScore.get(f.path) });
+	}
+	return { results, semantic: { tried: true, used: true } };
+}
+
 export default function (pi: ExtensionAPI) {
 	scaffold();
 
@@ -558,6 +728,8 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		config = loadConfig();
 		settings = loadSettings();
+		gateState = NO_REJECTIONS;
+		gateRefusals = 0;
 		activeScope = detectScope(settings.scope, ctx.cwd ?? process.cwd());
 		topic.clear();
 		// Scaffold on every session, not only at load. A deleted or emptied core
@@ -594,6 +766,8 @@ export default function (pi: ExtensionAPI) {
 		// Rebuild the search index
 		const count = memoryIndex.build();
 		ctx.ui.notify(`Memory search index: ${count} documents`, "info");
+		// First session on a bank builds the semantic index; later sessions catch up on edits made elsewhere.
+		noteBankChanged();
 		// One header line per session: what the caps and settings were, so a later log
 		// line can be replayed against a fixture bank without guessing the config.
 		logEvent(logCfg, {
@@ -626,6 +800,12 @@ export default function (pi: ExtensionAPI) {
 	//
 	// Bash, patch tools and other processes do not provide a direct path event.
 	// Disk reconciliation before search/injection picks them up without parsing shell.
+	// A session that ends stops any index refresh it started; the next session starts its own.
+	pi.on("session_shutdown", async () => {
+		refresher.dispose();
+		refresher = newRefresher();
+	});
+
 	pi.on("tool_result", async (event, ctx) => {
 		if (event.isError) return;
 		if (event.toolName !== "write" && event.toolName !== "edit") return;
@@ -637,7 +817,7 @@ export default function (pi: ExtensionAPI) {
 		if (!isInsideBank(full)) return;
 		const rel = resolveBankPath(MEMORY_ROOT, full)!.rel;
 		if (!isMarkdownPath(rel)) return; // updateDocument skips those too; skip the log line
-		memoryIndex.updateDocument(rel);
+		indexChanged(rel);
 		// A `write` means the agent put the whole file there, so it holds a current copy
 		// and a later memory_update is not blind. An `edit` does not claim that — the rest
 		// of the file may never have been shown — so `served` is left alone and staleWrite
@@ -968,6 +1148,15 @@ export default function (pi: ExtensionAPI) {
 			"Keep dailyContext.md under 150 lines and 6,000 characters; keep activeProjects.md under 50 lines and 6,000 " +
 				"characters. Characters are what a prompt pays for: 30 items of 150 characters cost more than 150 short ones, " +
 				"and a long section is truncated in preference to a whole section being dropped.",
+			...(settings.gates.enabled
+				? [
+						"Writes to dailyContext.md are checked: a Completed bullet may have " +
+							`${settings.gates.completedWords || "any number of"} words, a Key Decisions bullet ` +
+							`${settings.gates.keyDecisionsWords || "any number of"}, and a write may not grow the file past ` +
+							`${settings.gates.dailyContextMaxChars ? `${settings.gates.dailyContextMaxChars.toLocaleString()} characters` : "any size"}. ` +
+							"A refused write says what to cut: shorten or archive and resubmit.",
+					]
+				: []),
 
 			// ── Proactive knowledge capture ──
 			"When the user establishes conventions, tone/voice rules, architectural decisions, workflow preferences, " +
@@ -1058,6 +1247,10 @@ export default function (pi: ExtensionAPI) {
 					true,
 				);
 			}
+			let current = "";
+			try { current = readCurrentFile(filePath) ?? ""; } catch { /* staleWrite above already refused a file it cannot read */ }
+			const gate = gateWrite(params.file, current, params.content);
+			if (gate.refuse) return gate.refuse;
 			fs.mkdirSync(path.dirname(filePath), { recursive: true });
 			try { await revisions.write(filePath, params.content, settings.revisions); }
 			catch (error) { return toolResult(`Refused: recovery/write failed — ${String(error)}`, { file: params.file }, true); }
@@ -1065,11 +1258,11 @@ export default function (pi: ExtensionAPI) {
 			logEvent(logCfg, { t: "write", f: params.file, bytes: params.content.length });
 
 			// Keep the search index in sync
-			memoryIndex.updateDocument(params.file);
+			indexChanged(params.file);
 
 			return toolResult(
-				`Updated ${params.file} (${params.content.length} bytes) ${AT} ${filePath}`,
-				{ file: params.file, bytes: params.content.length },
+				`Updated ${params.file} (${params.content.length} bytes) ${AT} ${filePath}${gate.warning ? `\n\n${gate.warning}` : ""}`,
+				{ file: params.file, bytes: params.content.length, ...(gate.warning ? { gateWarning: gate.warning } : {}) },
 			);
 			} finally { release(); }
 		},
@@ -1131,16 +1324,18 @@ export default function (pi: ExtensionAPI) {
 			// Appending does not show the rest of the file. Preserve a complete view only
 			// when the agent had seen this exact version before the append.
 			const complete = served.complete(bankRel(params.file), content);
+			const gate = gateWrite(params.file, content, updated);
+			if (gate.refuse) return gate.refuse;
 			try { await revisions.write(filePath, updated, settings.revisions); }
 			catch (error) { return toolResult(`Refused: recovery/write failed — ${String(error)}`, { file: params.file }, true); }
 			noteServed(params.file, updated, !complete);
 
 			// Keep the search index in sync
-			memoryIndex.updateDocument(params.file);
+			indexChanged(params.file);
 
 			return toolResult(
-				`Appended to "${params.section}" in ${params.file} ${AT} ${filePath}`,
-				{ file: params.file, section: params.section },
+				`Appended to "${params.section}" in ${params.file} ${AT} ${filePath}${gate.warning ? `\n\n${gate.warning}` : ""}`,
+				{ file: params.file, section: params.section, ...(gate.warning ? { gateWarning: gate.warning } : {}) },
 			);
 			} finally { release(); }
 		},
@@ -1153,6 +1348,8 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Search across all memory bank files — knowledge, daily history, and core files. " +
 			"Ranked with BM25, with fuzzy and prefix matching. " +
+			"When qmd is installed (see /memory doctor), files that match by meaning are added and each result says " +
+			"how it was found (via: bm25, semantic or both); without it the answer is keywords alone. " +
 			"Use to find past decisions, recall context from previous sessions, or discover relevant knowledge files. " +
 			"Archives outside the automatic injection age window remain searchable here.",
 		promptSnippet: "Search across all memory bank files (knowledge, history, core) with fuzzy full-text search",
@@ -1166,7 +1363,7 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_toolCallId, params) {
 			const limit = params.limit ?? 5;
-			const results = memoryIndex.search(params.query, limit).map((r) => ({ ...r, scope: scopeLabel(r.path) }));
+			const { results, semantic } = await searchBank(params.query, limit);
 
 			// Asked questions are the other half of the record: they show the vocabulary a
 			// real person used, which is what an alias list is supposed to contain.
@@ -1175,6 +1372,7 @@ export default function (pi: ExtensionAPI) {
 				q: logCfg.prompts ? clip(params.query, LOG_PROMPT_CHARS) : "[redacted]",
 				n: results.length,
 				top: results.slice(0, 3).map((r) => ({ f: r.path, s: Math.round(r.score) })),
+				sem: semantic.used ? "used" : semantic.tried ? (semantic.reason ?? "no hits") : "off",
 			});
 
 			if (results.length === 0) {
@@ -1184,20 +1382,20 @@ export default function (pi: ExtensionAPI) {
 				const why = contentTerms(params.query).length === 0
 					? `Nothing searched, because every word in "${params.query}" is a common word (the, how, what, about) that search ignores. Ask again with a content word, for example "postgres" or "release".`
 					: `No results found for "${params.query}"`;
-				return toolResult(why, { query: params.query, results: [] });
+				return toolResult(why, { query: params.query, results: [], semantic });
 			}
 
 			const formatted = results
 				.map((r, i) => [
 					`${i + 1}. **${r.title}** (${r.category}${activeScope.mode !== "off" ? `; ${r.scope}` : ""})`,
-					`   Path: ${r.path} | Score: ${Math.round(r.score)}${archiveReason(r.path, settings.maintenance.historyMaxDays) ? ` | ${archiveReason(r.path, settings.maintenance.historyMaxDays)}` : ""}`,
+					`   Path: ${r.path} | Score: ${r.via === "semantic" ? `${(r.semanticScore ?? 0).toFixed(2)} (meaning)` : Math.round(r.score)}${archiveReason(r.path, settings.maintenance.historyMaxDays) ? ` | ${archiveReason(r.path, settings.maintenance.historyMaxDays)}` : ""}${r.via ? ` | via: ${r.via}` : ""}`,
 					`   ${r.snippet}`,
 				].join("\n"))
 				.join("\n\n");
 
 			return toolResult(
 				`Found ${results.length} results for "${params.query}":\n\n${formatted}`,
-				{ query: params.query, results },
+				{ query: params.query, results, semantic },
 			);
 		},
 	});
@@ -1271,14 +1469,18 @@ export default function (pi: ExtensionAPI) {
 			// the document count and therefore cannot be detected by doctor.
 			if (trimmed === "refresh") {
 				const count = memoryIndex.build();
-				ctx.ui.notify(`Memory search index refreshed: ${count} documents`, "info");
+				const semantic = settings.search.semantic === "auto";
+				if (semantic) refresher.kick();
+				ctx.ui.notify(`Memory search index refreshed: ${count} documents${semantic ? " (semantic index refresh started)" : ""}`, "info");
 				return;
 			}
 
 			// Sub-command: doctor
 			if (trimmed === "doctor") {
 				const report = doctorReport();
-				ctx.ui.notify([report.header, ...report.lines].join("\n"), report.warnings > 0 ? "warning" : "info");
+				const semantic = await semanticDoctorLines();
+				const warnings = report.warnings + semantic.filter((l) => l.startsWith("  warn")).length;
+				ctx.ui.notify([report.header, ...report.lines, ...semantic].join("\n"), warnings > 0 ? "warning" : "info");
 				return;
 			}
 
@@ -1435,7 +1637,7 @@ export default function (pi: ExtensionAPI) {
 				try {
 					const result = await revisions.restore(target.rel, id, settings.revisions);
 					if (result.restored) {
-						served.forget(target.rel); shownText.delete(target.rel); memoryIndex.updateDocument(target.rel);
+						served.forget(target.rel); shownText.delete(target.rel); indexChanged(target.rel);
 						for (const key of CONFIG_KEYS) injectedTypes[key] = false;
 						logEvent(logCfg, { t: "restore", f: target.rel, id, backup: result.backupId });
 					}
@@ -1538,6 +1740,7 @@ export default function (pi: ExtensionAPI) {
 			} catch {}
 			lines.push(`daily archives:    ${archiveCount} files`);
 			lines.push(`search index:      ${memoryIndex.documentCount} documents (MiniSearch BM25)`);
+			lines.push(`semantic search:   ${semanticSummary()}`);
 			lines.push("", memoryHelp);
 
 			ctx.ui.notify(lines.join("\n"), "info");

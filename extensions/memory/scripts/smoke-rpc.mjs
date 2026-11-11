@@ -40,7 +40,7 @@ try {
 	child = spawn(
 		PI_BIN,
 		["--mode", "rpc", "--no-session", "--no-extensions", "--offline", "--extension", extensionPath],
-		{ cwd: projectDir, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PI_MEMORY_DIR: memoryDir } },
+		{ cwd: projectDir, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, PI_MEMORY_DIR: memoryDir, PI_MEMORY_QMD: "/nonexistent/qmd-off-in-smoke" } },
 	);
 } catch (error) {
 	fs.rmSync(memoryDir, { recursive: true, force: true });

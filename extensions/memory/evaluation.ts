@@ -65,3 +65,25 @@ export function splitLoggedSessions(events: Array<Record<string, any>>, gapMs = 
 	}
 	return { sessions, unattributed, invalid };
 }
+
+/** A prompt and the file(s) that answer it, for judging `memory_search`. Labels belong to whoever wrote the file. */
+export interface RankedCase { id: string; prompt: string; expect: string[] }
+/** 1-based rank of the first expected file in a result list, or null when none appears. */
+export function firstRank(paths: string[], expect: string[]): number | null {
+	const at = paths.findIndex((p) => expect.includes(p));
+	return at < 0 ? null : at + 1;
+}
+/** How many cases found their file in the first `k` results, for keywords alone and for keywords plus meaning. */
+export function summarizeRanks(rows: Array<{ id: string; keyword: number | null; fused: number | null }>, k = 3) {
+	const within = (rank: number | null) => rank !== null && rank <= k;
+	return {
+		cases: rows.length,
+		k,
+		keywordTopK: rows.filter((r) => within(r.keyword)).length,
+		fusedTopK: rows.filter((r) => within(r.fused)).length,
+		/** Cases keywords alone missed in the top k that meaning found: what the semantic half is for. */
+		gained: rows.filter((r) => !within(r.keyword) && within(r.fused)).map((r) => r.id),
+		/** Cases keywords alone had in the top k that the fusion lost. Should stay empty. */
+		lost: rows.filter((r) => within(r.keyword) && !within(r.fused)).map((r) => r.id),
+	};
+}

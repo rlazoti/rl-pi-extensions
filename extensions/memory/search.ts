@@ -332,6 +332,30 @@ export class MemoryIndex {
 		if (safe && isMarkdownPath(safe.rel)) this.reconcile();
 	}
 
+	/** The relative paths the index holds right now, after reconciling disk. */
+	knownPaths(): string[] {
+		this.reconcile();
+		return [...this.versions.keys()];
+	}
+
+	/**
+	 * Describe one indexed file for a query, for a result the keyword search did not produce
+	 * (a file found by meaning). Score 0: it has no keyword score, and callers say so.
+	 */
+	describe(relPath: string, query: string): SearchResult | null {
+		const safe = resolveBankPath(this.root, relPath);
+		if (!safe || !isMarkdownPath(safe.rel)) return null;
+		let content: string;
+		try { content = fs.readFileSync(safe.full, "utf-8"); } catch { return null; }
+		return {
+			path: safe.rel,
+			title: extractTitle(content, path.basename(safe.rel)),
+			score: 0,
+			snippet: extractSnippet(content, query),
+			category: categorize(safe.rel),
+		};
+	}
+
 	/** Search the memory bank. Returns ranked results with snippets. */
 	search(query: string, limit = 5): SearchResult[] {
 		this.reconcile();

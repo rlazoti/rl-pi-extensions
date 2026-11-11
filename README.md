@@ -12,7 +12,7 @@ Personal Pi coding agent extensions, managed as a single package with a TUI for 
 | **session-attention** | Desktop notifications when Pi needs your attention |
 | **snippets** | Insert predefined text snippets into the prompt |
 | **emacs-feedback** | Source-region and Magit diff-line feedback from Emacs |
-| **memory** | Persistent Markdown memory bank, searchable knowledge and history, selective context injection, managed-write safety and optional recovery snapshots. See `extensions/memory/README.md`. |
+| **memory** | Persistent Markdown memory bank, searchable knowledge and history, selective context injection, write gates on the daily file, managed-write safety, optional recovery snapshots and optional semantic search through qmd. See `extensions/memory/README.md`. |
 | **co-authored-by-ai** | Adds a `Co-authored-by: AI (Pi/<model>)` trailer to the commits Pi creates, by patching `git commit` before it runs |
 | **scan-guard** | Refuses a `bash` command that walks `/` or all of `$HOME` with no depth bound — 29 of 13,084 recorded calls, 9.4% of all bash wall time — and answers with the scoped search. Notify-only by default; `PI_SCAN_GUARD=block` to refuse. `bash -c "find /"` and friends are documented escapes, not bugs |
 | **settle-guard** | Asks again when a model turn ends with reasoning and no answer, which is what makes a session stop mid-run and wait for a keystroke. The retry goes out with reasoning off — 8 of 9 replays with it, 0 of 3 without. Two per streak, then it stops and says so |

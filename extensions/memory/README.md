@@ -1,5 +1,5 @@
 ---
-summary: Persistent memory bank with full-text search — active projects, daily context, and auto-discovered knowledge.
+summary: Persistent memory bank with full-text search (and optional semantic search) — active projects, daily context, and auto-discovered knowledge.
 commands: [/memory]
 tools: [memory_read, memory_update, memory_append, memory_search, memory_list]
 category: productivity
@@ -33,7 +33,7 @@ Gives pi a personal memory bank that persists across sessions.
 **Command:**
 - `/memory` or `/memory status` — bank status and the command list
 - `/memory help` — show all subcommands and their options
-- `/memory refresh` — rebuild the search index after external or cross-session edits, without restarting
+- `/memory refresh` — rebuild the search index after external or cross-session edits, without restarting (and start a semantic index refresh when qmd is in use)
 - `/memory scope` — show the detected project scope and which knowledge folders are eligible here
 - `/memory revisions [file]` — list bounded local recovery snapshots taken by managed writes
 - `/memory restore <file> <id>` — restore one snapshot, backing up the current text first
@@ -48,7 +48,7 @@ Gives pi a personal memory bank that persists across sessions.
 ~/.pi/memory3/
 ├── core/
 │   ├── activeProjects.md    # Active work and priorities (max 50 lines)
-│   └── dailyContext.md      # Today's work, decisions, carry-forward (max 150 lines, 6,000 characters)
+│   └── dailyContext.md      # Today's work, decisions, carry-forward (max 6,000 characters; 150 lines as a guide)
 ├── knowledge/
 │   └── *.md                 # Reference docs — auto-discovered via search
 └── history/
@@ -116,6 +116,43 @@ Confident and direct. No hedging words like "maybe" or "perhaps".
 Three to eight aliases, phrased as the words a future prompt would use rather than as a restatement of the title. They show up in `memory_search` results, which is deliberate — a stale alias is visible.
 
 An alias list is not a list of phrases. The index splits on punctuation, so `(change my mind)` is really an alias for `change` and an alias for `mind` — and a prompt about rebuilding a Docker layer says "change" too. That collision is measured: in `injection-eval.test.ts` the reversal-decision file is the top hit for a Docker question, at 64, on the word `change`. Prefer words a prompt about something else would not need.
+
+### Optional semantic search (qmd)
+
+Keywords find a file only when the prompt uses words the file contains. `memory_search` can also ask [qmd](https://github.com/tobi/qmd) which files *mean* what the query means. This is on by default (`search.semantic auto`) and does nothing when qmd is not installed.
+
+| | |
+| --- | --- |
+| Where it applies | `memory_search` only. **Automatic injection never starts qmd**: vector search has no relevance floor, and an injected file costs tokens on every turn. |
+| Which qmd mode | `qmd vsearch` (vectors only). Latency is the catch: 0.8-1.3 s once warm, but the first calls after a pause were erratic when measured (3, 4, 13 and 15 s in one run, on a machine at load average 4), so many real searches land in the slow stretch. The default timeout is 8 s; searches slower than that answer from keywords, and `/memory config search.semanticTimeoutMs 20000` waits out the worst case seen. Not `qmd query`: its reranking found 12 of 15 test targets against vsearch's 13, and takes 10-16 s a call. |
+| Result | The keyword list and the vector list are fused by rank (reciprocal rank fusion, k = 60). A file **both** lists found outranks a file only one found, so a loosely related vector hit cannot push a keyword match out. Each result says `via: bm25`, `semantic` or `both`; a semantic-only result shows its cosine score as `0.43 (meaning)`. |
+| When it fails | Missing binary, no answer within `search.semanticTimeoutMs` (default 8000), index not built yet, non-zero exit or output of the wrong shape: the answer is the keyword answer, byte for byte what it is with `search.semantic off`. Never an error for the agent. `/memory doctor` shows the last attempt and why it fell back. |
+| Its own index | `pi-memory-<hash of the bank path>`, one collection called `bank`. Another bank, a test bank or a moved bank never shares vectors with this one. The default qmd index is not touched. |
+| Which files | Only files the keyword index also knows, so semantic results obey the same rules: no internal files, nothing below the index depth, nothing deleted since the last embed. qmd rewrites file names (`with space.md` becomes `with-space.md`); they are mapped back to the real files, and a name two files would share is dropped rather than guessed. |
+
+Settings: `search.semantic auto|off`, `search.semanticTimeoutMs 200..30000`, `search.refreshDelayMs 0..600000` (default 30000).
+
+**The index keeps itself fresh.** This is the part a shared qmd index lacks: on the machine this was written on, the default index had last been embedded six weeks earlier, with 38% of the knowledge files missing vectors, because nothing ever ran `qmd embed` again.
+
+- A session start, and every write through `memory_update`, `memory_append`, the harness `write`/`edit` tools on a bank file, or `/memory restore`, schedules one refresh after `search.refreshDelayMs` of quiet. A burst of writes is one pass.
+- A pass is `collection add` (a no-op once the collection exists), `qmd update`, then `qmd embed`, which only embeds what changed. The first pass on a bank builds the whole index: about a minute for 400 files, in the background, while searches answer from keywords.
+- A search that finds no index for this bank starts a pass at once if nothing has tried yet this session. `/memory refresh` also starts one.
+- One pass at a time in a process (a write during a pass schedules one follow-up). One at a time across Pi sessions sharing the bank: a lock file (`.write-locks/semantic-refresh.lock`) names its owner and is taken over when that process is gone or the file is older than 30 minutes. A machine without qmd leaves no lock file.
+- A session that ends cancels a pass in progress and frees the lock. A pass scheduled and then switched off with `search.semantic off` does not run.
+- A failure is recorded, never thrown. `/memory doctor` shows the qmd version, the index name, how many files the index holds, how many have no vectors (a warning: they are invisible to semantic search until embedded), and the last refresh or why it failed. `/memory` shows one line.
+
+Not covered: a file renamed to something qmd would give the same name as another file (`a b.md` and `a-b.md`) is dropped from semantic results rather than guessed. Changing `PI_MEMORY_DIR` builds a second index; the old one stays in `~/.cache/qmd/` until deleted (`qmd --index <name> cleanup`, or remove the file).
+
+**Measured, 2026-11-10, a copy of a live bank (402 files), 15 prompts (9 that avoid the target file's own words), with a fresh index.** The prompts and the labels were written by the agent that ran them, so this is a direction, not a benchmark. `npm run eval:semantic` reruns it on your own bank and your own labels.
+
+| | correct file first | in the top 3 | in the top 5 (the default `limit`) |
+| --- | --- | --- | --- |
+| keywords (MiniSearch) | 6 | 8 | 9 |
+| meaning alone (`qmd vsearch`) | 11 | 12 | 12 |
+| both, fused equally (what ships) | 7 | 12 | **14** |
+| both, meaning weighted 2x | 9 | 12 | 12 |
+
+Fusion trades first-place precision for coverage: meaning alone puts the right file first more often, but fused search finds it somewhere in the five results the agent reads in 14 of 15 cases, where either list alone misses 3 or 6. Weighting meaning 2x was tried and rejected: it pushed a keyword hit that ranked 2nd down to 12th, because ten semantic results outrank it. In an earlier run on a stale index (six weeks old, 38% of knowledge files without vectors) meaning alone found 7 in the top 3: an index nobody refreshes is worth about what keywords are. The real qmd is checked end to end by `npm run smoke:semantic`.
 
 ### Legacy `index.csv` (not read)
 
@@ -233,7 +270,7 @@ One more reason the tools win now, which no guideline can say: their results nam
 
 ### Word budgets
 
-dailyContext entries must be concise to keep the file scannable and under 150 lines and 6,000 characters — characters, because that is what a prompt pays for:
+dailyContext entries must be concise to keep the file scannable and under 6,000 characters (150 lines as a guide) — characters, because that is what a prompt pays for. The tools enforce the two numbers that can be checked mechanically; see [Write gates](#write-gates-on-coredailycontextmd):
 - **Completed items**: 15-25 words (action taken, not full analysis)
 - **Key Decisions**: 10-20 words (outcome + rationale)
 - **activeProjects**: one line per project, no sub-bullets
@@ -322,6 +359,29 @@ The asymmetry is deliberate: **injection** filters by scope, **`memory_search`**
 
 This is not a privacy wall and not a shadowing rule: a narrower note is not a more correct note, so nothing is hidden from search or given authority. For a real wall, use separate `PI_MEMORY_DIR` banks. Measured in the design that preceded it (`docs/project-scope-design.md`), scoping removes other projects' files and nothing else — generic-word noise inside the eligible set is the separate problem the relevance policy addresses.
 
+#### Write gates on `core/dailyContext.md`
+
+`memory_append` and `memory_update` refuse a write to `core/dailyContext.md` that breaks one of two limits. Every other file is never gated.
+
+| Gate | Default | Setting | What it checks |
+| --- | --- | --- | --- |
+| Word gate | 30 words per `Completed` entry, 25 per `Key Decisions` entry | `gates.completedWords`, `gates.keyDecisionsWords` (`0` = off) | Only entries the write **adds or changes**, so an old long entry never blocks an unrelated edit. Every non-empty line in those sections counts, with or without a `-`. |
+| Character gate | 6,000 characters | `gates.dailyContextMaxChars` (`0` = off) | Only when the write **grows** the file. The default is the budget the guidelines already state, below the 8,000-character injection cap, so a write is refused before injection would ever cut the file. |
+
+`gates.enabled false` turns both off. Settings are changed with `/memory config gates.<key> <value>`.
+
+Three rules keep a gate from becoming a wall:
+
+- **Shrinking always passes.** A write that leaves the file no longer than it found it is accepted even while the file is over the cap, so an oversized file is trimmed in steps.
+- **Two refusals, then through.** Each gate refuses at most twice in a row. The next write is accepted and its answer carries a warning. A write that breaks both gates is accepted only once both allowances are spent. The counters live in the session and reset when a session starts or a clean write lands.
+- **A refusal leaves nothing behind.** The check runs under the write lock and before the recovery snapshot: no revision, no changed bytes, no index update.
+
+The refusal names the numbers and what to do (`[Completed: 36 words > 30]`, `6,412 characters, 412 over the 6,000-character cap`). `/memory doctor` shows the limits, the refusals this session, and warns when the file is already over the character gate. With `/memory log on`, each refusal is a `gate` event.
+
+**What the gates cannot see:** a write made through `bash` (`cat >> …`), the harness `write`/`edit` tools, or another program. Those reach the file around the lock and around the gate; the character cap at injection (8,000) and `/memory doctor` remain the backstop.
+
+**Why characters and not lines.** A 150-line cap was measured elsewhere on a bank where files sat at 149-150 lines and were 20 KB: lines did not bound the cost. The number of lines stays in the guidelines as a reading aid, not a limit.
+
 #### Optional local recovery history
 
 ```text
@@ -393,6 +453,8 @@ npm run measure     # characters sent per prompt, and how many the session alrea
 npm run replay      # actual injection decisions on logged prompts against today's bank
 npm run eval        # frozen, provisional labels through the real injection handler
 npm run audit       # read-only: what the last weeks of real sessions say (no fixture replaces this)
+npm run smoke:semantic  # the REAL qmd on a throwaway bank and index: file-name mapping, embedding, a question that shares no word with its answer
+npm run eval:semantic -- --bank <dir> --cases <file>   # does meaning find what keywords miss, on a copy of your bank with your own labels
 ```
 
 `npm run verify` is the gate: typecheck, unit tests, the real-runtime smoke and the race probes in

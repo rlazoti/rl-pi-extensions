@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **memory: write gates on `core/dailyContext.md`.** `memory_append` and `memory_update` refuse a write
+  that adds a `Completed` entry over 30 words or a `Key Decisions` entry over 25, or that grows the file
+  past 6,000 characters (the budget the guidelines already stated, now enforced). Shrinking always passes;
+  each gate refuses twice in a row and then accepts with a warning, so it cannot wedge a session; a refused
+  write changes no bytes and takes no recovery snapshot. Settings `gates.*`; `/memory doctor` shows them.
+  The cap is in characters, not lines: a 150-line cap was measured elsewhere on files that sat at 149-150
+  lines and were still 20 KB.
+- **memory: optional semantic search through qmd.** `memory_search` also asks `qmd vsearch` which files mean
+  what the query means and fuses the two ranked lists (reciprocal rank fusion); each result says
+  `via: bm25|semantic|both`. On by default, a no-op without qmd, and any failure answers from keywords exactly
+  as before. Never used by automatic injection. The extension keeps its own qmd index fresh (debounced,
+  single-flight, safe across Pi sessions) and `/memory doctor` reports it. 15 agent-labelled prompts, correct
+  file in the top 5: keywords 9, meaning alone 12, fused 14. the memory package's `smoke:semantic` script checks the real qmd;
+  its `eval:semantic` script re-measures on your bank.
+
 ## [1.11.2] - 2026-11-10
 
 ### Fixed

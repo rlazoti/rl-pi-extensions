@@ -22,6 +22,10 @@ fs.mkdirSync(path.join(dir, "core"), { recursive: true });
 fs.mkdirSync(path.join(dir, "knowledge"), { recursive: true });
 process.env.PI_MEMORY_DIR = dir;
 process.env.PI_MEMORY_TEST_DIR = dir;
+// Semantic search shells out to `qmd`. A test must never reach the operator's real binary (it would index
+// the test bank, load models and write under ~/.cache/qmd), so the default is a path that does not exist:
+// every search falls back to keywords. Suites that exercise semantic search point this at fixtures/fake-qmd.mjs.
+process.env.PI_MEMORY_QMD = path.join(dir, "qmd-is-not-available-in-tests");
 
 if (process.env.PI_MEMORY_TEST_KEEP !== "1") {
 	process.on("exit", () => {

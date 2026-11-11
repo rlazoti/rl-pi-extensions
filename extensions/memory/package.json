@@ -17,7 +17,9 @@
 		"eval": "node scripts/evaluate-retrieval.mjs",
 		"race": "node scripts/race-probe.mjs",
 		"verify": "npm run typecheck && npm test && npm run smoke && npm run race",
-		"measure": "node scripts/measure-injection.mjs"
+		"measure": "node scripts/measure-injection.mjs",
+		"smoke:semantic": "node scripts/smoke-semantic.mjs",
+		"eval:semantic": "node scripts/evaluate-semantic.mjs"
 	},
 	"pi": {
 		"extensions": [

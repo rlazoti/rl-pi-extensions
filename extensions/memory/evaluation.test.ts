@@ -72,3 +72,23 @@ describe("session attribution", () => {
 		expect(result).toMatchObject({ unattributed: 2, invalid: 1 });
 	});
 });
+
+describe("judging memory_search", () => {
+	it("finds the first expected file's 1-based rank, or null", async () => {
+		const { firstRank } = await import("./evaluation.js");
+		expect(firstRank(["a", "b", "c"], ["c", "b"])).toBe(2);
+		expect(firstRank(["a"], ["z"])).toBeNull();
+		expect(firstRank([], ["z"])).toBeNull();
+	});
+	it("counts top-k hits per mode and names what meaning gained and what fusion lost", async () => {
+		const { summarizeRanks } = await import("./evaluation.js");
+		const r = summarizeRanks([
+			{ id: "both", keyword: 1, fused: 1 },
+			{ id: "gained", keyword: null, fused: 2 },
+			{ id: "gained-late", keyword: 5, fused: 3 },
+			{ id: "lost", keyword: 2, fused: 4 },
+			{ id: "neither", keyword: null, fused: null },
+		], 3);
+		expect(r).toEqual({ cases: 5, k: 3, keywordTopK: 2, fusedTopK: 3, gained: ["gained", "gained-late"], lost: ["lost"] });
+	});
+});
