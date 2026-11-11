@@ -40,13 +40,23 @@ import { Type } from "typebox";
 import { AutoClear, type AutoClearMode } from "./auto-clear.js";
 import {
 	AUTO_CLEAR_DELAY_TURNS,
+	DEFAULT_WIDGET_DENSITY,
 	loadTodoConfig,
 	REMINDER_INTERVAL_TURNS,
 	resolveStorePath,
 	saveTodoConfig,
 	type TaskScope,
 } from "./config.js";
-import { listForLLM, openBlockers, systemPromptBlock, taskDetailText, themePaint, toolResultText } from "./render.js";
+import {
+	DENSITY_SHORTCUT,
+	DENSITY_SUMMARY,
+	listForLLM,
+	openBlockers,
+	systemPromptBlock,
+	taskDetailText,
+	themePaint,
+	toolResultText,
+} from "./render.js";
 import { PLAN_NUDGE_REMINDER, PLAN_NUDGE_THRESHOLD, PlanNudge } from "./plan-nudge.js";
 import { TaskStore, type TaskUpdateFields } from "./store.js";
 import {
@@ -56,6 +66,7 @@ import {
 	type TaskDetails,
 	type TaskPriority,
 	type TaskStatus,
+	type WidgetDensity,
 } from "./types.js";
 import { PANEL_HEIGHT_PERCENT, TaskViewer, type TaskAction, type TaskViewerResult } from "./viewer.js";
 import { TaskWidget } from "./widget.js";
@@ -161,6 +172,13 @@ export default function todosExtension(pi: ExtensionAPI): void {
 	/** Asks once when file-changing tools start with no task list (`plan-nudge.ts`). */
 	const planNudge = new PlanNudge();
 
+	/**
+	 * The density the config asked for, as opposed to the one the human cycled to.
+	 * Keeping them apart is what lets `alt+t` hold for the session: a hook that
+	 * re-applied the config every turn would undo the keypress at the next one.
+	 */
+	let densityFromConfig: WidgetDensity | undefined;
+
 	let turn = 0;
 	let lastTaskToolTurn = 0;
 	let reminderShown = false;
@@ -176,6 +194,26 @@ export default function todosExtension(pi: ExtensionAPI): void {
 		} catch {
 			// A host with no notification channel is not a reason to fail a hook.
 		}
+	}
+
+	/** A line the human asked for, so unlike `report` it is never swallowed as a repeat. */
+	function say(uiCtx: ExtensionUIContext, message: string): void {
+		try {
+			uiCtx.notify(message, "info");
+		} catch {
+			// Same reason as above: the state has already changed.
+		}
+	}
+
+	/**
+	 * Apply the configured density, and only when the configuration changed. The
+	 * session's own cycle is the human's, not the file's.
+	 */
+	function applyDensityDefault(): void {
+		const wanted = config.widgetDensity ?? DEFAULT_WIDGET_DENSITY;
+		if (wanted === densityFromConfig) return;
+		densityFromConfig = wanted;
+		widget.setDensity(wanted);
 	}
 
 	/**
@@ -209,6 +247,7 @@ export default function todosExtension(pi: ExtensionAPI): void {
 		cwd = ctx.cwd;
 		config = loadTodoConfig(cwd);
 		widget.setUICtx(ctx.ui);
+		applyDensityDefault();
 		openStore(sessionIdOf(ctx));
 		if (problem) report(ctx.ui, problem);
 	}
@@ -292,6 +331,13 @@ export default function todosExtension(pi: ExtensionAPI): void {
 	pi.on("session_start", async (event, ctx) => {
 		cwd = ctx.cwd;
 		config = loadTodoConfig(cwd);
+		// The configured density belongs here as much as in `readContext`: this is the
+		// other place the config is loaded, and the widget paints at the end of this
+		// hook, before any turn_start could have applied it. Forgetting the previous
+		// session's applied value is what lets a fresh session start where the config
+		// says, after `dispose` put the widget back to full.
+		densityFromConfig = undefined;
+		applyDensityDefault();
 		turn = 0;
 		lastTaskToolTurn = 0;
 		reminderShown = false;
@@ -645,6 +691,25 @@ Examples: { "id": "t1", "status": "in_progress" } · { "id": "t1", "status": "co
 		},
 	});
 
+	/**
+	 * `alt+t` trades widget rows for output rows. Session-local on purpose: the
+	 * config says where a session starts, the key says what this stretch of work
+	 * needs, and a collapse that survived into the next session would read as lost
+	 * rows with no visible cause.
+	 */
+	pi.registerShortcut(DENSITY_SHORTCUT, {
+		description: "Cycle the task widget: full, attention, minimal",
+		handler: (ctx) => {
+			widget.setUICtx(ctx.ui);
+			if (store.list().length === 0) {
+				say(ctx.ui, `No task list, so nothing to contract — ${DENSITY_SHORTCUT} does nothing until there is one.`);
+				return;
+			}
+			const next = widget.cycleDensity();
+			say(ctx.ui, `Tasks widget: ${next} — ${DENSITY_SUMMARY[next]}. ${DENSITY_SHORTCUT} again to cycle, /todos for every row.`);
+		},
+	});
+
 	/** Panel + settings, looping only while the panel asks for settings. */
 	async function showPanel(ctx: ExtensionCommandContext): Promise<void> {
 		for (;;) {
@@ -675,11 +740,13 @@ Examples: { "id": "t1", "status": "in_progress" } · { "id": "t1", "status": "co
 			const scope = config.taskScope ?? "session";
 			const mode = config.autoClearCompleted ?? "on_list_complete";
 			const nudged = config.planNudge !== false;
+			const density = config.widgetDensity ?? DEFAULT_WIDGET_DENSITY;
 			const heading = `Tasks · settings   file: ${store.path ?? "(in memory)"}   saved to: .pi/tasks-config.json`;
 			const choice = await ctx.ui.select(heading, [
 				`Task storage: ${scope}`,
 				`Auto-clear completed: ${mode}`,
 				`Plan nudge: ${nudged ? "on" : "off"}`,
+				`Widget rows: ${density}`,
 				"Close",
 			]);
 			if (choice === undefined || choice === "Close") break;
@@ -710,6 +777,18 @@ Examples: { "id": "t1", "status": "in_progress" } · { "id": "t1", "status": "co
 					// rest of this session, not about where a file lives.
 					planNudge.reset(config.planNudge);
 				}
+			} else if (choice.startsWith("Widget rows")) {
+				const picked = await ctx.ui.select(
+					`Widget rows — what sits above the editor; ${DENSITY_SHORTCUT} cycles it for the current session`,
+					DENSITY_CHOICES.map((option) => optionLabel(option, density)),
+				);
+				const value = DENSITY_CHOICES.find((option) => optionLabel(option, density) === picked)?.value;
+				if (value) {
+					config.widgetDensity = value;
+					// Chosen in the same session as a shortcut press, so it takes effect now;
+					// the next `alt+t` still overrides it for the rest of the session.
+					applyDensityDefault();
+				}
 			}
 
 			try {
@@ -730,6 +809,12 @@ Examples: { "id": "t1", "status": "in_progress" } · { "id": "t1", "status": "co
 		}
 		if ((config.planNudge !== false) !== (before.planNudge !== false)) {
 			ctx.ui.notify(`Plan nudge is now "${config.planNudge !== false ? "on" : "off"}".`, "info");
+		}
+		if (config.widgetDensity !== before.widgetDensity) {
+			ctx.ui.notify(
+				`Widget rows are now "${config.widgetDensity ?? DEFAULT_WIDGET_DENSITY}" — new sessions start there, and ${DENSITY_SHORTCUT} still cycles this one.`,
+				"info",
+			);
 		}
 	}
 }
@@ -759,6 +844,12 @@ const MODE_CHOICES: Choice<AutoClearMode>[] = [
 const NUDGE_CHOICES: Choice<"on" | "off">[] = [
 	{ value: "on", hint: "ask once when file edits start with no task list" },
 	{ value: "off", hint: "stay silent — AGENTS.md is the only thing that asks" },
+];
+
+const DENSITY_CHOICES: Choice<WidgetDensity>[] = [
+	{ value: "full", hint: "the tally and the task rows — the whole plan on screen" },
+	{ value: "attention", hint: "the tally plus whatever is in progress, blocked or failed" },
+	{ value: "minimal", hint: "one line: what is running now, and the counts" },
 ];
 
 /** The tool-result panel: the count line and the rows, in the widget's own vocabulary. */

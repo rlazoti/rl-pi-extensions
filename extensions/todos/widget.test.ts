@@ -212,3 +212,120 @@ describe("the animation", () => {
 		assert.deepEqual(widget.activeTaskIds, []);
 	});
 });
+
+/**
+ * The same list at three row budgets, reached with one key. What is tested here is
+ * the widget's side of it — that contracting repaints, and that a density which
+ * hides the only spinner also stops the timer, which is the whole point of the
+ * animation rule above.
+ */
+describe("the density", () => {
+	it("starts at full, so a session that never touches the key still sees the plan", async () => {
+		const h = harness();
+		const widget = new TaskWidget(() => h.store);
+		widget.setUICtx(h.uiCtx);
+		for (const id of ["a", "b", "c"]) await h.store.create(`Task ${id}`);
+		widget.update();
+
+		assert.equal(widget.densitySetting, "full");
+		assert.equal(h.rows().length, 4, "the tally and three rows");
+	});
+
+	it("contracts the same list to the work that needs a look, then to one line", async () => {
+		const h = harness();
+		const widget = new TaskWidget(() => h.store);
+		widget.setUICtx(h.uiCtx);
+		const running = await h.store.create("Write the migration");
+		await h.store.create("Backlog one");
+		await h.store.create("Backlog two");
+		await h.store.update(running.id, { status: "in_progress" });
+		widget.update();
+
+		widget.setDensity("attention");
+		const attention = h.rows();
+		assert.equal(attention.length, 3, "the tally, the migration, and the two it dropped named as two");
+		assert.ok(attention.some((line) => line.includes("Backlog one")) === false, String(attention));
+		assert.match(attention.at(2)!, /2 more/);
+
+		widget.setDensity("minimal");
+		assert.equal(h.rows().length, 1);
+
+		widget.setDensity("full");
+		assert.equal(h.rows().length, 4, "and the way back is the same key");
+	});
+
+	it("cycles full → attention → minimal → full", async () => {
+		const h = harness();
+		const widget = new TaskWidget(() => h.store);
+		widget.setUICtx(h.uiCtx);
+		await h.store.create("Only");
+		widget.update();
+
+		assert.equal(widget.cycleDensity(), "attention");
+		assert.equal(widget.cycleDensity(), "minimal");
+		assert.equal(widget.cycleDensity(), "full", "the cycle wraps rather than dead-ending");
+	});
+
+	it("stops the timer when the contracted rows hide the only spinner", async () => {
+		const h = harness();
+		const widget = new TaskWidget(() => h.store, 100);
+		widget.setUICtx(h.uiCtx);
+		// Four attention tasks first, so the cap fills before the running one arrives:
+		// in `attention` there is no row left for its spinner.
+		for (const id of ["1", "2", "3", "4"]) {
+			const stuck = await h.store.create(`Stuck ${id}`);
+			await h.store.update(stuck.id, { status: "blocked" });
+		}
+		const running = await h.store.create("The one that is moving");
+		await h.store.update(running.id, { status: "in_progress" });
+		widget.setActiveTask(running.id);
+		assert.equal(widget.isAnimating, true, "full has room for it");
+
+		widget.setDensity("attention");
+		assert.equal(widget.isAnimating, false, "a spinner nobody can see must not repaint the terminal");
+
+		widget.setDensity("minimal");
+		assert.equal(widget.isAnimating, true, "minimal still paints the spinner, on its one row");
+	});
+
+	it("repaints when the density changes, and does nothing when it did not change", async () => {
+		const h = harness();
+		const widget = new TaskWidget(() => h.store);
+		widget.setUICtx(h.uiCtx);
+		await h.store.create("First");
+		widget.update();
+		h.rows(); // hands the widget its tui, which is when repaints become possible
+
+		const requested = h.tui.requestRender.mock.callCount();
+		widget.setDensity("attention");
+		assert.ok(h.tui.requestRender.mock.callCount() > requested, "the change has to reach the screen");
+
+		const after = h.tui.requestRender.mock.callCount();
+		widget.setDensity("attention");
+		assert.equal(h.tui.requestRender.mock.callCount(), after, "a no-op must not repaint");
+	});
+
+	it("takes the density set before the first task, which is what a config default does", async () => {
+		const h = harness();
+		const widget = new TaskWidget(() => h.store);
+		widget.setUICtx(h.uiCtx);
+		widget.setDensity("minimal");
+
+		await h.store.create("First");
+		await h.store.create("Second");
+		widget.update();
+		assert.equal(h.rows().length, 1);
+	});
+
+	it("forgets the session's choice on shutdown, so the next session starts as configured", async () => {
+		const h = harness();
+		const widget = new TaskWidget(() => h.store);
+		widget.setUICtx(h.uiCtx);
+		await h.store.create("First");
+		widget.update();
+		widget.setDensity("minimal");
+
+		widget.dispose();
+		assert.equal(widget.densitySetting, "full");
+	});
+});

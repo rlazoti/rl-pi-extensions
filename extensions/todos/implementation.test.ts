@@ -16,8 +16,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, it, mock } from "node:test";
 
 import { ENV_VAR, REMINDER_INTERVAL_TURNS } from "./config.ts";
+import { DENSITY_SHORTCUT } from "./render.ts";
 import { PLAN_NUDGE_THRESHOLD } from "./plan-nudge.ts";
 import { PANEL_HEIGHT_PERCENT } from "./viewer.ts";
+import { WIDGET_KEY } from "./widget.ts";
 import todosExtension from "./implementation.ts";
 
 // ── the fake Pi ──────────────────────────────────────────────────────────────
@@ -82,6 +84,7 @@ function harness(options: Options = {}) {
 	const customCalls: { factory: unknown; options?: unknown }[] = [];
 	const selectCalls: { title: string; options: string[] }[] = [];
 	const confirmCalls: { title: string; message: string }[] = [];
+	const shortcuts = new Map<string, { description?: string; handler(ctx: FakeCtx): unknown }>();
 	const answers = [...(options.answers ?? [])];
 
 	const pi = {
@@ -89,6 +92,8 @@ function harness(options: Options = {}) {
 		registerTool: (tool: FakeTool) => tools.set(tool.name, tool),
 		registerCommand: (name: string, command: { description: string; handler(...args: never[]): Promise<unknown> }) =>
 			commands.set(name, command),
+		registerShortcut: (shortcut: string, shortcutOptions: { description?: string; handler(ctx: FakeCtx): unknown }) =>
+			shortcuts.set(shortcut, shortcutOptions),
 	};
 	todosExtension(pi as never);
 
@@ -143,6 +148,24 @@ function harness(options: Options = {}) {
 	const registered = () => widgetCalls.filter((call) => call.factory !== undefined);
 	const unregistered = () => widgetCalls.filter((call) => call.factory === undefined);
 
+	/** The rows the widget is showing, painted the way the host would paint them. */
+	const widgetRows = (width = 80): string[] => {
+		const last = [...widgetCalls].reverse().find((call) => call.key === WIDGET_KEY);
+		if (!last?.factory) return [];
+		const component = (last.factory as (tui: unknown, paintTheme: FakeTheme) => { render(w: number): string[] })(
+			{ requestRender: () => {} },
+			theme,
+		);
+		return component.render(width);
+	};
+
+	/** Press a global shortcut the way the editor does. */
+	const press = (shortcut: string) => {
+		const bound = shortcuts.get(shortcut);
+		assert.ok(bound, `nothing is bound to ${shortcut}`);
+		return bound.handler(ctx);
+	};
+
 	return {
 		cwd,
 		ctx,
@@ -159,6 +182,9 @@ function harness(options: Options = {}) {
 		warnings,
 		registered,
 		unregistered,
+		shortcuts,
+		widgetRows,
+		press,
 		turn: (n = 1) => Promise.all(Array.from({ length: n }, () => fire("turn_start"))),
 	};
 }
@@ -659,6 +685,143 @@ describe("the widget", () => {
 		await h.fire("session_shutdown", {});
 
 		assert.ok(h.unregistered().length >= 1);
+	});
+});
+
+// ── the density shortcut ──────────────────────────────────────────────────────
+
+/**
+ * One key trades widget rows for output rows. The parts worth pinning are the
+ * ones a reader cannot see from the code: that the key the overflow line names is
+ * the key that is actually bound, that the config sets where a session starts and
+ * not where it stays, and that a session which pressed the key keeps its choice
+ * across every hook that re-reads the file.
+ */
+describe("the density shortcut", () => {
+	it("is bound to the key the widget's own overflow rows name", async () => {
+		const h = harness({ cwd: tempDir() });
+		await h.fire("session_start", { reason: "new" });
+
+		assert.ok(h.shortcuts.has(DENSITY_SHORTCUT), `${DENSITY_SHORTCUT} is not bound`);
+		assert.match(h.shortcuts.get(DENSITY_SHORTCUT)!.description ?? "", /task widget/i);
+	});
+
+	it("cycles the widget down and round, and says where it landed", async () => {
+		const h = harness({ cwd: tempDir() });
+		await h.fire("session_start", { reason: "new" });
+		await h.runTool("TodoCreate", { tasks: [{ content: "One" }, { content: "Two" }, { content: "Three" }] });
+		await h.runTool("TodoUpdate", { id: "t1", status: "in_progress" });
+		assert.equal(h.widgetRows().length, 4, "the tally and three rows");
+
+		await h.press(DENSITY_SHORTCUT);
+		const attention = h.widgetRows();
+		assert.match(h.notes.at(-1)!.message, /attention/);
+		assert.equal(attention.length, 3, "the tally, the one task that is moving, and the two dropped ones counted");
+		assert.equal(attention.join(" | ").includes("Two"), false, "the queue is what the key buys back");
+		assert.match(attention.at(2)!, /2 more/);
+
+		await h.press(DENSITY_SHORTCUT);
+		assert.match(h.notes.at(-1)!.message, /minimal/);
+		const minimal = h.widgetRows();
+		assert.equal(minimal.length, 1);
+		assert.match(minimal[0]!, /3 tasks/, "and the counts survive the last row going");
+
+		await h.press(DENSITY_SHORTCUT);
+		assert.match(h.notes.at(-1)!.message, /full/);
+		assert.equal(h.widgetRows().length, 4, "and the rows come back");
+	});
+
+	it("has nothing to contract when there is no list, and says so", async () => {
+		const h = harness({ cwd: tempDir() });
+		await h.fire("session_start", { reason: "new" });
+
+		await h.press(DENSITY_SHORTCUT);
+		assert.match(h.notes.at(-1)!.message, /No task list/);
+		assert.deepEqual(h.registered(), [], "pressing the key must not create a row");
+	});
+
+	it("starts a session at the configured density", async () => {
+		const cwd = tempDir();
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "tasks-config.json"), JSON.stringify({ widgetDensity: "attention" }), "utf-8");
+		const h = harness({ cwd });
+		await h.fire("session_start", { reason: "new" });
+		await h.runTool("TodoCreate", { tasks: [{ content: "One" }, { content: "Two" }] });
+
+		assert.match(h.widgetRows().join(" | "), /nothing needs attention/, "the config chose the shape, not a keypress");
+	});
+
+	it("offers the density in the settings menu and applies it to this session", async () => {
+		const cwd = tempDir();
+		const h = harness({
+			cwd,
+			answers: ["Widget rows: full", (list) => list.find((entry) => entry.startsWith("minimal")), undefined],
+		});
+		await h.fire("session_start", { reason: "new" });
+		await h.runTool("TodoCreate", { tasks: [{ content: "One" }, { content: "Two" }] });
+		await h.commands.get("todos")!.handler("settings" as never, h.ctx as never);
+
+		assert.ok(
+			h.selectCalls[0]!.options.some((entry) => entry === "Widget rows: full"),
+			"the menu is where a setting is findable",
+		);
+		assert.match(h.selectCalls[1]!.title, new RegExp(DENSITY_SHORTCUT.replace("+", "\\+")), "and it names the key");
+		assert.equal(JSON.parse(readFileSync(join(cwd, ".pi", "tasks-config.json"), "utf-8")).widgetDensity, "minimal");
+		assert.equal(h.widgetRows().length, 1, "chosen in this session, so it takes effect in this session");
+		assert.ok(h.notes.some((note) => note.message.includes('Widget rows are now "minimal"')));
+	});
+
+	it("starts the next session at the configured density again", async () => {
+		// `dispose` puts the widget back to full, so a session after a shutdown would
+		// otherwise inherit neither the keypress nor the file — the worst of both.
+		const cwd = tempDir();
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "tasks-config.json"), JSON.stringify({ widgetDensity: "minimal" }), "utf-8");
+		const h = harness({ cwd });
+		await h.fire("session_start", { reason: "new" });
+		await h.runTool("TodoCreate", { tasks: [{ content: "One" }, { content: "Two" }] });
+		await h.press(DENSITY_SHORTCUT);
+		assert.equal(h.widgetRows().length, 3, "minimal cycles to full, so this session is looking at everything");
+
+		await h.fire("session_shutdown", {});
+		await h.fire("session_start", { reason: "new" });
+		await h.runTool("TodoCreate", { tasks: [{ content: "Three" }, { content: "Four" }] });
+		assert.equal(h.widgetRows().length, 1, "back to what the file says, not to full");
+	});
+
+	it("keeps the session's own cycle when the config is read again", async () => {
+		// Every turn re-reads `.pi/tasks-config.json`. If that read also re-applied the
+		// density, a contraction would silently undo itself at the next prompt.
+		const cwd = tempDir();
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "tasks-config.json"), JSON.stringify({ widgetDensity: "attention" }), "utf-8");
+		const h = harness({ cwd });
+		await h.fire("session_start", { reason: "new" });
+		await h.runTool("TodoCreate", { tasks: [{ content: "One" }, { content: "Two" }] });
+
+		await h.press(DENSITY_SHORTCUT);
+		assert.equal(h.widgetRows().length, 1, "attention → minimal");
+		await h.turn(2);
+		await h.runTool("TodoList");
+
+		assert.equal(h.widgetRows().length, 1, "a config re-read must not undo the keypress");
+		const notes = h.notes.map((note) => note.message);
+		assert.equal(notes.filter((message) => /Tasks widget:/.test(message)).length, 1, "no second announcement");
+		await h.press(DENSITY_SHORTCUT);
+		assert.match(h.notes.at(-1)!.message, /full/, "and the cycle carries on from there, not from the file");
+	});
+
+	it("survives a host whose notify throws, with the change still applied", async () => {
+		const h = harness({ cwd: tempDir() });
+		await h.fire("session_start", { reason: "new" });
+		await h.runTool("TodoCreate", { content: "One" });
+		h.ctx.ui.notify = () => {
+			throw new Error("no notification channel");
+		};
+
+		await h.press(DENSITY_SHORTCUT);
+		assert.equal(h.widgetRows().length, 2, "the density changed even though nobody could be told");
+		assert.match(h.widgetRows()[0]!, /1 task/);
 	});
 });
 

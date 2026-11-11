@@ -68,6 +68,15 @@ export const TASK_STATUSES: readonly TaskStatus[] = [
 
 export const TASK_PRIORITIES: readonly TaskPriority[] = ["high", "medium", "low"];
 
+/**
+ * How many rows the widget spends on the same list. `full` is the whole list,
+ * `attention` is only the work someone has to look at, `minimal` is one line.
+ * `alt+t` cycles them in this order.
+ */
+export type WidgetDensity = "full" | "attention" | "minimal";
+
+export const WIDGET_DENSITIES: readonly WidgetDensity[] = ["full", "attention", "minimal"];
+
 /** Sort order for "work the model should look at first". */
 export const PRIORITY_ORDER: Record<TaskPriority, number> = {
 	high: 0,

@@ -13,6 +13,8 @@ import { describe, it } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 import {
+	ATTENTION_MAX_ROWS,
+	DENSITY_SHORTCUT,
 	MAX_WIDGET_TASKS,
 	SPINNER_FRAMES,
 	blockerHint,
@@ -22,6 +24,7 @@ import {
 	openBlockers,
 	priorityLabel,
 	plainPaint,
+	rendersSpinner,
 	rowIcon,
 	statusIcon,
 	summaryLine,
@@ -33,7 +36,7 @@ import {
 	widgetLines,
 	type Paint,
 } from "./render.ts";
-import type { Task, TaskStatus } from "./types.ts";
+import type { Task, TaskStatus, WidgetDensity } from "./types.ts";
 
 /** The paint a theme produces, without a theme: it marks each role visibly. */
 const marks: Paint = (role, text) => `<${role}>${text}</>`;
@@ -212,9 +215,151 @@ describe("the widget", () => {
 	});
 });
 
+/**
+ * The three densities exist because the widget sits on top of somebody's output.
+ * What matters is not the exact row count but the two promises each one makes:
+ * the tally survives, and nothing is dropped without a line that says so.
+ */
+describe("the widget's density", () => {
+	const busy = [
+		task({ id: "t1", status: "completed" }),
+		task({ id: "t2", status: "in_progress", activeForm: "Fixing the parser" }),
+		task({ id: "t3", status: "blocked" }),
+		task({ id: "t4", status: "failed" }),
+		task({ id: "t5" }),
+		task({ id: "t6" }),
+	];
+	const DENSITIES: WidgetDensity[] = ["full", "attention", "minimal"];
+
+	it("opens every density with the tally, so contracting never hides the plan's size", () => {
+		for (const density of DENSITIES) {
+			assert.match(widget(busy, { density })[0]!, /6 tasks/, density);
+		}
+	});
+
+	it("shows the queue in full and drops it in attention", () => {
+		const full = widget(busy, { density: "full" });
+		const attention = widget(busy, { density: "attention" });
+		assert.equal(full.length, 1 + busy.length, "full is what it always was");
+		assert.equal(attention.length, 5, "the tally, the three rows, and the count of what was dropped");
+		for (const line of attention) {
+			assert.equal(line.includes("Task t5"), false, "queued work is the row budget going to waste");
+			assert.equal(line.includes("Task t1"), false, "finished work is worse");
+		}
+		assert.ok(attention.some((line) => line.includes("Task t3")));
+		assert.match(attention.at(-1)!, /3 more/, "and the three are named as three");
+	});
+
+	it("caps attention rows too, because thirty blocked tasks is still a wall", () => {
+		const stuck = Array.from({ length: ATTENTION_MAX_ROWS + 2 }, (_unused, index) =>
+			task({ id: `b${index}`, status: "blocked" }),
+		);
+		const lines = widget(stuck, { density: "attention" });
+		assert.equal(lines.length, ATTENTION_MAX_ROWS + 2, "tally, the cap, the overflow line");
+		assert.match(lines.at(-1)!, /2 more/, String(lines.at(-1)));
+	});
+
+	it("says so when attention has nothing to show, rather than silently becoming minimal", () => {
+		const calm = [task({ id: "t1" }), task({ id: "t2", status: "completed" })];
+		const lines = widget(calm, { density: "attention" });
+		assert.equal(lines.length, 2);
+		assert.match(lines[1]!, /nothing needs attention/);
+	});
+
+	it("keeps the running task in the one line minimal spends", () => {
+		const lines = widget(busy, {
+			density: "minimal",
+			activeIds: new Set(["t2"]),
+			startedAt: new Map([["t2", 1_000]]),
+			now: 43_000,
+			frame: 0,
+		});
+		assert.equal(lines.length, 1);
+		assert.ok(lines[0]!.includes("Fixing the parser…"), lines[0]);
+		assert.ok(lines[0]!.includes("42s"), lines[0]);
+		assert.ok(lines[0]!.includes(SPINNER_FRAMES[0]!), "the row is where the animation lives now");
+		assert.match(lines[0]!, /6 tasks/, "and the counts ride along");
+	});
+
+	it("is just the tally in minimal when nothing is running", () => {
+		const lines = widget(
+			busy.filter((one) => one.status !== "in_progress"),
+			{ density: "minimal" },
+		);
+		assert.equal(lines.length, 1);
+		assert.match(lines[0]!, /5 tasks/);
+	});
+
+	it("names the way back on the row that took the rows away", () => {
+		const overflowing = (cap: number, status: TaskStatus) =>
+			Array.from({ length: cap + 3 }, (_unused, index) => task({ id: `t${index}`, status }));
+		const rows = widget(overflowing(MAX_WIDGET_TASKS, "pending"), { density: "full" }).at(-1)!;
+		assert.ok(rows.includes(DENSITY_SHORTCUT), `full: ${rows}`);
+		const contracted = widget(overflowing(ATTENTION_MAX_ROWS, "blocked"), { density: "attention" }).at(-1)!;
+		assert.ok(contracted.includes(DENSITY_SHORTCUT), `attention: ${contracted}`);
+	});
+
+	it("holds the width and one-row-per-element rules at every density", () => {
+		const hostile = task({
+			id: "t1",
+			status: "in_progress",
+			content: `two\nlines ${"x".repeat(200)}`,
+			activeForm: "a\ttab",
+			owner: "x\r\ny",
+		});
+		const stuck = task({ id: "t2", status: "blocked" });
+		for (const density of DENSITIES) {
+			for (const width of [8, 20, 40]) {
+				for (const line of widget([hostile, stuck], { density, width, activeIds: new Set(["t1"]) })) {
+					assert.ok(visibleWidth(line) <= width, `${density} at ${width}: ${visibleWidth(line)}`);
+					assert.equal(line.includes("\n"), false, `${density}: one element is one terminal row`);
+				}
+			}
+		}
+	});
+});
+
+/**
+ * The widget only runs its 200 ms repaint while a spinner is on screen. That
+ * question has to be answered by the same selection the renderer uses, or a
+ * contracted widget keeps a timer alive for a row nobody can see.
+ */
+describe("which density still shows a spinner", () => {
+	const running = task({ id: "t1", status: "in_progress" });
+	const active = new Set(["t1"]);
+	const stuck = Array.from({ length: ATTENTION_MAX_ROWS }, (_unused, index) =>
+		task({ id: `b${index}`, status: "blocked" }),
+	);
+
+	it("is nobody's business with no active task", () => {
+		assert.equal(rendersSpinner([running], { density: "full" }), false);
+		assert.equal(rendersSpinner([], { density: "full", activeIds: active }), false);
+	});
+
+	it("is true in full and in attention, where the running task has a row", () => {
+		for (const density of ["full", "attention"] as const) {
+			assert.equal(rendersSpinner([running], { density, activeIds: active }), true, density);
+		}
+	});
+
+	it("is true in minimal, whose single row carries the spinner", () => {
+		assert.equal(rendersSpinner([running], { density: "minimal", activeIds: active }), true);
+	});
+
+	it("is false when the attention cap cut the running task off", () => {
+		// The blocked ones are listed first, so the cap fills before the runner arrives.
+		assert.equal(rendersSpinner([...stuck, running], { density: "attention", activeIds: active }), false);
+		assert.equal(rendersSpinner([...stuck, running], { density: "full", activeIds: active }), true);
+	});
+
+	it("is false for an active task that is no longer in progress", () => {
+		const reopened = task({ id: "t1", status: "pending" });
+		assert.equal(rendersSpinner([reopened], { density: "full", activeIds: active }), false);
+	});
+});
+
 describe("tool results", () => {
-	it("says the list is empty rather than printing nothing", () => {
-		assert.equal(toolResultText([]), "Task list is empty");
+	it("says the list is empty rather than printing nothing", () => {		assert.equal(toolResultText([]), "Task list is empty");
 	});
 
 	it("leads with a tally line, then the tasks", () => {

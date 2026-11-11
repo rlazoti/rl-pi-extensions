@@ -31,7 +31,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { AUTO_CLEAR_MODES, type AutoClearMode } from "./auto-clear.js";
-import { TASK_SCOPES, type TaskScope } from "./types.js";
+import { TASK_SCOPES, type TaskScope, WIDGET_DENSITIES, type WidgetDensity } from "./types.js";
 
 export type { AutoClearMode } from "./auto-clear.js";
 export type { TaskScope } from "./types.js";
@@ -44,11 +44,20 @@ export const AUTO_CLEAR_DELAY_TURNS = 4;
 /** Turns without a task tool call before the gentle nudge rides along with a result. */
 export const REMINDER_INTERVAL_TURNS = 4;
 
+/**
+ * What a session starts with, before `alt+t` says otherwise. Deliberately the
+ * generous one: the widget is where "what is it doing now" lives, so the key is
+ * for contracting it when it gets in the way, not for earning it back.
+ */
+export const DEFAULT_WIDGET_DENSITY: WidgetDensity = "full";
+
 export interface TodoConfig {
 	taskScope?: TaskScope;
 	autoClearCompleted?: AutoClearMode;
 	/** Ask once when file-changing tools start with an empty list. Default on. */
 	planNudge?: boolean;
+	/** Rows the widget may take. Sets where a session starts, not what it ends on. */
+	widgetDensity?: WidgetDensity;
 }
 
 export interface StorePathInput {
@@ -71,6 +80,10 @@ function safeMode(value: unknown): AutoClearMode | undefined {
 	return AUTO_CLEAR_MODES.includes(value as AutoClearMode) ? (value as AutoClearMode) : undefined;
 }
 
+function safeDensity(value: unknown): WidgetDensity | undefined {
+	return WIDGET_DENSITIES.includes(value as WidgetDensity) ? (value as WidgetDensity) : undefined;
+}
+
 /**
  * Read `<cwd>/.pi/tasks-config.json`. Unknown or malformed values are dropped
  * rather than trusted — this file is editable by hand, and a typo should fall
@@ -91,6 +104,8 @@ export function loadTodoConfig(cwd: string): TodoConfig {
 	const mode = safeMode(raw.autoClearCompleted);
 	if (mode) config.autoClearCompleted = mode;
 	if (typeof raw.planNudge === "boolean") config.planNudge = raw.planNudge;
+	const density = safeDensity(raw.widgetDensity);
+	if (density) config.widgetDensity = density;
 	return config;
 }
 
@@ -104,6 +119,8 @@ export function saveTodoConfig(cwd: string, config: TodoConfig): void {
 	const mode = safeMode(config.autoClearCompleted);
 	if (mode) clean.autoClearCompleted = mode;
 	if (typeof config.planNudge === "boolean") clean.planNudge = config.planNudge;
+	const density = safeDensity(config.widgetDensity);
+	if (density) clean.widgetDensity = density;
 	writeFileSync(path, JSON.stringify(clean, null, 2));
 }
 

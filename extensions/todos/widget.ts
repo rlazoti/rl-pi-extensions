@@ -14,12 +14,16 @@
  * - **Elapsed time comes from the task, not from when the widget noticed.** A
  *   session that is reloaded or resumed mid-task must keep showing the real
  *   elapsed time, not restart at zero.
+ * - **The animation follows the rendered rows, not the store.** Contracting the
+ *   widget can hide the only spinner, and a timer painting a row nobody can see
+ *   is the exact waste the 200 ms rule exists to prevent.
  */
 
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
-import { widgetLines, themePaint } from "./render.js";
+import { widgetLines, rendersSpinner, themePaint } from "./render.js";
 import type { TaskStore } from "./store.js";
+import { WIDGET_DENSITIES, type WidgetDensity } from "./types.js";
 
 /** Widget slot. Namespaced so two extensions cannot overwrite each other's row. */
 export const WIDGET_KEY = "rl-todos";
@@ -36,6 +40,8 @@ export class TaskWidget {
 	private startedAt = new Map<string, number>();
 	private tui: TUI | undefined;
 	private registered = false;
+	/** Rows per list. Owned here, chosen by the human with `alt+t` mid-session. */
+	private density: WidgetDensity = "full";
 
 	constructor(getStore: () => TaskStore, intervalMs = TICK_MS) {
 		this.getStore = getStore;
@@ -72,6 +78,29 @@ export class TaskWidget {
 		return this.timer !== undefined;
 	}
 
+	/** How many rows this list is currently allowed to take. */
+	get densitySetting(): WidgetDensity {
+		return this.density;
+	}
+
+	/** Set the density and repaint. Same value is a no-op, so a config reload is free. */
+	setDensity(density: WidgetDensity): void {
+		if (density === this.density) return;
+		this.density = density;
+		this.update();
+	}
+
+	/**
+	 * Move to the next density and say where that landed. The cycle order is the
+	 * reading order: whole list, then the work that needs a look, then one line.
+	 */
+	cycleDensity(): WidgetDensity {
+		const index = WIDGET_DENSITIES.indexOf(this.density);
+		const next = WIDGET_DENSITIES[(index + 1) % WIDGET_DENSITIES.length] ?? "full";
+		this.setDensity(next);
+		return this.density;
+	}
+
 	/** Repaint, and start or stop the animation to match what is on screen. */
 	update(): void {
 		if (!this.uiCtx) return;
@@ -89,7 +118,7 @@ export class TaskWidget {
 			return;
 		}
 
-		const animating = tasks.some((task) => this.activeIds.has(task.id) && task.status === "in_progress");
+		const animating = rendersSpinner(tasks, { activeIds: this.activeIds, density: this.density });
 		if (animating && !this.timer) {
 			this.timer = setInterval(() => {
 				this.frame++;
@@ -114,6 +143,7 @@ export class TaskWidget {
 								frame: this.frame,
 								activeIds: this.activeIds,
 								startedAt: this.startedAt,
+								density: this.density,
 							}),
 						invalidate: () => {},
 					};
@@ -159,5 +189,6 @@ export class TaskWidget {
 		this.tui = undefined;
 		this.activeIds.clear();
 		this.startedAt.clear();
+		this.density = "full";
 	}
 }

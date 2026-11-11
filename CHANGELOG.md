@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **todos: `alt+t` contracts the widget.** One key cycles the row above the editor
+  through three densities — `full` (the tally and up to 12 task rows), `attention`
+  (the tally plus whatever is `in_progress`, `blocked` or `failed`, 4 rows at most) and
+  `minimal` (one line: the running task with its spinner and elapsed time, and the tally
+  beside it). The tally is the first row of every density and every density counts what
+  it dropped, so contracting never hides the size of the plan; the overflow row names the
+  key. `widgetDensity` in `.pi/tasks-config.json` (or `/todos settings` → `Widget rows`)
+  sets where a session starts, `full` by default; the keypress itself is session-local,
+  so a config read on a later turn cannot undo it. Contracting also stops the 200 ms
+  spinner timer when the density hides the only spinner — the question is answered by the
+  same selection the renderer uses, so the two cannot drift.
+
 ## [1.12.0] - 2026-11-11
 
 ### Added

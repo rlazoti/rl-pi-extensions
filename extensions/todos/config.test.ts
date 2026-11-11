@@ -139,4 +139,18 @@ describe("the config file", () => {
 		saveTodoConfig(cwd, { planNudge: "no" as never });
 		assert.deepEqual(loadTodoConfig(cwd), {}, "an absent flag means on, so a typo must not read as off");
 	});
+
+	it("keeps a real widgetDensity and drops one the widget cannot render", () => {
+		for (const density of ["full", "attention", "minimal"] as const) {
+			saveTodoConfig(cwd, { widgetDensity: density });
+			assert.deepEqual(loadTodoConfig(cwd), { widgetDensity: density });
+		}
+
+		// `compact` and `off` are the names a reader would guess first; both have to be
+		// dropped rather than reach the widget as an unknown density.
+		for (const bogus of ["compact", "off", true, 12, null]) {
+			saveTodoConfig(cwd, { widgetDensity: bogus as never });
+			assert.deepEqual(loadTodoConfig(cwd), {}, "an absent density means the default, not a broken row");
+		}
+	});
 });

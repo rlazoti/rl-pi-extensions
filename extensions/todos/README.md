@@ -28,8 +28,31 @@ And one command: `/todos` (panel), `/todos clear`, `/todos settings`, `/todos wa
 
 A row above the editor while the list is non-empty: the tally, then one line per
 task, up to 12. A task the agent marked `in_progress` gets a spinner and its elapsed
-time, so you can tell "working on it" from "planned, forgotten". Past 12 rows it says
-`… N more (see TodoList)` rather than growing into a wall.
+time, so you can tell "working on it" from "planned, forgotten". Past the cap it says
+`… and N more` rather than growing into a wall.
+
+### `alt+t` — how many rows the list may take
+
+That budget is yours, because a twelve-task plan is information some of the time and
+a wall between you and the output the rest of it. One key cycles three densities:
+
+| density | rows | what it keeps |
+|---|---|---|
+| `full` | ≤ 14 | the tally and up to 12 task rows — what a session starts with |
+| `attention` | ≤ 6 | the tally plus whatever is `in_progress`, `blocked` or `failed`, up to 4 of them |
+| `minimal` | 1 | the running task with its spinner and elapsed time, and the tally beside it |
+
+Three rules hold in every density: the tally is the first row, so contracting never
+hides the size of the plan; what is dropped is counted (`… and 3 more`), never hidden
+silently; and no line is wider than the terminal or contains a newline.
+
+The row that took the rows away names `alt+t`, which is where the key gets learned.
+`/todos` shows every row at any density, so nothing is reachable only by expanding.
+When `attention` has nothing to show it says `nothing needs attention` instead of
+looking like `minimal`.
+
+The keypress is for the current session; `widgetDensity` (below) says where sessions
+start. A collapse that outlived its session would read as lost rows with no cause.
 
 `/todos` opens the panel, where you can move tasks without asking:
 
@@ -65,9 +88,11 @@ session quietly finishing another session's plan.
 | `project` | `<cwd>/.pi/tasks/tasks.json`, so a new session inherits the open work |
 | `memory` | nothing on disk; the list ends with the session |
 
-Two more keys live in the same file, and `/todos settings` offers both as menu rows:
-`autoClearCompleted` (below) and `planNudge` (JSON boolean, default `true`, applied to
-the current session as soon as you change it).
+Three more keys live in the same file, and `/todos settings` offers all three as menu
+rows: `autoClearCompleted` (below), `planNudge` (JSON boolean, default `true`, applied
+to the current session as soon as you change it), and `widgetDensity` (`full`,
+`attention` or `minimal` — the shape a session starts with, which `alt+t` overrides
+for that session only).
 
 `PI_TODOS` overrides the location and wins over the config file:
 
@@ -195,7 +220,11 @@ A task list is not worth breaking a session for:
 - `in_progress` means the agent said it is working. There is no claim or heartbeat:
   if a session dies mid-task, the file keeps `in_progress`, and a new session shows it
   that way until someone presses `s` (or the agent updates it).
-- The widget caps at 12 rows by design; the count line keeps the truth anyway.
+- The widget caps at 12 rows in `full`, and `alt+t` buys the rows back; the count line
+  keeps the truth anyway. Pi's own 10-line widget truncation covers widgets registered
+  as a list of strings — this one registers a component, so the cap is ours alone.
+- The density is a view, not state: it is not written to the task file, not per task,
+  and not carried into the next session. `widgetDensity` is the only durable form.
 - `PI_TODOS=off` and `taskScope: memory` mean **no persistence** — `/resume` finds an
   empty list, and says so.
 - A named shared list (`PI_TODOS=sprint-1`) is one file read by several sessions at

@@ -19,13 +19,39 @@
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { PRIORITY_ORDER, type Task, type TaskPriority, type TaskStatus } from "./types.js";
+import {
+	PRIORITY_ORDER,
+	type Task,
+	type TaskPriority,
+	type TaskStatus,
+	type WidgetDensity,
+} from "./types.js";
 
 /** The spinner the widget cycles through while a task is in progress. */
 export const SPINNER_FRAMES = ["✳", "✴", "✵", "✶", "✷", "✸", "✹", "✺", "✻", "✼", "✽"];
 
 /** Beyond this many rows the widget is a wall of text; the count line still tells the truth. */
 export const MAX_WIDGET_TASKS = 12;
+
+/**
+ * The key that cycles the widget's density. It lives with the text because the
+ * overflow rows name it: the row that makes the widget small is the row that
+ * tells you how to make it big again, and a constant keeps the two from drifting.
+ */
+export const DENSITY_SHORTCUT = "alt+t";
+
+/** Rows `attention` spends on work; past that it counts the rest, like `full` does. */
+export const ATTENTION_MAX_ROWS = 4;
+
+/** The statuses that still earn a row once the widget is contracted. */
+export const ATTENTION_STATUSES: readonly TaskStatus[] = ["in_progress", "blocked", "failed"];
+
+/** What each density gives you, for the settings menu and the notify after a cycle. */
+export const DENSITY_SUMMARY: Record<WidgetDensity, string> = {
+	full: "the tally and the task rows",
+	attention: "the tally and whatever is in progress, blocked or failed",
+	minimal: "one line: what is running now, and the counts",
+};
 
 export type LineRole = "accent" | "dim" | "muted" | "success" | "warning" | "error" | "bold" | "strike";
 
@@ -228,30 +254,31 @@ export interface WidgetOptions {
 	width?: number;
 	/** Cap on visible rows; the overflow is summarised, not hidden silently. */
 	maxTasks?: number;
+	/** How much of the list a row budget buys. Defaults to `full`. */
+	density?: WidgetDensity;
 }
 
 /**
- * The widget body: a count line, then the open work with one line per task,
- * subtasks indented under their parent. Returns nothing when the list is empty —
- * an empty widget must not occupy a row.
+ * The tasks a density gives a row to, in display order, with the indent they are
+ * drawn at. One selection rule on purpose: `rendersSpinner` asks this the same
+ * question the renderer answers, so the widget's animation timer cannot tick for
+ * a spinner the current density has hidden.
  */
-export function widgetLines(tasks: readonly Task[], options: WidgetOptions = {}): string[] {
-	if (tasks.length === 0) return [];
-	const paint = options.paint ?? plainPaint;
-	const width = Math.max(8, options.width ?? 80);
-	const now = options.now ?? Date.now();
-	const maxTasks = options.maxTasks ?? MAX_WIDGET_TASKS;
-	const spinner = SPINNER_FRAMES[(options.frame ?? 0) % SPINNER_FRAMES.length]!;
+function orderVisible(tasks: readonly Task[], options: WidgetOptions): Array<[Task, number]> {
+	const density = options.density ?? "full";
+	const cap = Math.max(0, options.maxTasks ?? MAX_WIDGET_TASKS);
+	const maxTasks = density === "attention" ? Math.min(cap, ATTENTION_MAX_ROWS) : cap;
+	const candidates =
+		density === "attention" ? tasks.filter((task) => ATTENTION_STATUSES.includes(task.status)) : tasks;
 
 	const children = new Map<string, Task[]>();
-	for (const task of tasks) {
+	for (const task of candidates) {
 		if (!task.parentId) continue;
 		const siblings = children.get(task.parentId) ?? [];
 		siblings.push(task);
 		children.set(task.parentId, siblings);
 	}
 
-	const lines: string[] = [clip(summaryLine(tasks, paint), width)];
 	const ordered: Array<[Task, number]> = [];
 	const placed = new Set<string>();
 	const place = (task: Task, indent: number): void => {
@@ -259,23 +286,91 @@ export function widgetLines(tasks: readonly Task[], options: WidgetOptions = {})
 		placed.add(task.id);
 		ordered.push([task, indent]);
 	};
-	for (const task of tasks) {
+	for (const task of candidates) {
 		if (task.parentId) continue;
 		place(task, 0);
 		for (const child of children.get(task.id) ?? []) place(child, 1);
 	}
-	// Orphans: a subtask whose parent is not in the list still has to be reachable.
-	for (const task of tasks) {
+	// Orphans: a subtask whose parent is not on screen still has to be reachable.
+	for (const task of candidates) {
 		if (!placed.has(task.id)) place(task, task.parentId ? 1 : 0);
 	}
+	return ordered;
+}
+
+/**
+ * Whether the rows this density would return contain a live spinner. The widget's
+ * 200 ms timer follows this rather than the store: a spinner nobody can see is a
+ * timer repainting an idle terminal.
+ */
+export function rendersSpinner(tasks: readonly Task[], options: WidgetOptions = {}): boolean {
+	const activeIds = options.activeIds;
+	if (tasks.length === 0 || !activeIds || activeIds.size === 0) return false;
+	const running = (task: Task): boolean => task.status === "in_progress" && activeIds.has(task.id);
+	// `minimal` has no task rows, but its one row still carries the spinner.
+	if ((options.density ?? "full") === "minimal") return tasks.some(running);
+	return orderVisible(tasks, options).some(([task]) => running(task));
+}
+
+/**
+ * The widget body: a count line, then the open work with one line per task,
+ * subtasks indented under their parent. Returns nothing when the list is empty —
+ * an empty widget must not occupy a row.
+ *
+ * `density` trades rows for detail, because the widget sits on top of somebody's
+ * output: `full` is the whole list, `attention` drops the queue and the finished
+ * work, `minimal` is one line. The tally is the first row of every density, so
+ * contracting never hides the size of the plan.
+ */
+export function widgetLines(tasks: readonly Task[], options: WidgetOptions = {}): string[] {
+	if (tasks.length === 0) return [];
+	const paint = options.paint ?? plainPaint;
+	const width = Math.max(8, options.width ?? 80);
+	const now = options.now ?? Date.now();
+	const spinner = SPINNER_FRAMES[(options.frame ?? 0) % SPINNER_FRAMES.length]!;
+	const density = options.density ?? "full";
+
+	if (density === "minimal") {
+		return [clip(minimalLine(tasks, { ...options, spinner, now, paint }), width)];
+	}
+
+	const ordered = orderVisible(tasks, options);
+	const lines: string[] = [clip(summaryLine(tasks, paint), width)];
 
 	for (const [task, indent] of ordered) {
 		lines.push(clip(widgetTaskLine(task, tasks, { ...options, indent, spinner, now, paint }), width));
 	}
 
+	if (density === "attention" && ordered.length === 0) {
+		return [...lines, clip(paint("dim", `    nothing needs attention · ${DENSITY_SHORTCUT} for the list`), width)];
+	}
+
 	const hidden = tasks.length - ordered.length;
-	if (hidden > 0) lines.push(clip(paint("dim", `    … and ${hidden} more (see TodoList)`), width));
+	if (hidden > 0) {
+		const hint =
+			density === "full" ? `see TodoList · ${DENSITY_SHORTCUT} to contract` : `${DENSITY_SHORTCUT} for one line`;
+		lines.push(clip(paint("dim", `    … and ${hidden} more (${hint})`), width));
+	}
 	return lines;
+}
+
+/**
+ * The one row `minimal` spends: the active task with its spinner and elapsed
+ * time, and the tally beside it. A widget that drops to a bare count cannot
+ * answer "what is it doing", which is the row worth keeping.
+ */
+function minimalLine(
+	tasks: readonly Task[],
+	options: WidgetOptions & { spinner: string; now: number; paint: Paint },
+): string {
+	const paint = options.paint;
+	const summary = summaryLine(tasks, paint);
+	const active = tasks.find((task) => options.activeIds?.has(task.id) === true && task.status === "in_progress");
+	if (!active) return summary;
+	const started = options.startedAt?.get(active.id) ?? options.now;
+	const elapsed = paint("dim", `(${formatDuration(options.now - started)})`);
+	const icon = rowIcon(active, true, options.spinner, paint);
+	return `${icon} ${paintTitle(active, true, paint)} ${elapsed}  ${paint("dim", "·")} ${summary}`;
 }
 
 function widgetTaskLine(
