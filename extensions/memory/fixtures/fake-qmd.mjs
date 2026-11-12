@@ -4,8 +4,10 @@
 //   FAKE_QMD_LOG      file; every call appends one JSON line {args}
 //   FAKE_QMD_MODE     ok (default) | notready | fail | garbage | slow | leak | noversion
 //   FAKE_QMD_HITS     JSON array of "qmd://bank/<path>" strings; the search answers them, best first
-//   FAKE_QMD_MARKER   with mode=leak: a worker in this process group writes this file 400 ms later,
-//                     and its pid goes to `<MARKER>.pid` — so a test can prove the group was killed
+//   FAKE_QMD_MARKER   with mode=leak: a worker in this process group writes this file later (see the
+//                     delay), and its pid goes to `<MARKER>.pid` **as soon as it is spawned** — so a
+//                     test can prove the group was killed, and can wait for the spawn instead of
+//                     assuming it already happened
 //   FAKE_QMD_WORKER_DELAY_MS   with mode=leak: how long the worker waits before writing (default 400)
 //   FAKE_QMD_ADD      "exists" makes `collection add` answer "already exists", exit 1 (as real qmd does)
 //   FAKE_QMD_EMBED    ok (default) | fail | slow (waits FAKE_QMD_DELAY_MS, default 400)
@@ -47,10 +49,17 @@ if (command === "--version" || command === "-v") {
 	if (mode === "slow") await sleep(5000);
 	if (mode === "leak") {
 		// A worker in the same process group that would outlive this process by seconds. A timeout that
-		// kills only the direct child leaves it running; the marker file then appears anyway.
+		// kills only the direct child leaves it running; the marker file then appears anyway. It stays
+		// alive for a while after writing: a worker that exited the moment it wrote could be reaped
+		// before the test looks at its pid, and a leaked-but-already-gone worker reads as a pass.
 		const marker = env("FAKE_QMD_MARKER", "");
 		if (marker) {
-			const worker = spawn(process.execPath, ["-e", `setTimeout(() => require("fs").writeFileSync(${JSON.stringify(marker)}, "alive"), ${Number(env("FAKE_QMD_WORKER_DELAY_MS", "400"))})`], { stdio: "ignore" });
+			const delay = Number(env("FAKE_QMD_WORKER_DELAY_MS", "400"));
+			const worker = spawn(process.execPath, ["-e", [
+				"const fs = require('fs');",
+				`setTimeout(() => fs.writeFileSync(${JSON.stringify(marker)}, "alive"), ${delay});`,
+				`setTimeout(() => process.exit(0), ${delay} + 20000);`,
+			].join(" ")], { stdio: "ignore" });
 			writeFileSync(`${marker}.pid`, String(worker.pid));
 		}
 		await sleep(20000);

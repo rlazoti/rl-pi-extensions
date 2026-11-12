@@ -248,16 +248,26 @@ describe("semanticSearch", () => {
 		// only the process it started leaves the worker running with its models loaded: 18 searches that
 		// timed out at 8 s left 12 of them alive at ~2 GB each on the author's machine (2026-11-11), each
 		// still eating the CPU the next search needs. The fake reproduces the shape: a worker in the same
-		// process group that writes this file 400 ms later, which is after the 300 ms timeout.
+		// process group whose pid is written down as soon as it exists, and which writes the marker later
+		// — after the kill — so a survivor is visible.
 		const marker = path.join(tmp, "worker-survived");
+		const budget = 2500; // the timeout under test
+		const workerDelay = 4000; // a survivor writes the marker this late: after the kill, before the check
 		process.env.FAKE_QMD_MODE = "leak";
 		process.env.FAKE_QMD_MARKER = marker;
-		process.env.FAKE_QMD_WORKER_DELAY_MS = "2000"; // after the 1500 ms timeout below, so a survivor is visible
-		const r = await semanticSearch(root, "q", 5, 1500, known);
+		process.env.FAKE_QMD_WORKER_DELAY_MS = String(workerDelay);
+		// The launcher records the pid the moment the worker exists, so waiting for that witness **while
+		// the search is in flight** makes the precondition "the worker was spawned" rather than "two node
+		// processes booted inside the budget" — the first `execFile` of a vitest fork alone costs 350-480 ms
+		// and this assertion used to be sampled once, right at the timeout, which lost on a loaded machine.
+		const spawned = until(() => fs.existsSync(`${marker}.pid`), budget + 4000);
+		const r = await semanticSearch(root, "q", 5, budget, known);
 		expect(r.ok === false && r.reason).toBe("timeout");
-		expect(fs.existsSync(`${marker}.pid`), "the fake never reached its worker: the timeout cut it off too early").toBe(true);
+		await spawned; // throws with the call log if the kill beat the spawn — nothing to have leaked then
 		const pid = Number(fs.readFileSync(`${marker}.pid`, "utf8"));
-		await new Promise((resolve) => setTimeout(resolve, 900));
+		// The search is over, so this wait is dead time rather than a race: it only has to be long enough
+		// that a live worker (booted ~0.5 s in, writing `workerDelay` after that) would have written.
+		await new Promise((resolve) => setTimeout(resolve, workerDelay - budget + 2500));
 		expect(fs.existsSync(marker), "the worker outlived the search that timed out").toBe(false);
 		let alive = true;
 		try { process.kill(pid, 0); } catch { alive = false; }
