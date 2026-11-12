@@ -24,6 +24,28 @@ Then ask for a plan, or say "track this as tasks". Four tools appear:
 
 And one command: `/todos` (panel), `/todos clear`, `/todos settings`, `/todos watch`.
 
+### Recommended AGENTS.md rule
+
+To make planning a habit rather than something you have to request each time, add
+this to `~/.pi/agent/AGENTS.md` for all projects, or to a project's `AGENTS.md`:
+
+```markdown
+## Task tracking
+
+For requests with three or more distinct steps, create a plan with one
+`TodoCreate` call using `tasks: [...]` before starting work. Put acceptance
+criteria in each task's `description` and link dependencies with
+`addBlockedBy`. Skip planning for one-off or conversational requests.
+
+Mark each task `in_progress` before starting it and `completed` only when its
+acceptance criteria are verified. Call `TodoList` after each completion to see
+what was unblocked. Keep the list current as scope changes, and respect user
+stop requests, required decisions, and blockers.
+```
+
+The extension provides reminders, not a guarantee that the agent will follow the
+rule. Avoid duplicating it in a project file if it already applies globally.
+
 ## What you see
 
 A row above the editor while the list is non-empty: the tally, then one line per
