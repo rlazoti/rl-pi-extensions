@@ -147,7 +147,7 @@ export class TaskWidget {
 							});
 							if (lines.length === 0) return [];
 							const bar = theme.fg("dim", "─".repeat(Math.max(0, width)));
-							return [bar, ...lines];
+							return [bar, ...lines, bar];
 						},
 						invalidate: () => {},
 					};

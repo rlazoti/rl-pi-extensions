@@ -48,11 +48,13 @@ rule. Avoid duplicating it in a project file if it already applies globally.
 
 ## What you see
 
-A row above the editor while the list is non-empty: the tally, then one line per
-task, up to 12. A task the agent marked `in_progress` gets a spinner and its elapsed
-time, so you can tell "working on it" from "planned, forgotten". A dim horizontal
-border separates the top of the widget from the surrounding session.
-Past the cap it says `… and N more` rather than growing into a wall.
+A widget above the editor while the list is non-empty: a `● Todos (done/total)`
+heading, then a tree of task rows, up to 12. Subtasks branch under their parent;
+if the parent is hidden, the row names it instead. A task the agent marked
+`in_progress` gets a spinner, its title, activity and elapsed time, so you can tell
+"working on it" from "planned, forgotten". Dim horizontal borders separate the
+widget from the surrounding session. Past the cap, unfinished tasks take priority
+over completed ones and `… and N more` breaks down what was hidden by status.
 
 ### `alt+t` — how many rows the list may take
 
@@ -61,12 +63,12 @@ a wall between you and the output the rest of it. One key cycles three densities
 
 | density | rows | what it keeps |
 |---|---|---|
-| `full` | ≤ 15 | the tally and up to 12 task rows — what a session starts with |
-| `attention` | ≤ 7 | the tally plus whatever is `in_progress`, `blocked` or `failed`, up to 4 of them |
-| `minimal` | 2 | the running task with its spinner and elapsed time, and the tally beside it |
+| `full` | ≤ 16 | the tally and up to 12 task rows — what a session starts with |
+| `attention` | ≤ 8 | the tally plus whatever is `in_progress`, `blocked` or `failed`, up to 4 of them |
+| `minimal` | 3 | the running task with its spinner and elapsed time, and the tally beside it |
 
-The row counts include the top border in every density. There is no bottom border;
-when the session banner follows the widget, its top border separates them.
+The row counts include the top and bottom borders in every density. The bottom
+border also separates the list from the footer when the session banner is absent.
 
 Three rules hold in every density: the tally is on the first content row, so contracting never
 hides the size of the plan; what is dropped is counted (`… and 3 more`), never hidden

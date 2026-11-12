@@ -157,7 +157,7 @@ function harness(options: Options = {}) {
 			theme,
 		);
 		// These integration checks inspect task content; the widget tests cover the frame.
-		return component.render(width).slice(1);
+		return component.render(width).slice(1, -1);
 	};
 
 	/** Press a global shortcut the way the editor does. */
@@ -837,7 +837,7 @@ describe("the density shortcut", () => {
 
 		await h.press(DENSITY_SHORTCUT);
 		assert.equal(h.widgetRows().length, 2, "the density changed even though nobody could be told");
-		assert.match(h.widgetRows()[0]!, /1 task/);
+		assert.match(h.widgetRows()[0]!, /Todos \(0\/1\)/);
 	});
 });
 

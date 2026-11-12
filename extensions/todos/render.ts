@@ -268,8 +268,11 @@ function orderVisible(tasks: readonly Task[], options: WidgetOptions): Array<[Ta
 	const density = options.density ?? "full";
 	const cap = Math.max(0, options.maxTasks ?? MAX_WIDGET_TASKS);
 	const maxTasks = density === "attention" ? Math.min(cap, ATTENTION_MAX_ROWS) : cap;
-	const candidates =
-		density === "attention" ? tasks.filter((task) => ATTENTION_STATUSES.includes(task.status)) : tasks;
+	const eligible = density === "attention" ? tasks.filter((task) => ATTENTION_STATUSES.includes(task.status)) : tasks;
+	// Keep unfinished work visible first, but retain the plan's original order on screen.
+	const selected = new Set([...eligible.filter((task) => task.status !== "completed"),
+		...eligible.filter((task) => task.status === "completed")].slice(0, maxTasks).map((task) => task.id));
+	const candidates = eligible.filter((task) => selected.has(task.id));
 
 	const children = new Map<string, Task[]>();
 	for (const task of candidates) {
@@ -335,10 +338,21 @@ export function widgetLines(tasks: readonly Task[], options: WidgetOptions = {})
 	}
 
 	const ordered = orderVisible(tasks, options);
-	const lines: string[] = [clip(summaryLine(tasks, paint), width)];
+	const tally = counts(tasks);
+	const alerts = [tally.inProgress ? `${tally.inProgress} in progress` : "",
+		tally.blocked ? `${tally.blocked} blocked` : "", tally.failed ? `${tally.failed} failed` : ""].filter(Boolean);
+	const lines: string[] = [clip(paint("accent", `● Todos (${tally.completed}/${tally.total})`) +
+		(alerts.length ? ` · ${alerts.join(" · ")}` : ""), width)];
+	const visibleIds = new Set(ordered.map(([task]) => task.id));
 
-	for (const [task, indent] of ordered) {
-		lines.push(clip(widgetTaskLine(task, tasks, { ...options, indent, spinner, now, paint }), width));
+	for (let index = 0; index < ordered.length; index++) {
+		const [task, indent] = ordered[index]!;
+		const parentVisible = !!task.parentId && visibleIds.has(task.parentId) && indent === 1 &&
+			ordered.slice(0, index).some(([previous, depth]) => previous.id === task.parentId && depth === 0);
+		const laterRoot = ordered.slice(index + 1).some(([, depth]) => depth === 0);
+		const nextSibling = parentVisible && ordered[index + 1]?.[0].parentId === task.parentId;
+		const prefix = parentVisible ? `${laterRoot ? "│" : " "}  ${nextSibling ? "├─" : "└─"}` : laterRoot ? "├─" : "└─";
+		lines.push(clip(widgetTaskLine(task, tasks, { ...options, prefix, parentVisible, spinner, now, paint }), width));
 	}
 
 	if (density === "attention" && ordered.length === 0) {
@@ -349,7 +363,13 @@ export function widgetLines(tasks: readonly Task[], options: WidgetOptions = {})
 	if (hidden > 0) {
 		const hint =
 			density === "full" ? `see TodoList · ${DENSITY_SHORTCUT} to contract` : `${DENSITY_SHORTCUT} for one line`;
-		lines.push(clip(paint("dim", `    … and ${hidden} more (${hint})`), width));
+		const shown = new Set(ordered.map(([task]) => task.id));
+		const hiddenTasks = tasks.filter((task) => !shown.has(task.id));
+		const breakdown = ALL_WIDGET_STATUSES.map(([status, label]) => {
+			const count = hiddenTasks.filter((task) => task.status === status).length;
+			return count ? `${count} ${label}` : "";
+		}).filter(Boolean).join(", ");
+		lines.push(clip(paint("dim", `    … and ${hidden} more (${breakdown}) · ${hint}`), width));
 	}
 	return lines;
 }
@@ -379,28 +399,36 @@ function minimalLine(
 	return `${icon} ${truncateVisible(paintTitle(active, true, paint), titleWidth)}${suffix}`;
 }
 
+const ALL_WIDGET_STATUSES: Array<[TaskStatus, string]> = [
+	["completed", "completed"], ["pending", "pending"], ["in_progress", "in progress"],
+	["blocked", "blocked"], ["failed", "failed"], ["cancelled", "cancelled"],
+];
+
 function widgetTaskLine(
 	task: Task,
 	tasks: readonly Task[],
-	options: WidgetOptions & { indent: number; spinner: string; now: number; paint: Paint },
+	options: WidgetOptions & { prefix: string; parentVisible: boolean; spinner: string; now: number; paint: Paint },
 ): string {
-	const { indent, spinner, now, paint } = options;
+	const { prefix, spinner, now, paint } = options;
 	const active = options.activeIds?.has(task.id) === true && task.status === "in_progress";
-	const pad = `  ${"  ".repeat(indent)}`;
+	const pad = `${paint("dim", prefix)} `;
+	const parent = task.parentId && !options.parentVisible ? paint("dim", ` (subtask of #${task.parentId})`) : "";
 	const icon = rowIcon(task, active, spinner, paint);
 	const owner = task.owner ? paint("dim", ` [${oneLine(task.owner)}]`) : "";
 
 	if (active) {
 		const started = options.startedAt?.get(task.id) ?? now;
-		const elapsed = paint("dim", `(${formatDuration(now - started)})`);
-		return `${pad}${icon} ${paintTitle(task, true, paint)} ${elapsed}${owner}`;
+		const activity = oneLine(task.activeForm || "");
+		const elapsed = formatDuration(now - started);
+		const detail = paint("dim", ` (${activity ? `${activity} · ` : ""}${elapsed})`);
+		return `${pad}${icon} ${paint("accent", oneLine(task.content))}${detail}${owner}${parent}`;
 	}
 
 	const hint =
 		task.status === "pending" || task.status === "blocked" || task.status === "in_progress"
 			? blockerHint(task, tasks, paint)
 			: "";
-	return `${pad}${icon} ${paintTitle(task, false, paint)}${owner}${hint}`;
+	return `${pad}${icon} ${paintTitle(task, false, paint)}${owner}${hint}${parent}`;
 }
 
 export interface ResultOptions {

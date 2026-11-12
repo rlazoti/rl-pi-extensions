@@ -36,7 +36,7 @@ function harness() {
 	};
 
 	const framedRows = (width = 80): string[] => factory?.(tui, theme).render(width) ?? [];
-	const rows = (width = 80): string[] => framedRows(width).slice(1);
+	const rows = (width = 80): string[] => framedRows(width).slice(1, -1);
 	// Live getters: the assertions read them after the calls have happened.
 	return {
 		store: new TaskStore(),
@@ -76,7 +76,7 @@ describe("registration", () => {
 		assert.deepEqual(h.rows(), []);
 	});
 
-	it("gives every density one full-width dim top rule and no bottom rule", async () => {
+	it("frames every density with full-width dim top and bottom rules", async () => {
 		const h = harness();
 		const widget = new TaskWidget(() => h.store);
 		widget.setUICtx(h.uiCtx);
@@ -87,9 +87,9 @@ describe("registration", () => {
 			for (const width of [20, 80]) {
 				const rows = h.framedRows(width);
 				assert.equal(rows[0], "─".repeat(width));
-				assert.notEqual(rows.at(-1), "─".repeat(width), "no second border below the content");
+				assert.equal(rows.at(-1), "─".repeat(width), "a border separates the content from the footer");
 				assert.ok(h.colours.some((entry) => entry.token === "dim" && entry.text === "─".repeat(width)));
-				assert.ok(rows.length >= 2);
+				assert.ok(rows.length >= 3);
 			}
 		}
 		await h.store.delete(task.id);

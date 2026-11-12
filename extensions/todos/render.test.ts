@@ -161,13 +161,22 @@ describe("the widget", () => {
 	it("puts the count on the first line and one line per task after it", () => {
 		const lines = widget([task({ id: "t1" }), task({ id: "t2", status: "completed" })]);
 		assert.equal(lines.length, 3);
-		assert.ok(lines[0]!.includes("2 tasks"));
+		assert.match(lines[0]!, /Todos \(1\/2\)/);
 	});
 
 	it("indents a subtask under its parent", () => {
 		const lines = widget([task({ id: "t1" }), task({ id: "t2", parentId: "t1" })]);
-		assert.ok(lines[1]!.startsWith("  "), "a parent starts at the left margin");
-		assert.ok(lines[2]!.startsWith("    "), "a subtask is visibly one level in");
+		assert.match(lines[1]!, /^└─/);
+		assert.match(lines[2]!, /^   └─/, "a subtask is visibly nested under its parent");
+	});
+
+	it("draws distinct branches for siblings and subsequent root tasks", () => {
+		const lines = widget([task({ id: "t1" }), task({ id: "t2", parentId: "t1" }),
+			task({ id: "t3", parentId: "t1" }), task({ id: "t4" })]);
+		assert.match(lines[1]!, /^├─/);
+		assert.match(lines[2]!, /^│  ├─/);
+		assert.match(lines[3]!, /^│  └─/);
+		assert.match(lines[4]!, /^└─/);
 	});
 
 	it("shows a subtask even when its parent is gone", () => {
@@ -183,9 +192,24 @@ describe("the widget", () => {
 			frame: 0,
 		});
 		const row = String(lines[1]);
-		assert.ok(row.includes("Fixing the parser…"), row);
+		assert.ok(row.includes("Task t1"), row);
+		assert.ok(row.includes("Fixing the parser"), row);
 		assert.ok(row.includes("42s"), row);
 		assert.ok(row.includes(SPINNER_FRAMES[0]!), row);
+	});
+
+	it("prioritizes unfinished work and describes hidden statuses", () => {
+		const tasks = [task({ id: "t1", status: "completed" }), task({ id: "t2" }), task({ id: "t3", status: "failed" })];
+		const lines = widget(tasks, { maxTasks: 2 });
+		assert.ok(lines.some((line) => line.includes("Task t2")));
+		assert.ok(lines.some((line) => line.includes("Task t3")));
+		assert.ok(!lines.some((line) => line.includes("Task t1")));
+		assert.match(lines.at(-1)!, /1 completed/);
+	});
+
+	it("labels a child whose parent is hidden by the row cap", () => {
+		const lines = widget([task({ id: "t1", status: "completed" }), task({ id: "t2", parentId: "t1" })], { maxTasks: 1 });
+		assert.match(lines[1]!, /Task t2.*#t1/);
 	});
 
 	it("counts the rows it hides instead of hiding them", () => {
@@ -233,7 +257,7 @@ describe("the widget's density", () => {
 
 	it("opens every density with the tally, so contracting never hides the plan's size", () => {
 		for (const density of DENSITIES) {
-			assert.match(widget(busy, { density })[0]!, /6 tasks/, density);
+			assert.match(widget(busy, { density })[0]!, density === "minimal" ? /6 tasks/ : /Todos \(1\/6\)/, density);
 		}
 	});
 
