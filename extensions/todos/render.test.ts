@@ -269,6 +269,7 @@ describe("the widget's density", () => {
 	it("keeps the running task in the one line minimal spends", () => {
 		const lines = widget(busy, {
 			density: "minimal",
+			width: 120,
 			activeIds: new Set(["t2"]),
 			startedAt: new Map([["t2", 1_000]]),
 			now: 43_000,
@@ -279,6 +280,20 @@ describe("the widget's density", () => {
 		assert.ok(lines[0]!.includes("42s"), lines[0]);
 		assert.ok(lines[0]!.includes(SPINNER_FRAMES[0]!), "the row is where the animation lives now");
 		assert.match(lines[0]!, /6 tasks/, "and the counts ride along");
+	});
+
+	it("keeps elapsed time and the tally when a long active title must be clipped", () => {
+		const running = task({ id: "t1", status: "in_progress", activeForm: "A very long task title ".repeat(8) });
+		for (const paint of [plainPaint, themePaint(colouredTheme)]) {
+			const line = widget([running], {
+				density: "minimal", width: 45, paint, activeIds: new Set(["t1"]),
+				startedAt: new Map([["t1", 1_000]]), now: 43_000,
+			})[0]!;
+			assert.match(line, /42s/);
+			assert.match(line, /1 task/);
+			assert.match(line, /1 in progress/);
+			assert.ok(visibleWidth(line) <= 45);
+		}
 	});
 
 	it("is just the tally in minimal when nothing is running", () => {

@@ -785,9 +785,10 @@ Examples: { "id": "t1", "status": "in_progress" } · { "id": "t1", "status": "co
 				const value = DENSITY_CHOICES.find((option) => optionLabel(option, density) === picked)?.value;
 				if (value) {
 					config.widgetDensity = value;
-					// Chosen in the same session as a shortcut press, so it takes effect now;
-					// the next `alt+t` still overrides it for the rest of the session.
-					applyDensityDefault();
+					// An explicit selection applies even when it matches the configured default:
+					// a shortcut may have changed the current widget in the meantime.
+					densityFromConfig = value;
+					widget.setDensity(value);
 				}
 			}
 

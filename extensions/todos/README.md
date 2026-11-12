@@ -28,8 +28,9 @@ And one command: `/todos` (panel), `/todos clear`, `/todos settings`, `/todos wa
 
 A row above the editor while the list is non-empty: the tally, then one line per
 task, up to 12. A task the agent marked `in_progress` gets a spinner and its elapsed
-time, so you can tell "working on it" from "planned, forgotten". Past the cap it says
-`… and N more` rather than growing into a wall.
+time, so you can tell "working on it" from "planned, forgotten". A dim horizontal
+border separates the top of the widget from the surrounding session.
+Past the cap it says `… and N more` rather than growing into a wall.
 
 ### `alt+t` — how many rows the list may take
 
@@ -38,11 +39,14 @@ a wall between you and the output the rest of it. One key cycles three densities
 
 | density | rows | what it keeps |
 |---|---|---|
-| `full` | ≤ 14 | the tally and up to 12 task rows — what a session starts with |
-| `attention` | ≤ 6 | the tally plus whatever is `in_progress`, `blocked` or `failed`, up to 4 of them |
-| `minimal` | 1 | the running task with its spinner and elapsed time, and the tally beside it |
+| `full` | ≤ 15 | the tally and up to 12 task rows — what a session starts with |
+| `attention` | ≤ 7 | the tally plus whatever is `in_progress`, `blocked` or `failed`, up to 4 of them |
+| `minimal` | 2 | the running task with its spinner and elapsed time, and the tally beside it |
 
-Three rules hold in every density: the tally is the first row, so contracting never
+The row counts include the top border in every density. There is no bottom border;
+when the session banner follows the widget, its top border separates them.
+
+Three rules hold in every density: the tally is on the first content row, so contracting never
 hides the size of the plan; what is dropped is counted (`… and 3 more`), never hidden
 silently; and no line is wider than the terminal or contains a newline.
 

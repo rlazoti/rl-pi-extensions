@@ -136,15 +136,19 @@ export class TaskWidget {
 				(tui, theme) => {
 					this.tui = tui;
 					return {
-						render: (width: number) =>
-							widgetLines(store.list(), {
+						render: (width: number) => {
+							const lines = widgetLines(store.list(), {
 								paint: themePaint(theme),
 								width,
 								frame: this.frame,
 								activeIds: this.activeIds,
 								startedAt: this.startedAt,
 								density: this.density,
-							}),
+							});
+							if (lines.length === 0) return [];
+							const bar = theme.fg("dim", "─".repeat(Math.max(0, width)));
+							return [bar, ...lines];
+						},
 						invalidate: () => {},
 					};
 				},

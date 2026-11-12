@@ -28,19 +28,23 @@ function harness() {
 		},
 	} as never;
 	const tui = { requestRender: mock.fn(() => {}) };
+	const colours: Array<{ token: string; text: string }> = [];
 	const theme = {
-		fg: (_token: string, text: string) => text,
+		fg: (token: string, text: string) => { colours.push({ token, text }); return text; },
 		bold: (text: string) => text,
 		strikethrough: (text: string) => text,
 	};
 
-	const rows = (width = 80): string[] => factory?.(tui, theme).render(width) ?? [];
+	const framedRows = (width = 80): string[] => factory?.(tui, theme).render(width) ?? [];
+	const rows = (width = 80): string[] => framedRows(width).slice(1);
 	// Live getters: the assertions read them after the calls have happened.
 	return {
 		store: new TaskStore(),
 		uiCtx,
 		tui,
 		rows,
+		framedRows,
+		colours,
 		calls,
 		get registrations() {
 			return calls.filter((call) => call.key === WIDGET_KEY && call.options !== undefined).length;
@@ -70,6 +74,28 @@ describe("registration", () => {
 
 		assert.equal(h.registrations, 0);
 		assert.deepEqual(h.rows(), []);
+	});
+
+	it("gives every density one full-width dim top rule and no bottom rule", async () => {
+		const h = harness();
+		const widget = new TaskWidget(() => h.store);
+		widget.setUICtx(h.uiCtx);
+		const task = await h.store.create("First");
+		widget.update();
+		for (const density of ["full", "attention", "minimal"] as const) {
+			widget.setDensity(density);
+			for (const width of [20, 80]) {
+				const rows = h.framedRows(width);
+				assert.equal(rows[0], "─".repeat(width));
+				assert.notEqual(rows.at(-1), "─".repeat(width), "no second border below the content");
+				assert.ok(h.colours.some((entry) => entry.token === "dim" && entry.text === "─".repeat(width)));
+				assert.ok(rows.length >= 2);
+			}
+		}
+		await h.store.delete(task.id);
+		assert.deepEqual(h.framedRows(), [], "even a stale registered component must not draw empty borders");
+		widget.update();
+		assert.deepEqual(h.framedRows(), []);
 	});
 
 	it("registers once, then repaints the same row", async () => {

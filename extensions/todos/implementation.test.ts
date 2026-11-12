@@ -156,7 +156,8 @@ function harness(options: Options = {}) {
 			{ requestRender: () => {} },
 			theme,
 		);
-		return component.render(width);
+		// These integration checks inspect task content; the widget tests cover the frame.
+		return component.render(width).slice(1);
 	};
 
 	/** Press a global shortcut the way the editor does. */
@@ -769,6 +770,21 @@ describe("the density shortcut", () => {
 		assert.equal(JSON.parse(readFileSync(join(cwd, ".pi", "tasks-config.json"), "utf-8")).widgetDensity, "minimal");
 		assert.equal(h.widgetRows().length, 1, "chosen in this session, so it takes effect in this session");
 		assert.ok(h.notes.some((note) => note.message.includes('Widget rows are now "minimal"')));
+	});
+
+	it("applies the configured density when explicitly reselected after a shortcut", async () => {
+		const h = harness({
+			cwd: tempDir(),
+			answers: ["Widget rows: full", (list) => list.find((entry) => entry.startsWith("full")), undefined],
+		});
+		await h.fire("session_start", { reason: "new" });
+		await h.runTool("TodoCreate", { tasks: [{ content: "One" }, { content: "Two" }] });
+		await h.press(DENSITY_SHORTCUT);
+		assert.match(h.widgetRows().join(" | "), /nothing needs attention/);
+		await h.commands.get("todos")!.handler("settings" as never, h.ctx as never);
+		assert.equal(h.widgetRows().length, 3, "explicitly choosing full restores both task rows");
+		await h.turn();
+		assert.equal(h.widgetRows().length, 3, "the selection survives config reload");
 	});
 
 	it("starts the next session at the configured density again", async () => {

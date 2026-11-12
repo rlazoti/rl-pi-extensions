@@ -331,7 +331,7 @@ export function widgetLines(tasks: readonly Task[], options: WidgetOptions = {})
 	const density = options.density ?? "full";
 
 	if (density === "minimal") {
-		return [clip(minimalLine(tasks, { ...options, spinner, now, paint }), width)];
+		return [clip(minimalLine(tasks, { ...options, spinner, now, paint, width }), width)];
 	}
 
 	const ordered = orderVisible(tasks, options);
@@ -361,7 +361,7 @@ export function widgetLines(tasks: readonly Task[], options: WidgetOptions = {})
  */
 function minimalLine(
 	tasks: readonly Task[],
-	options: WidgetOptions & { spinner: string; now: number; paint: Paint },
+	options: WidgetOptions & { spinner: string; now: number; paint: Paint; width: number },
 ): string {
 	const paint = options.paint;
 	const summary = summaryLine(tasks, paint);
@@ -370,7 +370,13 @@ function minimalLine(
 	const started = options.startedAt?.get(active.id) ?? options.now;
 	const elapsed = paint("dim", `(${formatDuration(options.now - started)})`);
 	const icon = rowIcon(active, true, options.spinner, paint);
-	return `${icon} ${paintTitle(active, true, paint)} ${elapsed}  ${paint("dim", "·")} ${summary}`;
+	const suffix = ` ${elapsed}  ${paint("dim", "·")} ${summary}`;
+	const titleWidth = options.width - visibleWidth(icon) - 1 - visibleWidth(suffix);
+	if (titleWidth <= 0) {
+		// At very narrow widths even the fixed fields cannot fit. Keep the tally first.
+		return `${summary} ${elapsed} ${icon}`;
+	}
+	return `${icon} ${truncateVisible(paintTitle(active, true, paint), titleWidth)}${suffix}`;
 }
 
 function widgetTaskLine(
