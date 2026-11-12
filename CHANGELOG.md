@@ -13,13 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through three densities — `full` (the tally and up to 12 task rows), `attention`
   (the tally plus whatever is `in_progress`, `blocked` or `failed`, 4 rows at most) and
   `minimal` (one line: the running task with its spinner and elapsed time, and the tally
-  beside it). The tally is the first row of every density and every density counts what
-  it dropped, so contracting never hides the size of the plan; the overflow row names the
-  key. `widgetDensity` in `.pi/tasks-config.json` (or `/todos settings` → `Widget rows`)
+  beside it). The tally stays in the content row in every density; when the list overflows,
+  the overflow row names the key. A dim top border separates the widget from the session
+  above; there is no bottom border to duplicate the session banner's top border.
+  `widgetDensity` in `.pi/tasks-config.json` (or `/todos settings` → `Widget rows`)
   sets where a session starts, `full` by default; the keypress itself is session-local,
   so a config read on a later turn cannot undo it. Contracting also stops the 200 ms
   spinner timer when the density hides the only spinner — the question is answered by the
   same selection the renderer uses, so the two cannot drift.
+
+### Fixed
+
+- **todos: minimal density preserves the useful fields.** A long active task title is
+  truncated before the elapsed time and tally, when the terminal is wide enough to fit
+  them. At narrower widths the tally takes priority. Explicitly selecting a widget
+  density in settings also applies immediately, even when it matches the configured
+  default and `alt+t` has changed the current view.
 
 ## [1.12.0] - 2026-11-11
 
