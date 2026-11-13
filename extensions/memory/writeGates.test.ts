@@ -10,6 +10,7 @@ import {
 	NO_REJECTIONS,
 	boundedBullets,
 	checkDailyWrite,
+	sectionWeights,
 	wordCount,
 	type GateLimits,
 	type GateState,
@@ -125,6 +126,52 @@ describe("character gate", () => {
 		const after = daily(["a"]) + filler(50_000);
 		const r = checkDailyWrite(daily([]), after, { ...LIMITS, dailyContextMaxChars: 0 }, NO_REJECTIONS);
 		expect(r.decision.action).toBe("accept");
+	});
+});
+
+describe("a refusal carries its own fix", () => {
+	// The 2026-11-13 bank audit counted 3 refusals over 131 real prompts and not one accepted
+	// write after them: a message that names the limit but not the route just loses the entry.
+	const messageFor = (before: string, after: string) =>
+		(checkDailyWrite(before, after, LIMITS, NO_REJECTIONS).decision as { message: string }).message;
+
+	it("names how far over, states that nothing landed, and gives the detail somewhere to go", () => {
+		const message = messageFor(daily(["short"]), daily(["short", words(LIMITS.completedWords + 2)]));
+		expect(message).toContain(`(2 over)`);
+		expect(message).toContain("at or under the limit");
+		expect(message).toContain("Nothing was written");
+		expect(message).toContain("still holds its previous text");
+		expect(message).toContain("knowledge/<name>.md");
+	});
+
+	it("lists every violating bullet, not only the first", () => {
+		const message = messageFor(
+			daily(["short"]),
+			daily(["short"], [words(LIMITS.keyDecisionsWords + 3), words(LIMITS.keyDecisionsWords + 9)]),
+		);
+		expect(message).toContain(`> ${LIMITS.keyDecisionsWords} (3 over)`);
+		expect(message).toContain(`> ${LIMITS.keyDecisionsWords} (9 over)`);
+	});
+
+	it("on a character refusal, names the heaviest section so the trim is not guesswork", () => {
+		const message = messageFor(daily([]), daily(["a"]) + "x".repeat(LIMITS.dailyContextMaxChars));
+		expect(message).toMatch(/Key Decisions [\d,]+ chars/);
+		expect(message).toContain("only copy of today");
+		expect(message).toContain("knowledge/memory-bank-maintenance.md");
+	});
+});
+
+describe("sectionWeights", () => {
+	it("sizes every section, biggest first, and counts text above the first heading", () => {
+		const text = ["intro line", "", "## Small", "- a", "", "## Big", "- one two three"].join("\n");
+		const w = sectionWeights(text);
+		expect(w.map((s) => s.name)).toEqual(["Big", "Small", "(before the first heading)"]);
+		// Every line is sized as if newline-terminated, so the parts add up to the file plus one.
+		expect(w.reduce((n, s) => n + s.chars, 0)).toBe(text.length + 1);
+	});
+
+	it("has nothing to report for an empty file", () => {
+		expect(sectionWeights("")).toEqual([]);
 	});
 });
 

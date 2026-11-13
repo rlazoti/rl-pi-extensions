@@ -26,6 +26,14 @@
  *
  * A write that breaks both gates is accepted only once BOTH allowances are used. Letting
  * one gate's spent allowance accept the write would let it hide the other's refusal.
+ *
+ * A refusal has to carry its own fix. Measured over 131 real prompts (2026-11-13 audit):
+ * three refusals, and not one of them was followed by an accepted write — the refused
+ * bullets were simply lost, because the message named the problem and left the route out.
+ * So every refusal says what state the file is in now (nothing landed, so the other
+ * bullets did not either), the exact target (words, limit, how far over), and where
+ * detail goes instead (a knowledge note, ungated, with a pointer left here). The escape
+ * valve still bounds a gate that cannot be met: 2 refusals, then accept with a warning.
  */
 import { MAX_CORE_FILE_BUDGET_CHARS } from "./caps.js";
 
@@ -70,6 +78,11 @@ export interface Bullet {
 
 const BOUNDED_SECTIONS = new Set(["Completed", "Key Decisions"]);
 
+/** What a refusal leaves behind, stated once so both gates' messages carry it. */
+const DAILY_CONTEXT_STATE =
+	"core/dailyContext.md still holds its previous text, so the entries this write also carried " +
+	"are nowhere: resubmit the whole file, with every entry it was to add either shortened or moved to a note.";
+
 /** Words in one bullet, not counting its `-` or `*` marker. */
 export function wordCount(text: string): number {
 	return text.replace(/^\s*[-*]\s+/, "").split(/\s+/).filter(Boolean).length;
@@ -113,13 +126,43 @@ function addedBullets(before: string, after: string): Bullet[] {
 
 const preview = (text: string): string => (text.length > 70 ? `${text.slice(0, 69)}…` : text);
 
+/**
+ * What a file's sections cost, biggest first — so a character refusal can name where the
+ * weight is instead of telling the reader to guess which of eight sections to trim.
+ */
+export function sectionWeights(text: string): Array<{ name: string; chars: number }> {
+	if (!text) return [];
+	const out: Array<{ name: string; chars: number }> = [];
+	let current: { name: string; chars: number } | null = null;
+	for (const line of text.split("\n")) {
+		const heading = line.match(/^#{2,3}\s+(.+?)\s*$/);
+		if (heading) {
+			if (current) out.push(current);
+			current = { name: heading[1], chars: line.length + 1 };
+			continue;
+		}
+		// Text above the first heading has no section to blame; give it one so the numbers add up.
+		if (!current) current = { name: "(before the first heading)", chars: 0 };
+		current.chars += line.length + 1;
+	}
+	if (current) out.push(current);
+	return out.filter((s) => s.chars > 0).sort((a, b) => b.chars - a.chars);
+}
+
+/** Where the detail goes when a bullet does not fit: a note, plus a pointer short enough to pass. */
+const DETAIL_ROUTE =
+	"Or keep the detail off the injected file: memory_update a knowledge/<name>.md note (the word gate " +
+	"does not watch it) and leave a one-line pointer here, under the limit.";
+
 function wordViolations(before: string, after: string, limits: GateLimits): string[] {
 	const lines: string[] = [];
 	for (const b of addedBullets(before, after)) {
 		const limit = b.section === "Completed" ? limits.completedWords : limits.keyDecisionsWords;
 		if (limit <= 0) continue;
 		const n = wordCount(b.text);
-		if (n > limit) lines.push(`  [${b.section}: ${n} words > ${limit}] - ${preview(b.text)}`);
+		if (n > limit) {
+			lines.push(`  [${b.section}: ${n} words > ${limit} (${n - limit} over)] - ${preview(b.text)}`);
+		}
 	}
 	return lines;
 }
@@ -139,8 +182,11 @@ function charViolation(before: string, after: string, limits: GateLimits): CharV
 			`core/dailyContext.md would be ${after.length.toLocaleString()} characters, ` +
 			`${(after.length - cap).toLocaleString()} over the ${cap.toLocaleString()}-character cap`,
 		advice:
-			"The whole file is injected on every turn, so every character is a recurring cost. " +
-			"Trim or archive the oldest entries and resubmit. A write that does not grow the file always passes.",
+			"The whole file is injected on every turn, so every character is a recurring cost. A write that " +
+			"does not grow the file always passes, so trimming it is never blocked. The heaviest sections are " +
+			`${sectionWeights(after).slice(0, 3).map((s) => `${s.name} ${s.chars.toLocaleString()} chars`).join(", ")}. ` +
+			"The live daily file is the only copy of today until rollover archives it, so move old entries to " +
+			"a knowledge note (memory_update, no cap) before cutting them — rules in knowledge/memory-bank-maintenance.md.",
 	};
 }
 
@@ -166,7 +212,8 @@ export function checkDailyWrite(before: string, after: string, limits: GateLimit
 		const parts: string[] = [];
 		if (fired.words) {
 			parts.push(
-				`dailyContext entries have word limits${tag(counters?.words ?? 0)}. Shorten and resubmit:\n${words.join("\n")}\nCut each to the single outcome.`,
+				`dailyContext entries have word limits${tag(counters?.words ?? 0)}. Shorten each one and resubmit:\n${words.join("\n")}\n` +
+				`Cut each entry to its single outcome, at or under the limit it names. ${DETAIL_ROUTE}`,
 			);
 		}
 		if (chars) parts.push(`${chars.summary}${tag(counters?.chars ?? 0)}. ${chars.advice}`);
@@ -194,7 +241,10 @@ export function checkDailyWrite(before: string, after: string, limits: GateLimit
 		decision: {
 			action: "reject",
 			message:
-				`Rejected: ${detail(next)}\n` +
+				// Say what state the file is in: a refused write lands nothing, so the entries in it
+				// that were fine did not go in either. Without this line a reader can resubmit only the
+				// offending bullet and silently lose the rest.
+				`Rejected: ${detail(next)}\nNothing was written — ${DAILY_CONTEXT_STATE}\n` +
 				`After ${GATE_MAX_REJECTIONS} rejections in a row for the same limit, the next write is accepted with a warning.`,
 		},
 		state: next,

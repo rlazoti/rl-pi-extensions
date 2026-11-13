@@ -1027,6 +1027,18 @@ describe("a record too big to send (docs/rl-port-plan.md §3.5)", () => {
 	afterAll(() => {
 		for (const [f, text] of stash) fs.writeFileSync(path.join(KDIR, f), text);
 	});
+	it("writes its log inside the bank the process was given, never the operator's", () => {
+		// bank.ts binds MEMORY_ROOT at import time, so a suite that reached the default bank
+		// would append into the operator's month and, as of the pre-isolation run on 2026-11-08,
+		// destroyed one: a setup that wrote the file truncated the real month to three fixture
+		// lines. The directory is the thing being pinned, so it is checked with a fixed date too.
+		const dir = path.dirname(logFilePath());
+		expect(dir).toBe(path.join(path.resolve(BANK), "logs"));
+		expect(path.dirname(logFilePath(new Date(Date.UTC(2026, 0, 1))))).toBe(dir);
+		expect(dir).not.toBe(path.join(os.homedir(), ".pi", "memory3", "logs"));
+		expect(process.env.PI_MEMORY_DIR).toBeTruthy();
+	});
+
 	// The newest inject line, since other suites write to the same month file.
 	const lastInject = () => {
 		const lines = fs.existsSync(logFilePath())
@@ -2685,7 +2697,35 @@ describe("write gates on core/dailyContext.md", () => {
 	it("checks Key Decisions against its own, smaller limit", async () => {
 		const result = await append(words(26), "Key Decisions");
 		expect(result.isError).toBe(true);
-		expect(result.content[0].text).toContain("[Key Decisions: 26 words > 25]");
+		expect(result.content[0].text).toContain("[Key Decisions: 26 words > 25 (1 over)]");
+	});
+
+	it("a refusal carries the fix, and the shortened resubmit lands", async () => {
+		const before = read(DAILY);
+		const refused = await append(words(31));
+		expect(refused.isError).toBe(true);
+		// The 2026-11-13 audit found three refusals and not one accepted write after any of
+		// them: the message named the limit but not the way out, so the entry was just lost.
+		const text = refused.content[0].text;
+		expect(text).toContain("31 words > 30 (1 over)");
+		expect(text).toContain("Nothing was written");
+		expect(text).toContain("knowledge/<name>.md");
+		expect(read(DAILY)).toBe(before);
+		// Same entry, one step shorter: the refusal was actionable, so the write lands.
+		const fixed = await append(`- ${words(29)}`);
+		expect(fixed.isError).toBe(false);
+		expect(read(DAILY)).toContain("w28");
+		expect(read(DAILY)).not.toContain("w30");
+	});
+
+	it("refuses the whole write, so a fine bullet sharing it is nowhere either", async () => {
+		const before = read(DAILY);
+		const refused = await update(dailyText(`- brief entry\n- ${words(31)}\n`));
+		expect(refused.isError).toBe(true);
+		expect(read(DAILY)).toBe(before);
+		expect(refused.content[0].text).toContain("the entries this write also carried are nowhere");
+		expect((await update(dailyText("- brief entry\n"))).isError).toBe(false);
+		expect(read(DAILY)).toContain("brief entry");
 	});
 
 	it("memory_update is gated too, and judges only the bullets it adds", async () => {
