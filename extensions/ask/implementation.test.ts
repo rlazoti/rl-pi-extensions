@@ -65,6 +65,24 @@ test("registered ask submits a selected answer and balances Herdr events", async
 	assert.equal(h.events.filter(e => e.name === "notify:send").length, 1);
 });
 
+test("structured labels default to values and explicit values stay intact", async () => {
+	const h = harness([" ", "j", " ", "\t", "\r"]);
+	const result = await h.tool.execute("id", { questions: { ...question, multi: true, options: [
+		{ label: "Safe", recommended: true }, { label: "Fast", value: "fast" },
+	] } }, undefined, undefined, h.ctx);
+	assert.deepEqual(JSON.parse(result.content[0].text).answers.q, [
+		{ label: "Safe", value: "Safe" }, { label: "Fast", value: "fast" },
+	]);
+});
+
+test("duplicate effective values fail before notifying or opening the panel", async () => {
+	const h = harness();
+	for (const options of [["A", { label: "A" }], [{ label: "A", value: "" }, { label: "B", value: "" }]]) {
+		await assert.rejects(h.tool.execute("id", { questions: { ...question, options } }, undefined, undefined, h.ctx), /question "q".*options 1 and 2.*distinct/i);
+	}
+	assert.deepEqual(h.events, []);
+});
+
 test("tabbed UI preserves multiple selections, notes, custom input, and skipped questions", async () => {
 	const h = harness([" ", "j", " ", "\r", "note", "\r", "j", "\r", "custom", "\r", "\t", "s", "\r"]);
 	const questions = [

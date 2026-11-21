@@ -28,6 +28,28 @@ const turn = (over: Partial<TurnSnapshot> = {}): TurnSnapshot => ({
 	...over,
 });
 
+describe("printed tool-call recovery", () => {
+	const raw = "<tool_call>\n<function=read>\n<parameter=path>\nfixture.txt\n</parameter>\n</function>\n</tool_call>";
+	const answer = (text: string) => turn({ content: [{ type: "text", text }] });
+	it("retries a bare complete envelope once on the cut-off budget", () => {
+		const verdict = decide(answer(raw), S(), CFG);
+		assert.equal(verdict.code, "printed-tool-call");
+		assert.equal(verdict.action, "retry");
+		assert.equal(verdict.tier, "truncation");
+		assert.equal(decide(answer(raw), S(0, 1), CFG).action, "give-up");
+	});
+	it("does not retry examples or incomplete envelopes", () => {
+		for (const text of ["Example:\n" + raw, "```xml\n" + raw + "\n```", "> " + raw, raw + "\nThis is an example.", raw.replace("</parameter>", "")]) {
+			assert.equal(decide(answer(text), S(), CFG).action, "none");
+		}
+	});
+	it("does not retry a tool call, abort, error, or length stop", () => {
+		for (const patch of [{ stopReason: "length" }, { outcome: "aborted" }, { outcome: "error" }, { content: [{ type: "text", text: raw }, { type: "toolCall" }] }] as Partial<TurnSnapshot>[]) {
+			assert.equal(decide({ ...answer(raw), ...patch }, S(), CFG).action, "none");
+		}
+	});
+});
+
 describe("visible text and tool calls", () => {
 	it("counts no text in a thinking-only message", () => {
 		assert.equal(visibleTextLength([{ type: "thinking", thinking: "a lot of thought" }]), 0);

@@ -2,7 +2,7 @@
 
 Retry a model turn that ended without finishing.
 
-Two shapes, from the same checkpoint. A reasoning model can finish its thinking
+A reasoning model can finish its thinking
 block and emit end-of-turn before writing anything: the provider reports
 reasoning plus `finish_reason: stop` with no content, Pi records a thinking-only
 assistant message, the loop has nothing to execute, and the session waits for a
@@ -14,8 +14,9 @@ the same model, the same session, the other half of the incidents.
 | empty | reasoning, `stop`, no text, no tool call | 2 per streak | "answer or call a tool" |
 | cut off | text, `stop`, no tool call, ending inside unclosed markup | 1 per streak | "continue from where it stopped, and never write the delimiter tags literally" |
 
-Both ask through the settle boundary, both ask with reasoning off by default,
-and both leave your thinking level back where you had it.
+A third signal shares the cut-off budget: a `stop` response with no real tool call whose entire visible text is one complete, bare Hermes tool-call envelope. All six historical cases in the November 21 audit had that shape. Prose, quoted examples, fenced markup, and incomplete envelopes do not qualify for this signal. The guard never runs the printed payload; it adds a nudge to make a real tool call if needed. `PI_SETTLE_GUARD_TRUNC=0` disables both cut-off and printed-call retries.
+
+Retries use the settle boundary and run with reasoning off by default, then restore your thinking level.
 
 ## Enable
 
@@ -26,7 +27,7 @@ and both leave your thinking level back where you had it.
 | `PI_SETTLE_GUARD` | on | `off` (or `0`, `false`) makes the extension inert. Not in the transcript: the model is not the one who decides whether the guard runs. |
 | `PI_SETTLE_GUARD_RETRIES` | `2` | Empty turns retried per streak, clamped to 0-5. `0` disables retrying without uninstalling. |
 | `PI_SETTLE_GUARD_THINKING` | `off` | `off` asks the retry with reasoning disabled; `keep` retries at your level. |
-| `PI_SETTLE_GUARD_TRUNC` | `1` | Retries per streak for a turn that looks cut off. `0` or `off` leaves truncations to the human. |
+| `PI_SETTLE_GUARD_TRUNC` | `1` | Shared retries per streak for cut-off text and bare printed tool calls. `0` or `off` leaves both to the human. |
 | `PI_SETTLE_GUARD_DIR` | `~/.pi/settle-guard` | Log location. `off` or `none` switches logging off; a relative path is refused rather than guessed, since it would mean a different log per directory. Logging stops at 256 KB and `/settle-guard` says so. |
 
 `/settle-guard` prints mode, streak, what it caught this session, and the log path.

@@ -14,7 +14,7 @@ Unified multi-question interface for gathering user input with single-select, mu
 - **Single or multiple questions** — pass one question or an array for tabbed interface
 - **Multi-select** (default) — checkboxes, toggle multiple with Space
 - **Single-select** — radio buttons, Space picks one and deselects previous (`multi: false`)
-- **Structured options** — `{ label, value, description?, recommended? }`
+- **Structured options** — `{ label, value?, description?, recommended? }`. Omit `value` to return the label. Values must be distinct within each question, including values inferred from strings and labels.
 - **Recommended badge** — ★ marker on recommended options, pre-focused
 - **Descriptions** — tooltip-style, shown only when option is focused
 - **Notes** — press Enter on an option to attach a note; it is included in the answer

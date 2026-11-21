@@ -22,7 +22,7 @@ export default function askExtension(pi: ExtensionAPI) {
 
 	const OptionDataSchema = Type.Object({
 		label: Type.String({ description: "Display label" }),
-		value: Type.String({ description: "Value returned in result" }),
+		value: Type.Optional(Type.String({ description: "Value returned in result; defaults to the label" })),
 		description: Type.Optional(Type.String({ description: "Shown when option is focused" })),
 		recommended: Type.Optional(Type.Boolean({ description: "Show ★ badge and pre-focus" })),
 	});
@@ -39,7 +39,7 @@ export default function askExtension(pi: ExtensionAPI) {
 		),
 		options: Type.Optional(
 			Type.Array(Type.Union([Type.String(), OptionDataSchema]), {
-				description: "Predefined choices. Strings are shorthand for { label, value }.",
+				description: "Predefined choices. A string sets both label and value. Object values default to their labels; values must be distinct within each question.",
 			}),
 		),
 	});
@@ -55,7 +55,7 @@ export default function askExtension(pi: ExtensionAPI) {
 			"Use ask for questions with predefined options — the user can select multiple or write custom answers.",
 			"Pass a single question object or an array of questions for a tabbed interface. Each question needs a short 'label' for the tab.",
 			"For each question with options, decide: should the user pick ONE answer (multi: false) or MULTIPLE (default)? Use single-select for mutually exclusive choices.",
-			"Options can be strings or objects with { label, value, description?, recommended? }.",
+			"Options can be strings or objects with { label, value?, description?, recommended? }. Omit value to use the label; values must be distinct within each question.",
 			"Users navigate tabs with Tab/h/l, options with j/k, toggle with Space, skip question with 's', submit with Enter.",
 			"Answers may carry a `note` — the user's own words about that choice — and the result may carry `note` (applies to every question) or `questionNotes` keyed by question id. Treat notes as constraints from the user, not as another option to weigh.",
 			"All text fields (question, label, context, option labels/descriptions) must be plain text — no markdown, no formatting.",

@@ -262,8 +262,12 @@ export const CUTOFF_NUDGE =
 	+ "Never write the reasoning delimiter tags literally, including inside code spans or file paths: "
 	+ "name them in words instead.";
 
-/** The nudge for a verdict's tier. */
-export function nudgeFor(tier: RetryTier): string {
+export const PRINTED_CALL_NUDGE =
+	"Your previous answer printed a tool call as text; nothing was executed. Continue the user's task using a real, available tool call if needed, or answer directly. Do not reproduce the printed markup.";
+
+/** The nudge for a verdict's tier and specific failure, when known. */
+export function nudgeFor(tier: RetryTier, code?: GuardCode): string {
+	if (code === "printed-tool-call") return PRINTED_CALL_NUDGE;
 	return tier === "truncation" ? CUTOFF_NUDGE : RETRY_NUDGE;
 }
 
@@ -389,7 +393,7 @@ export default function settleGuard(pi: ExtensionAPI): void {
 				try {
 					ctx.ui.notify(
 						cutOff
-							? `settle-guard: ${who} was cut off mid-answer again. Stopped retrying — press continue, and it will keep happening until reasoning is off.`
+							? `settle-guard: ${who} did not complete a visible answer (${verdict.reason}). Stopped retrying — review the response before continuing.`
 							: `settle-guard: ${who} ended ${verdict.attempts + 1} turns in a row without an answer. Stopped retrying — press continue, or lower the thinking level.`,
 						"warning",
 					);
@@ -429,7 +433,7 @@ export default function settleGuard(pi: ExtensionAPI): void {
 			});
 			try {
 				ctx.ui.notify(
-					`settle-guard: ${who} ${cutOff ? "was cut off mid-answer" : "gave an empty turn"} (${verdict.reason}), retrying (${guard.streak[countKey]}/${limit}).`,
+					`settle-guard: ${who} ${verdict.code === "printed-tool-call" ? "printed a tool call as text" : cutOff ? "was cut off mid-answer" : "gave an empty turn"} (${verdict.reason}), retrying (${guard.streak[countKey]}/${limit}).`,
 					"info",
 				);
 			} catch {
@@ -441,8 +445,9 @@ export default function settleGuard(pi: ExtensionAPI): void {
 				// ask without one. Hidden, so it does not clutter the transcript.
 				entries: [{
 					type: "custom_message",
-					customType: cutOff ? "settle-guard/retry-cutoff" : "settle-guard/retry",
-					content: nudgeFor(verdict.tier),
+					customType: verdict.code === "printed-tool-call" ? "settle-guard/retry-printed-tool-call"
+						: cutOff ? "settle-guard/retry-cutoff" : "settle-guard/retry",
+					content: nudgeFor(verdict.tier, verdict.code),
 					display: false,
 				}],
 				continue: true,

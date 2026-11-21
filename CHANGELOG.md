@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **ask:** Structured options can omit `value` to return the label. Duplicate effective values are rejected before the panel opens.
+- **settle-guard:** Retry a response consisting only of a complete, bare Hermes tool-call envelope using the existing cut-off retry budget. The printed payload is never executed by the guard.
+- **snippets:** Match Pi 1.6's readonly text-rendering return type without changing rendering behavior.
+
 ## [1.13.0] - 2026-11-11
 
 ### Added

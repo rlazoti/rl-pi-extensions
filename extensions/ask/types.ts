@@ -41,9 +41,20 @@ export interface AskResult {
 
 import type { AskConfig } from "./config.js";
 
-export function normalizeOptions(raw?: (string | OptionData)[]): OptionData[] | undefined {
+type RawOption = string | (Omit<OptionData, "value"> & { value?: string });
+
+export function normalizeOptions(raw: RawOption[] | undefined, questionId = "(unspecified)"): OptionData[] | undefined {
 	if (!raw || raw.length === 0) return undefined;
-	return raw.map(o => typeof o === "string" ? { label: o, value: o } : o);
+	const seen = new Map<string, number>();
+	return raw.map((o, index) => {
+		const option = typeof o === "string" ? { label: o, value: o } : { ...o, value: o.value ?? o.label };
+		const first = seen.get(option.value);
+		if (first !== undefined) {
+			throw new Error(`Question ${JSON.stringify(questionId)}: options ${first + 1} and ${index + 1} share a value. Give them distinct explicit values or distinct labels when omitting values.`);
+		}
+		seen.set(option.value, index);
+		return option;
+	});
 }
 
 export function normalizeQuestion(raw: any, config: AskConfig): QuestionData {
@@ -52,7 +63,7 @@ export function normalizeQuestion(raw: any, config: AskConfig): QuestionData {
 		question: raw.question,
 		label: raw.label,
 		context: raw.context,
-		options: normalizeOptions(raw.options),
+		options: normalizeOptions(raw.options, raw.id),
 	};
 	if (raw.multi === false && config.enableSingleSelect) {
 		q.multi = false;

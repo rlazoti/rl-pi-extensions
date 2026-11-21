@@ -37,7 +37,7 @@ interface FieldEditorEntry {
 const BROWSE_FOCUS: readonly BrowseFocus[] = ["search", "list", "preview"];
 const PICKER_HEIGHT_PERCENT = 70;
 
-function renderText(text: string, width: number): string[] {
+function renderText(text: string, width: number): readonly string[] {
 	return new Text(text.length === 0 ? "(empty)" : text, 0, 0).render(Math.max(1, width));
 }
 

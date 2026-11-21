@@ -59,6 +59,7 @@ export type GuardCode =
 	| "empty-content"
 	| "refusal"
 	| "truncated-text"
+	| "printed-tool-call"
 	| "progress"
 	| "stop-reason"
 	| "aborted"
@@ -193,6 +194,25 @@ export function looksCutOff(text: string): CutOffSignal | null {
 	return null;
 }
 
+/** Only a complete, bare Hermes-style envelope. Never parse or execute its arguments. */
+export function looksLikePrintedToolCall(text: string): boolean {
+	const body = text.trim();
+	if (body.length > 16_384) return false;
+	const envelope = /^<tool_call>\s*<function=[\w.-]+>([\s\S]*?)<\/function>\s*<\/tool_call>$/.exec(body);
+	if (!envelope) return false;
+	let rest = envelope[1].trim();
+	let count = 0;
+	while (rest) {
+		const start = /^<parameter=[\w.-]+>/.exec(rest);
+		if (!start) return false;
+		const end = rest.indexOf("</parameter>", start[0].length);
+		if (end < 0 || /<\/?(?:tool_call|function|parameter)\b/.test(rest.slice(start[0].length, end))) return false;
+		count += 1;
+		rest = rest.slice(end + "</parameter>".length).trimStart();
+	}
+	return count > 0;
+}
+
 const CUT_OFF_WHY: Record<CutOffSignal, string> = {
 	"span-opener": "ended with an unclosed code span, mid-sentence",
 	"unclosed-span": "ended inside an unclosed code span",
@@ -221,8 +241,10 @@ export function decide(turn: TurnSnapshot, streak: Streak, config: GuardConfig):
 
 	const text = visibleTextLength(turn.content);
 	const refused = isRefusalMarker(turn.content);
-	const cutOff = text > 0 && !refused ? looksCutOff(joinedText(turn.content)) : null;
-	if (text > 0 && !refused && !cutOff) {
+	const body = text > 0 && !refused ? joinedText(turn.content) : "";
+	const printed = looksLikePrintedToolCall(body);
+	const cutOff = !printed ? looksCutOff(body) : null;
+	if (text > 0 && !refused && !cutOff && !printed) {
 		return none(true, `the turn produced ${text} characters of answer`, "progress");
 	}
 
@@ -230,7 +252,7 @@ export function decide(turn: TurnSnapshot, streak: Streak, config: GuardConfig):
 		return none(false, `stop reason is ${turn.stopReason ?? "missing"}, not a silent stop`, "stop-reason");
 	}
 
-	// From here the turn is one of the two shapes, and only the tier differs.
+	// Printed calls share the cut-off budget; switching shapes never grants another retry.
 	const thought = thinkingLength(turn.content);
 	const tier: RetryTier = refused ? "empty" : text === 0 ? "empty" : "truncation";
 	const used = tier === "truncation" ? streak.truncations : streak.empties;
@@ -243,15 +265,17 @@ export function decide(turn: TurnSnapshot, streak: Streak, config: GuardConfig):
 			tier: "none",
 			progress: false,
 			attempts: 0,
-			reason: cutOff ? "cut-off retries are switched off" : "empty-turn retries are switched off",
+			reason: tier === "truncation" ? "cut-off retries are switched off" : "empty-turn retries are switched off",
 			code: "disabled",
 		};
 	}
 	const code: GuardCode = refused
 		? "refusal"
-		: text === 0 ? (thought > 0 ? "reasoned-empty" : "empty-content") : "truncated-text";
+		: text === 0 ? (thought > 0 ? "reasoned-empty" : "empty-content")
+		: printed ? "printed-tool-call" : "truncated-text";
 	const shape = refused
 		? "answered only a refusal or filter marker"
+		: printed ? "printed a tool call instead of making one"
 		: text === 0
 			? thought > 0 ? `reasoned for ${thought} characters and answered nothing` : "produced no text and no tool call"
 			: `answered ${text} characters and ${CUT_OFF_WHY[cutOff as CutOffSignal]}`;
