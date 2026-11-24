@@ -115,12 +115,12 @@ function makeExt(srcDir: string, name: string): string {
 
 // --- Registry & path derivation ---
 
-test("getAvailableExtensions returns the 13 managed extensions under the given root", () => {
+test("getAvailableExtensions returns the 14 managed extensions under the given root", () => {
 	const exts = getAvailableExtensions("/fake/path");
-	assert.equal(exts.length, 13);
+	assert.equal(exts.length, 14);
 	assert.deepEqual(
 		exts.map((e) => e.name),
-		["tmux-feedback", "session-banner", "session-attention", "snippets", "emacs-feedback", "memory", "co-authored-by-ai", "scan-guard", "settle-guard", "context-viewer", "todos", "ask", "catchup"],
+		["tmux-feedback", "session-banner", "session-attention", "snippets", "emacs-feedback", "memory", "co-authored-by-ai", "scan-guard", "settle-guard", "context-viewer", "todos", "ask", "command-watchdog", "catchup"],
 	);
 	assert.equal(exts[0].description, "Inline feedback for tmux scrollback selection");
 	assert.equal(exts[1].description, "Colored banner + auto-naming for Pi sessions");
@@ -150,6 +150,7 @@ test("getAvailableExtensions returns the 13 managed extensions under the given r
 	// it is visible above the editor without having to ask for it.
 	assert.match(exts[10].description, /task list/i);
 	assert.match(exts[10].description, /above the editor/);
+	assert.match(exts[12].description, /timeout when omitted/);
 });
 
 test("getMonorepoRoot resolves to the directory containing extensions/symlink-manager.ts", () => {

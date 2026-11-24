@@ -179,6 +179,12 @@ export function getAvailableExtensions(monorepoRoot: string): ExtensionDescripto
 			path: join(monorepoRoot, "extensions", "ask"),
 		},
 		{
+			name: "command-watchdog",
+			label: "command-watchdog",
+			description: "Warn about long-running Bash calls and supply a five-minute timeout when omitted",
+			path: join(monorepoRoot, "extensions", "command-watchdog"),
+		},
+		{
 			name: "catchup",
 			label: "catchup",
 			description: "Show local commits since a Pi session's Git checkpoint, with file overlaps first",

@@ -18,6 +18,7 @@ Personal Pi coding agent extensions, managed as a single package with a TUI for 
 | **settle-guard** | Asks again when a model turn ends with reasoning and no answer, which is what makes a session stop mid-run and wait for a keystroke. The retry goes out with reasoning off — 8 of 9 replays with it, 0 of 3 without. Two per streak, then it stops and says so |
 | **todos** | A task list the agent keeps and you can see: `TodoCreate`/`TodoList`/`TodoGet`/`TodoUpdate`, the open work re-injected every turn, a live row above the editor with a spinner and elapsed time that `alt+t` contracts to the work that needs attention or to a single line, `/todos` to move tasks by hand, and one ask when file edits start with no plan. Per-session file by default; finished work clears itself 4 turns after it lands |
 | **context-viewer** | `/context`: browse the context window — the measured token total split by category (system prompt, tool schemas, tool calls and results, thinking, messages), the system prompt as the model got it, every tool's parameters, every message, and a raw JSON view. Costs per category are estimated and scaled to the measured total, and the panel says which is which |
+| **[command-watchdog](extensions/command-watchdog/README.md)** | Warns after a minute and gives agent Bash calls a five-minute default deadline. Explicit timeouts and human shell commands are unchanged |
 | **[catchup](extensions/catchup/README.md)** | `/catchup`: see which local commits since your session's Git checkpoint touch files you were working on |
 
 ## Usage

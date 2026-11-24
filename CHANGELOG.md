@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **catchup:** An opt-in `/catchup` command that shows local commits since a Pi session's saved Git checkpoint, with overlapping files first.
 
+- **command-watchdog:** An opt-in extension that warns about pending Bash calls and supplies a five-minute default timeout without aborting the turn.
+
 ### Fixed
 
 - **ask:** Structured options can omit `value` to return the label. Duplicate effective values are rejected before the panel opens.
