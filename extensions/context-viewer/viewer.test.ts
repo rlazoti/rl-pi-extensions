@@ -250,6 +250,14 @@ describe("tabs", () => {
 		assert.match(h.text(), /\[ Tab3 \]/);
 	});
 
+	it("keeps the selected Changes tab visible on a narrow terminal", () => {
+		const named = ["Overview", "System", "Tools", "Messages", "Raw", "Changes"];
+		const h = harness(named.map((name) => ({ name, lines: ["body"] })), { initialTab: 5, cols: 36 });
+		assert.match(h.text(), /\[ Changes \]/);
+		h.press(KEYS.tab);
+		assert.match(h.text(), /\[ Overview \]/);
+	});
+
 	it("marks the active tab and drops the search when the tab changes", () => {
 		const h = harness(tabs());
 		h.press("/");

@@ -29,7 +29,7 @@
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey, truncateToWidth, type TUI } from "@earendil-works/pi-tui";
+import { Key, matchesKey, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import { fit, frameLines, fillRows } from "../panel.js";
 import { breakLine, findMatches, screenLines } from "./text.js";
 
@@ -374,7 +374,9 @@ export class ContextViewer {
 				? this.theme.fg("accent", `[ ${tab.name} ]`)
 				: this.theme.fg("dim", `  ${tab.name}  `),
 		);
-		return fit(parts.join(""), width);
+		let first = 0;
+		while (first < this.activeTab && visibleWidth(parts.slice(first, this.activeTab + 1).join("")) > width) first++;
+		return fit(parts.slice(first).join(""), width);
 	}
 
 	private renderContentLine(line: string, isMatch: boolean, width: number): string {

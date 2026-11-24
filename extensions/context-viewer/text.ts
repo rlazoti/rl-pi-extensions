@@ -12,6 +12,7 @@
  *   total comes from the provider and the Stats tab prints which is which.
  */
 
+import type { RequestChanges } from "./changes.js";
 import { CATEGORIES, estimateMessage, type ContextBudget, type ContextMessage } from "./tokens.js";
 
 /** 940 / 1.2k / 42.3k / 1.5M — narrow enough for a table column. */
@@ -66,6 +67,46 @@ function oneLine(text: unknown): string {
 		.join(" ")
 		.replace(/\s+/g, " ")
 		.trim();
+}
+
+export function renderChanges(changes?: RequestChanges): { hint: string; lines: string[] } {
+	if (!changes || "unavailable" in changes) {
+		return {
+			hint: "No request comparison available",
+			lines: screenLines(changes?.unavailable ?? "Recorded request history is unavailable."),
+		};
+	}
+
+	const { previous, latest, loadout, compactionsBetween, compactionsAfter } = changes;
+	const describe = ({ id, timestamp, outcome }: typeof previous) =>
+		oneLine(`#${id} · ${timestamp}${outcome ? ` (${outcome})` : ""}`);
+	const lines = [
+		"Recorded loadout at the last two assistant responses on this branch",
+		`Previous  ${describe(previous)}`,
+		`Latest    ${describe(latest)}`,
+		"",
+	];
+	const hint: string[] = [];
+	if (loadout) {
+		const promptCount = loadout.sections.length + Number(loadout.promptTextChanged);
+		const toolCount = loadout.tools.length;
+		hint.push(`${promptCount} prompt change${promptCount === 1 ? "" : "s"}`, `${toolCount} tool change${toolCount === 1 ? "" : "s"}`);
+		lines.push("System prompt");
+		if (promptCount === 0) lines.push("  No recorded changes");
+		if (loadout.promptTextChanged) lines.push("  Changed  Unsectioned instructions");
+		for (const { name, kind } of loadout.sections) lines.push(`  ${kind}  ${oneLine(name)}`);
+		lines.push("", "Tool declarations");
+		if (toolCount === 0) lines.push("  No recorded changes");
+		for (const { name, kind } of loadout.tools) lines.push(`  ${kind}  ${oneLine(name)}`);
+	} else {
+		hint.push("No recorded loadout baseline");
+		lines.push("Pi did not record a system prompt and tool loadout for both responses.");
+	}
+	hint.push(compactionsBetween === 0 ? "no compaction between responses"
+		: `${compactionsBetween} compaction${compactionsBetween === 1 ? "" : "s"} between responses`);
+	lines.push("", "Compaction", compactionsBetween === 0 ? "  None between responses" : `  ${compactionsBetween} between responses`);
+	if (compactionsAfter > 0) lines.push(`  ${compactionsAfter} after the latest response (not compared)`);
+	return { hint: hint.join(" · "), lines };
 }
 
 /** Grouped integer, locale-independent so tests and terminals agree. */

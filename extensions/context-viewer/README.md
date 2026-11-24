@@ -1,7 +1,7 @@
 # context-viewer
 
 `/context` — browse what is in the context window, what each part costs, and what
-the model was actually told.
+Pi recorded for the last two model requests.
 
 The status bar answers "how full". This answers the three questions that follow
 it: **where did it go**, **what is the system prompt saying today**, and **which
@@ -11,10 +11,11 @@ message am I about to pay for again**.
 
 ```
 /context            token cost per category, then the tabs
-/context system     jump to a tab: system | tools | messages | raw
+/context system     jump to a tab: system | tools | messages | raw | changes
+/context changes    compare the last two recorded requests
 ```
 
-Five tabs, navigated with `Tab` / `Shift+Tab`:
+Six tabs, navigated with `Tab` / `Shift+Tab`:
 
 | Tab | What is in it |
 |---|---|
@@ -23,6 +24,22 @@ Five tabs, navigated with `Tab` / `Shift+Tab`:
 | `Tools` | Every tool declared to the model, with its parameter types and required-ness |
 | `Messages` | Every message Pi would send, including thinking blocks, tool calls, tool results and summaries |
 | `Raw` | The same facts as one JSON document per line, for copying out or diffing |
+| `Changes` | Added, removed, or edited prompt sections and tools; compaction between the two requests |
+
+### Changes
+
+Pi saves a system patch only when the prompt or tools change. This tab uses the
+last two **recorded assistant responses** on the active branch as request
+boundaries and reconstructs the loadout at each one. A same-name tool with a
+changed schema or description is marked `Changed`. Compaction is shown
+separately, including any compaction *after* the latest response that has not yet
+been used in a recorded request. With fewer than two responses or no recorded
+loadout at either boundary, there is no comparison.
+
+This is read-only and does not make a model call. It compares session records,
+not provider payloads: a forced prompt override or a per-request context rewrite
+may not have been stored. Changes to conversation messages, pending changes to
+local files or extensions, and provider cache behavior are not compared.
 
 ### Keys
 
@@ -79,6 +96,7 @@ One measured number, many guesses — and the panel says which is which.
 
 | File | What lives there |
 |---|---|
+| `changes.ts` | Reconstructs and compares historical prompt and tool state using Pi’s session replay |
 | `tokens.ts` | Cost estimation and category attribution. Pure, and compared against pi's own estimator by a test that reads pi's code in a subprocess |
 | `text.ts` | The text of every tab, the width rules that keep it in the frame, and `screenLines`/`breakLine`: text from outside arrives as rows, not paragraphs |
 | `viewer.ts` | The overlay component: keys, scrolling, search, copy |

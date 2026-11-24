@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **command-watchdog:** An opt-in extension that warns about pending Bash calls and supplies a five-minute default timeout without aborting the turn.
 
+- **context-viewer:** `/context changes` compares recorded system prompt sections and tool declarations across the last two requests and reports compaction separately.
+
 ### Fixed
 
 - **ask:** Structured options can omit `value` to return the label. Duplicate effective values are rejected before the panel opens.

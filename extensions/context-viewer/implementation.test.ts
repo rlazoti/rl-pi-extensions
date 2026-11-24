@@ -35,7 +35,7 @@ interface HostOverrides {
 function fakeContext(overrides: HostOverrides = {}) {
 	const throwOn = overrides.throwOn ?? new Set<string>();
 	const notify: string[] = [];
-	const opened: Array<{ tabs: Array<{ name: string; hint?: string; lines: string[] }>; rows: number; cols: number }> = [];
+	const opened: Array<{ tabs: Array<{ name: string; hint?: string; lines: string[] }>; screen: string }> = [];
 
 	const context = {
 		mode: overrides.mode ?? "tui",
@@ -44,6 +44,10 @@ function fakeContext(overrides: HostOverrides = {}) {
 		sessionManager: {
 			getEntries: () => [],
 			getLeafId: () => "leaf-1",
+			getBranch: () => {
+				if (throwOn.has("history")) throw new Error("branch is unreadable");
+				return [];
+			},
 		},
 		getSystemPrompt: () => {
 			if (throwOn.has("systemPrompt")) throw new Error("no prompt here");
@@ -66,11 +70,9 @@ function fakeContext(overrides: HostOverrides = {}) {
 				);
 				// Rendered once: what a viewer does wrong with a tab list should throw
 				// here, not in front of the user.
-				component.render(100);
 				opened.push({
 					tabs: [0, 1, 2, 3, 4, 5, 6].map((index) => component.getTab(index)).filter(Boolean) as Array<{ name: string; hint?: string; lines: string[] }>,
-					rows: 40,
-					cols: 100,
+					screen: component.render(100).join("\n"),
 				});
 				return Promise.resolve(undefined);
 			},
@@ -137,7 +139,7 @@ describe("the command", () => {
 		assert.ok(overlay, "no overlay was opened");
 		assert.deepEqual(
 			overlay.tabs.map((tab) => tab.name),
-			["Overview", "System", "Tools", "Messages", "Raw"],
+			["Overview", "System", "Tools", "Messages", "Raw", "Changes"],
 		);
 	});
 
@@ -146,6 +148,18 @@ describe("the command", () => {
 		assert.equal(notify.length, 1);
 		assert.match(notify[0], /1,234 tokens/);
 		assert.match(notify[0], /3 message/);
+	});
+
+	it("opens on Changes and says when a session has no earlier response", async () => {
+		const { overlay } = await run({}, "changes");
+		assert.match(overlay?.screen ?? "", /\[ Changes \]/);
+		assert.match(overlay?.screen ?? "", /needs two recorded assistant responses/);
+	});
+
+	it("uses the Changes summary in non-interactive mode when requested", async () => {
+		const { notify, overlay } = await run({ mode: "rpc" }, "changes");
+		assert.deepEqual(notify, ["No request comparison available"]);
+		assert.equal(overlay, undefined);
 	});
 
 	it("names the largest cost in the one-line fallback", async () => {
@@ -163,7 +177,7 @@ describe("the command", () => {
 });
 
 describe("tabForArgument", () => {
-	const names = ["Overview", "System", "Tools", "Messages", "Raw"];
+	const names = ["Overview", "System", "Tools", "Messages", "Raw", "Changes"];
 
 	it("accepts the tab names and a few aliases", () => {
 		assert.deepEqual(tabForArgument("", names), { index: 0, unknown: false });
@@ -174,6 +188,7 @@ describe("tabForArgument", () => {
 			["messages", 3],
 			["json", 4],
 			["  RAW  ", 4],
+			["changes", 5],
 		] as const) {
 			assert.deepEqual(tabForArgument(argument, names), { index, unknown: false }, argument);
 		}
@@ -194,10 +209,10 @@ describe("buildSnapshot", () => {
 			reserveTokens: 16384,
 		});
 		assert.match(snapshot.overview, /5,000 tokens/);
-		assert.equal(snapshot.tabs.length, 5);
+		assert.equal(snapshot.tabs.length, 6);
 		assert.deepEqual(
 			snapshot.tabs.map((tab) => tab.name),
-			["Overview", "System", "Tools", "Messages", "Raw"],
+			["Overview", "System", "Tools", "Messages", "Raw", "Changes"],
 		);
 		assert.ok(snapshot.tabs[0]!.lines.some((line) => line.includes("5,000")));
 	});
@@ -215,9 +230,9 @@ describe("buildSnapshot", () => {
 		assert.match(snapshot.tabs[0]!.lines.join("\n"), /EACCES/);
 	});
 
-	it("still renders all five tabs when the host has nothing", () => {
+	it("still renders all six tabs when the host has nothing", () => {
 		const snapshot = buildSnapshot({});
-		assert.equal(snapshot.tabs.length, 5);
+		assert.equal(snapshot.tabs.length, 6);
 		for (const tab of snapshot.tabs) assert.ok(tab.lines.length > 0, `${tab.name} is empty`);
 	});
 
@@ -303,12 +318,13 @@ describe("reading a host that fails", () => {
 			tools: "tool definitions",
 			settings: "", // a settings failure hides nothing: the line it feeds is optional
 			messages: "session",
+			history: "recorded request history",
 		};
 		for (const [which, expected] of Object.entries(failures)) {
 			// The command is the thing under test: a host that cannot answer one
 			// question still gets a rendered panel.
 			const { notify, overlay } = await run({ throwOn: new Set([which]) });
-			assert.equal(overlay?.tabs.length, 5, `${which}: the panel did not open`);
+			assert.equal(overlay?.tabs.length, 6, `${which}: the panel did not open`);
 			const text = overlay?.tabs[0]?.lines.join("\n") ?? "";
 			if (expected) assert.match(text, new RegExp(expected), `${which}: the failure is not shown`);
 			assert.equal(notify.length, 0, `${which}: a readable-enough host should not be warned at`);
@@ -316,8 +332,8 @@ describe("reading a host that fails", () => {
 	});
 
 	it("still opens a panel when nothing at all could be read", async () => {
-		const { overlay } = await run({ throwOn: new Set(Object.keys({ systemPrompt: 1, usage: 1, tools: 1, settings: 1, messages: 1 })) });
-		assert.equal(overlay?.tabs.length, 5);
+		const { overlay } = await run({ throwOn: new Set(Object.keys({ systemPrompt: 1, usage: 1, tools: 1, settings: 1, messages: 1, history: 1 })) });
+		assert.equal(overlay?.tabs.length, 6);
 		const text = overlay?.tabs[0]?.lines.join("\n") ?? "";
 		assert.match(text, /could not read the system prompt/);
 		assert.match(text, /could not read the token usage/);

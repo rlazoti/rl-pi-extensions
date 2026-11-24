@@ -25,11 +25,13 @@
 
 import type { CopyToClipboard, ViewerTab } from "./viewer.js";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { readRequestChanges, type RequestChanges } from "./changes.js";
 import { buildBudget, type ContextMessage } from "./tokens.js";
 import {
 	formatNumber,
 	formatTokens,
 	renderBudget,
+	renderChanges,
 	renderMessages,
 	renderRaw,
 	renderSystemPrompt,
@@ -80,6 +82,7 @@ export interface ContextSources {
 	systemPrompt?: string;
 	tools?: Array<{ name?: string; description?: string; parameters?: unknown; promptGuidelines?: string[] }>;
 	messages?: ContextMessage[];
+	changes?: RequestChanges;
 	usage?: { tokens: number | null; contextWindow: number; percent: number | null } | null;
 	model?: string;
 	reserveTokens?: number | null;
@@ -152,6 +155,7 @@ export function buildSnapshot(sources: ContextSources): Snapshot {
 			hint: "JSON, one document per line: system prompt, tools, usage, then every message",
 			lines: renderRaw({ systemPrompt, tools, messages, usage }),
 		},
+		{ name: "Changes", ...renderChanges(sources.changes) },
 	];
 
 	return { overview, tabs, problems };
@@ -180,6 +184,7 @@ export function tabForArgument(argument: string | undefined, tabNames: string[])
 		conversation: "messages",
 		raw: "raw",
 		json: "raw",
+		changes: "changes",
 	};
 	const arg = (argument ?? "").trim().toLowerCase();
 	if (arg === "") return { index: 0, unknown: false };
@@ -229,6 +234,12 @@ export async function readSources(ctx: ExtensionCommandContext, pi: ExtensionAPI
 	}
 
 	try {
+		sources.changes = await readRequestChanges(ctx.sessionManager.getBranch());
+	} catch (error) {
+		note("recorded request history", error);
+	}
+
+	try {
 		sources.usage = ctx.getContextUsage() ?? null;
 	} catch (error) {
 		note("the token usage", error);
@@ -263,7 +274,7 @@ export async function readSources(ctx: ExtensionCommandContext, pi: ExtensionAPI
 
 export default function contextViewerExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("context", {
-		description: "Show what fills the context window and what each part costs",
+		description: "Inspect context size, contents, and recorded request changes",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			let snapshot: Snapshot;
 			try {
@@ -275,14 +286,12 @@ export default function contextViewerExtension(pi: ExtensionAPI): void {
 				return;
 			}
 
-			// An interactive terminal gets the panel; anything else (print mode, a
-			// piped `pi -p`) gets the same numbers on one line.
+			const requested = tabForArgument(args, snapshot.tabs.map((tab) => tab.name));
 			if (ctx.mode !== "tui" || !ctx.hasUI) {
-				ctx.ui.notify(snapshot.overview, "info");
+				const selected = snapshot.tabs[requested.index];
+				ctx.ui.notify(selected?.name === "Changes" ? selected.hint ?? snapshot.overview : snapshot.overview, "info");
 				return;
 			}
-
-			const requested = tabForArgument(args, snapshot.tabs.map((tab) => tab.name));
 			if (requested.unknown) {
 				ctx.ui.notify(
 					`/context: no such tab "${args?.trim()}" — opening Overview. Tabs: ${snapshot.tabs.map((tab) => tab.name.toLowerCase()).join(", ")}`,
