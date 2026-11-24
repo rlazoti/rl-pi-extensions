@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **catchup:** An opt-in `/catchup` command that shows local commits since a Pi session's saved Git checkpoint, with overlapping files first.
+
 ### Fixed
 
 - **ask:** Structured options can omit `value` to return the label. Duplicate effective values are rejected before the panel opens.

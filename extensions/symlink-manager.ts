@@ -178,6 +178,12 @@ export function getAvailableExtensions(monorepoRoot: string): ExtensionDescripto
 			description: "Ask questions with single-select, multi-select, and custom answers",
 			path: join(monorepoRoot, "extensions", "ask"),
 		},
+		{
+			name: "catchup",
+			label: "catchup",
+			description: "Show local commits since a Pi session's Git checkpoint, with file overlaps first",
+			path: join(monorepoRoot, "extensions", "catchup"),
+		},
 	];
 }
 
