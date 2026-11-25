@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -486,6 +486,112 @@ function runIn(dir: string, command: string): void {
 const git = gitAvailable();
 const repoDirs: string[] = [];
 
+// =============================================================================
+// Here-documents
+// =============================================================================
+
+describe("here-documents", () => {
+	const RE = /\bgit\s+commit\b/;
+	const patched = (cmd: string) => injectGitTrailer(cmd, TRAILER);
+
+	it("leaves a Python script fed through a here-document alone (the Nov 25 2026 incident)", () => {
+		// The exact command that broke: a `\'` inside a single-quoted Python
+		// string flipped the shell quote tracking, and a later `git commit` inside
+		// a Python string got `--trailer` pasted into the script.
+		const cmd = readFileSync(new URL("./fixtures/python-heredoc-2026-11-25.sh", import.meta.url), "utf-8").replace(/\n$/, "");
+		assert.equal(containsUnquoted(cmd, RE), false);
+		assert.equal(patched(cmd), cmd);
+		assert.equal(splitShellCommand(cmd).join(""), cmd);
+	});
+
+	it("treats the body as data whatever the tag quoting", () => {
+		for (const open of ["<<'EOF'", '<<"EOF"', "<<EOF", "<< EOF", "<<\\EOF", "<<E'O'F"]) {
+			const cmd = `cat > notes.md ${open}\nthen git commit -qm done\nEOF`;
+			assert.equal(containsUnquoted(cmd, RE), false, open);
+			assert.equal(patched(cmd), cmd, open);
+		}
+	});
+
+	it("keeps an unbalanced quote in the body from leaking into the commands after it", () => {
+		const cmd = "cat > n.md <<'EOF'\nit's done\nEOF\ngit commit -m \"x\"";
+		assert.equal(patched(cmd), `cat > n.md <<'EOF'\nit's done\nEOF\ngit commit -m "x" --trailer "${TRAILER}"`);
+	});
+
+	it("patches a real commit after the body", () => {
+		const cmd = "cat > m.txt <<'EOF'\nsubject; with && operators\nEOF\ngit commit -F m.txt";
+		assert.equal(patched(cmd), `${cmd} --trailer "${TRAILER}"`);
+	});
+
+	it("patches the commit that reads the here-document on its opening line", () => {
+		const cmd = "git commit -F - <<'EOF'\nsubject: it's done; git commit later\nEOF";
+		assert.equal(
+			patched(cmd),
+			`git commit -F - <<'EOF' --trailer "${TRAILER}"\nsubject: it's done; git commit later\nEOF`,
+		);
+	});
+
+	it("puts the body inside the separator, never in a segment", () => {
+		assert.deepEqual(splitShellCommand("cat <<EOF\na; b\nEOF\nls"), ["cat <<EOF", "\na; b\nEOF\n", "ls"]);
+		assert.deepEqual(splitShellCommand("cat <<EOF; ls\nbody\nEOF\npwd"), ["cat <<EOF", "; ", "ls", "\nbody\nEOF\n", "pwd"]);
+	});
+
+	it("strips leading tabs from the terminator for <<-", () => {
+		const cmd = "cat <<-EOF\n\tgit commit -m x\n\tEOF\ngit status";
+		assert.equal(containsUnquoted(cmd, RE), false);
+		assert.equal(patched(cmd), cmd);
+		// Without the dash, a tab-indented tag is body, so the body runs to the end.
+		const plain = "cat <<EOF\n\tEOF\ngit commit -m x";
+		assert.equal(patched(plain), plain);
+	});
+
+	it("reads an unterminated body to the end, as bash does", () => {
+		const cmd = "cat <<EOF\nx\ngit commit -m y";
+		assert.equal(patched(cmd), cmd);
+	});
+
+	it("handles two here-documents opened on one line", () => {
+		const cmd = "cat <<A <<B\nfoo\nA\ngit commit -m inside\nB\ngit commit -m real";
+		assert.equal(
+			patched(cmd),
+			`cat <<A <<B\nfoo\nA\ngit commit -m inside\nB\ngit commit -m real --trailer "${TRAILER}"`,
+		);
+	});
+
+	it("scans the body as commands when a shell runs it", () => {
+		for (const open of ["bash <<'EOF'", "sh -s <<EOF", "/bin/bash -e <<EOF", "FOO=1 zsh <<EOF", "cat <<EOF | bash"]) {
+			const cmd = `${open}\ngit commit -m x\nEOF`;
+			assert.equal(patched(cmd), `${open}\ngit commit -m x --trailer "${TRAILER}"\nEOF`, open);
+		}
+	});
+
+	it("treats a shell with -c or a script file as reading data on stdin", () => {
+		for (const open of ["bash -c 'cat' <<EOF", "bash script.sh <<EOF"]) {
+			const cmd = `${open}\ngit commit -m x\nEOF`;
+			assert.equal(patched(cmd), cmd, open);
+		}
+	});
+
+	it("does not mistake shifts or here-strings for here-documents", () => {
+		for (const first of ["echo $((1<<2))", "((x<<=1))", "cat <<< 'x'", "cat <<<EOF"]) {
+			const cmd = `${first}\ngit commit -m y`;
+			assert.equal(patched(cmd), `${cmd} --trailer "${TRAILER}"`, first);
+		}
+	});
+
+	it("still reconstructs every command exactly", () => {
+		for (const cmd of [
+			"cat <<EOF\na\nEOF",
+			"cat <<EOF\na\nEOF\n",
+			"cat <<EOF\n",
+			"cat <<EOF",
+			"cat <<-'X' | wc -l\n\t1\n\tX\n  ls  ;  pwd",
+			"bash <<EOF\nls; pwd\nEOF\n",
+		]) {
+			assert.equal(splitShellCommand(cmd).join(""), cmd, JSON.stringify(cmd));
+		}
+	});
+});
+
 describe("real git runs the patched command", { skip: git ? false : "git is not installed" }, () => {
 	const trailerCount = (message: string) => message.split(/\n/).filter((line) => /^co-authored-by:/i.test(line)).length;
 
@@ -500,6 +606,20 @@ describe("real git runs the patched command", { skip: git ? false : "git is not 
 
 	it("records exactly one trailer", () => {
 		const { message } = commit('git commit -q -m "fix: the bug"');
+		assert.ok(message.includes(TRAILER), message);
+		assert.equal(trailerCount(message), 1);
+	});
+
+	it("keeps a here-document message intact and attributes the commit that reads it", () => {
+		const { message } = commit("cat > m.txt <<'EOF'\nsubject: it's done; run git commit -m later\nEOF\ngit commit -q -F m.txt");
+		assert.ok(message.startsWith("subject: it's done; run git commit -m later\n"), message);
+		assert.ok(message.includes(TRAILER), message);
+		assert.equal(trailerCount(message), 1);
+	});
+
+	it("attributes a commit that bash runs from a here-document", () => {
+		const { message } = commit("bash <<'EOF'\ngit commit -q -m \"from bash\"\nEOF");
+		assert.ok(message.startsWith("from bash\n"), message);
 		assert.ok(message.includes(TRAILER), message);
 		assert.equal(trailerCount(message), 1);
 	});

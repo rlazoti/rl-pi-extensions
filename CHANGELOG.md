@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **co-authored-by-ai: here-document bodies are data, not commands.** A script fed
+  through `python3 - <<'EOF'` (or any `cmd <<TAG`) is no longer read as shell. Before,
+  one `\'` inside a single-quoted Python string flipped the quote tracking, and a
+  `git commit` inside a later Python string got `--trailer` pasted into the script.
+  `splitShellCommand` and `containsUnquoted` now share one scanner that skips
+  here-document bodies (`<<`, `<<-`, quoted and escaped tags, several per line,
+  unterminated to end of input). A body that a shell runs (`bash <<EOF`,
+  `cat <<EOF | bash`) is still scanned as commands; `$((1<<2))` and `<<<` are not
+  here-documents.
+
 ## [1.13.0] - 2026-11-11
 
 ### Added

@@ -234,6 +234,15 @@ describe("tool_call patches commits", () => {
 // tool_call: the empty message it refuses to rescue
 // =============================================================================
 
+describe("tool_call leaves here-document bodies alone", () => {
+	it("does not patch a git commit that only appears inside a script fed on stdin", async () => {
+		const command = "python3 - <<'PYEOF'\n# afterwards: git add x && git commit -qm done\nPYEOF";
+		const pi = makePi();
+		assert.equal(await pi.call(command), command);
+		assert.deepEqual(pi.notes, []);
+	});
+});
+
 describe("tool_call refuses to rescue an empty message", () => {
 	it("leaves a blank -m alone, so git's own failure still happens", async () => {
 		for (const command of [

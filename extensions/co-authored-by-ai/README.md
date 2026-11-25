@@ -124,6 +124,11 @@ whatever model they actually used.
   `commit` do not match, and neither does a commit inside `$(…)` or a backtick.
   The matcher is deliberately narrow: injecting into a command it misread is
   worse than missing one.
+- **A commit inside a here-document is only seen when a shell runs the body.**
+  `bash <<EOF`, `sh -s <<EOF` and `cat <<EOF | bash` count; `ssh host <<EOF`,
+  `docker exec -i … sh <<EOF` (the shell is not the first word) and anything
+  else that runs commands from stdin are read as data, so a commit there goes
+  unattributed rather than risk patching a script.
 - **`gt` (Graphite) is not supported.** The extension this was ported from also
   patched `gt cc -m "…"` by rewriting the quoted message, because Graphite has
   no `--trailer`. That rewriting path is where the interesting bugs lived (a
@@ -156,6 +161,18 @@ message in half; and it matches the `git commit` inside
 does) and unterminated quotes, and `containsUnquoted` refuses any match that
 overlaps a quoted region.
 
+**Here-document bodies are data.** The body of `cmd <<TAG … TAG` (and `<<-`,
+`<<'TAG'`, `<<"TAG"`, `<<\TAG`) is what `cmd` reads on stdin, so it is never a
+segment and nothing in it counts as unquoted. The case that forced this: a
+Python script fed through `python3 - <<'PYEOF'` had a `\'` inside a
+single-quoted Python string. Shell quote rules read that as the end of a quote,
+the tracking flipped, and a `git commit` inside a later Python string got
+`--trailer` pasted into the script, a syntax error (Nov 25 2026, kept as
+`fixtures/python-heredoc-2026-11-25.sh`). The exception is a body that a shell
+runs as commands (`bash <<EOF`, `sh -s <<'EOF'`, `cat <<EOF | bash`): those
+lines are scanned like any other. `$((1<<2))` and `<<<` here-strings are not
+here-documents.
+
 ### Why only its own trailer stops it
 
 The guard used to be `co-authored-by:` anywhere in the command, case-insensitive,
@@ -182,32 +199,36 @@ AI trailer, and re-running the injection never stacks a second copy.
 
 ## Testing
 
-Two colocated files, 76 tests.
+Two colocated files, 92 tests.
 
-`implementation.test.ts` (55) is the machinery: the trailer contract, the
+`implementation.test.ts` (70) is the machinery: the trailer contract, the
 quote-aware splitter and matcher (including the four append-to-the-wrong-place
-regressions), `hasOurTrailer` — including the lookalike that started the
+regressions), here-document bodies (the Nov 25 2026 Python script fixture,
+every tag quoting, `<<-`, two per line, unterminated, shell-fed bodies, shifts
+and here-strings), `hasOurTrailer` — including the lookalike that started the
 incident, a human trailer, and a sentence that merely quotes the trailer —
-`hasOnlyEmptyMessageLiteral`, `messageIsOnlyTrailer`, and **nine tests that run
+`hasOnlyEmptyMessageLiteral`, `messageIsOnlyTrailer`, and **eleven tests that run
 real git** in a temp repo — the patched command string is handed to `bash`, then
 the recorded commit message is read back with `git log --format=%B`. The
 extension produces a command, so that is what gets tested, not the string it
-built. Those nine verify the trailer appears exactly once, that a message full of
+built. Those eleven verify the trailer appears exactly once, that a message full of
 `; && || |` survives intact, that three amends still leave one trailer, that a
 newline-separated cleanup after the commit still runs, that a human trailer is
 appended to, that the recorded real-world command — here-document message file,
 `git commit -F`, the agent's own `--trailer "Co-authored-by: AI"` already on it
-— now comes out with both attributions and its subject intact, that a message
+— now comes out with both attributions and its subject intact, that a
+here-document message mentioning `git commit` survives and its commit is
+attributed, that a commit `bash` runs from a here-document is attributed, that a message
 carrying this extension's own trailer is not given a second copy, and that the
 four empty-message shapes in the table above really do commit once `--trailer`
 is present — the hazard is pinned against git itself, not against this file's
 opinion of it.
 
-`hooks.test.ts` (21) drives the extension through its own registration surface
+`hooks.test.ts` (22) drives the extension through its own registration surface
 with a fake Pi, because the interesting behaviour is a sequence: patch or refuse
 at `tool_call`, report or stay silent at `tool_result`. It pins the refusal list,
 the flags that mean "unknown, do not refuse", the exact patched form of the
-command that started the incident, that only this extension's own trailer makes
+command that started the incident, a script fed on stdin left alone, that only this extension's own trailer makes
 it stand down (and that standing down means never touching git at all), the
 warning reaching both the tool result and the notification, silence when the
 message is fine, when nothing was committed, when the call was not ours, and when
